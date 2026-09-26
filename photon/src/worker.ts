@@ -148,7 +148,11 @@ export default {
 
       return env.ASSETS.fetch(request);
     } catch {
-      return failResponse();
+      if (new URL(request.url).pathname.startsWith("/api/")) return failResponse();
+      return new Response("Politik is unavailable.", {
+        status: 500,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
     }
   },
 };

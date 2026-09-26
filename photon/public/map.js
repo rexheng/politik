@@ -6,7 +6,11 @@
   } catch (err) {
     token = "";
   }
-  if (!token) return;
+  const trace = document.getElementById("trace");
+  if (!token) {
+    if (trace) trace.appendChild(stepEl({ label: "Map unavailable" }));
+    return;
+  }
   mapboxgl.accessToken = token;
 
   const map = new mapboxgl.Map({
@@ -24,7 +28,6 @@
   });
   map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "bottom-right");
 
-  const trace = document.getElementById("trace");
   const westBounds = new mapboxgl.LngLatBounds();
   const singaporeBounds = new mapboxgl.LngLatBounds();
   let placed = 0;

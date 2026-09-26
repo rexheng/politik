@@ -2,7 +2,7 @@
 
 Politik is a phone web app for a policymaker to ask what is going on.
 
-Live site: https://politik.carnelian-tea.workers.dev
+Live site: https://politik.rexheng-policy.workers.dev
 
 ## Chat
 
