@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#14110e">
+  <title>Politik — What people are saying</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,600&family=Source+Sans+3:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/tabs.css">
+  <link rel="stylesheet" href="/saying.css">
+</head>
+<body>
+  <main class="field">
+    <header class="top">
+      <p class="brand">Politik</p>
+      <nav class="tabs" aria-label="Sections">
+        <a href="/">Ask</a>
+        <a href="/map">Map</a>
+        <a href="/sources">Sources</a>
+        <a href="/saying" aria-current="page">What people are saying</a>
+        <a href="/jev">Categorisation</a>
+      </nav>
+    </header>
+    <div class="lanes">
+      <section class="lane" aria-label="Facebook group">
+        <div class="lane-head">
+          <h2>Facebook</h2>
+          <a
+            class="group"
+            id="group-url"
+            href="https://www.facebook.com/groups/saynotodatacenters/"
+            target="_blank"
+            rel="noopener noreferrer"
+          >Open</a>
+        </div>
+        <time class="clock" id="clock" datetime=""></time>
+        <p class="stage" id="stage">open</p>
+        <div class="tags" id="tags" aria-live="polite"></div>
+      </section>
+      <section class="lane" aria-label="Bluesky">
+        <div class="lane-head">
+          <h2>Bluesky</h2>
+          <a
+            class="group"
+            id="bluesky-url"
+            href="https://bsky.app/profile/datacenter.bsky.social"
+            target="_blank"
+            rel="noopener noreferrer"
+          >Open</a>
+        </div>
+        <time class="clock" id="bluesky-clock" datetime=""></time>
+        <p class="stage" id="bluesky-stage">open</p>
+        <div class="weights" id="weights" aria-live="polite">
+          <span class="weight" data-bucket="for">for <span class="count">0</span></span>
+          <span class="weight" data-bucket="against">against <span class="count">0</span></span>
+          <span class="weight" data-bucket="unsure">unsure <span class="count">0</span></span>
+        </div>
+      </section>
+    </div>
+    <a class="ask" id="ask-link" href="/" hidden>Ask</a>
+  </main>
+  <script src="/saying.js"></script>
+</body>
+</html>

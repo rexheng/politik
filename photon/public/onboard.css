@@ -1,0 +1,92 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: #f6f1e7;
+  color: #1c1915;
+  font-family: "Source Sans 3", "Segoe UI", sans-serif;
+  font-size: 1.125rem;
+  line-height: 1.5;
+}
+
+.screen {
+  width: min(100%, 40rem);
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.enter {
+  width: 100%;
+  padding: 0.95rem 1.25rem;
+  border: none;
+  border-radius: 0.65rem;
+  background: #1c1915;
+  color: #f6f1e7;
+  font: inherit;
+  font-size: 1.2rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.enter:hover {
+  background: #2e2a24;
+}
+
+.enter:focus-visible {
+  outline: 3px solid #1c1915;
+  outline-offset: 3px;
+}
+
+.signup {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  margin: 0;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-weight: 600;
+}
+
+.field input {
+  width: 100%;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid #1c1915;
+  border-radius: 0.5rem;
+  background: #fffdf8;
+  color: #1c1915;
+  font: inherit;
+  font-weight: 400;
+}
+
+.field input:focus-visible {
+  outline: 3px solid #1c1915;
+  outline-offset: 2px;
+}
+
+@media (min-width: 480px) {
+  .screen {
+    padding: 2rem 1.75rem 2.5rem;
+  }
+
+  .enter {
+    width: auto;
+    align-self: flex-start;
+    min-width: 8rem;
+  }
+}

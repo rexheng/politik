@@ -1,0 +1,216 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% 0%, #2a241c 0%, transparent 55%),
+    #14110e;
+  color: #f6f1e7;
+  font-family: "Source Sans 3", "Segoe UI", sans-serif;
+}
+
+.field {
+  width: min(100%, 76rem);
+  margin: 0 auto;
+  padding: 0 1.25rem 2.5rem;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  gap: 1.15rem;
+}
+
+.top {
+  margin: 0 -1.25rem;
+  padding: 1.25rem 1.25rem 1rem;
+  background: #f6f1e7;
+  color: #1c1915;
+  text-align: center;
+}
+
+.brand {
+  margin: 0;
+  font-family: Newsreader, Georgia, serif;
+  font-size: clamp(2rem, 8vw, 2.75rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: #1c1915;
+}
+
+.lane-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.lane-head h2 {
+  margin: 0;
+  font-family: Newsreader, Georgia, serif;
+  font-size: 1.7rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.lanes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.25rem 2rem;
+  flex: 1;
+}
+
+.lane {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.lane + .lane {
+  border-left: 1px solid rgba(232, 196, 104, 0.22);
+  padding-left: 2rem;
+}
+
+.group {
+  color: #14110e;
+  background: #e8c468;
+  text-decoration: none;
+  font-weight: 650;
+  font-size: 0.95rem;
+  padding: 0.28rem 0.6rem;
+  border-radius: 0.35rem;
+}
+
+.clock {
+  display: block;
+  font-variant-numeric: tabular-nums;
+  font-size: 1.35rem;
+  letter-spacing: 0.04em;
+  color: #f6f1e7;
+}
+
+.stage {
+  margin: 0;
+  align-self: flex-start;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid rgba(232, 196, 104, 0.55);
+  border-radius: 0.35rem;
+  font-size: 0.82rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #e8c468;
+  min-height: 1.4em;
+}
+
+.tags,
+.weights {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.65rem 0.9rem;
+  margin-top: 0.5rem;
+}
+
+.tags {
+  flex: 1;
+}
+
+.weights {
+  align-content: flex-start;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.weight {
+  padding: 0.55rem 0.4rem;
+  border: 1px solid rgba(232, 196, 104, 0.35);
+  border-radius: 0.45rem;
+  text-align: center;
+}
+
+.tag,
+.weight {
+  display: inline-block;
+  font-family: Newsreader, Georgia, serif;
+  font-weight: 600;
+  line-height: 1.15;
+  color: #c4b89a;
+  transition: color 0.4s ease, transform 0.4s ease, opacity 0.4s ease;
+}
+
+.tag {
+  opacity: 0;
+  transform: translateY(0.4rem);
+}
+
+.tag.is-in {
+  opacity: 1;
+  transform: none;
+}
+
+.tag--hot,
+.weight.is-heavy {
+  color: #e8c468;
+  text-shadow: 0 0 18px rgba(232, 196, 104, 0.35);
+}
+
+.weight {
+  font-size: 1.05rem;
+  color: rgba(246, 241, 231, 0.78);
+}
+
+.weight .count {
+  font-family: "Source Sans 3", "Segoe UI", sans-serif;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.ask {
+  align-self: flex-start;
+  margin-top: auto;
+  color: #14110e;
+  background: #e8c468;
+  text-decoration: none;
+  padding: 0.55rem 0.95rem;
+  font-weight: 650;
+  font-size: 1rem;
+}
+
+.ask[hidden] {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  .field {
+    padding: 0 1rem 2rem;
+  }
+
+  .top {
+    margin: 0 -1rem;
+    padding: 1.1rem 1rem 0.9rem;
+  }
+
+  .lanes {
+    grid-template-columns: 1fr;
+  }
+
+  .lane + .lane {
+    border-left: 0;
+    padding-left: 0;
+    border-top: 1px solid rgba(232, 196, 104, 0.22);
+    padding-top: 1.25rem;
+  }
+
+  .clock {
+    font-size: 1.15rem;
+  }
+}

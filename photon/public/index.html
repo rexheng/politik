@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#1c1915">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <title>Politik</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,600&family=Source+Sans+3:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/tabs.css">
+</head>
+<body>
+  <main class="screen">
+    <header class="header">
+      <h1 class="brand">Politik</h1>
+      <p class="tagline">Ask what is going on.</p>
+      <nav class="tabs" aria-label="Sections">
+        <a href="/map">Map</a>
+        <a href="/sources">Sources</a>
+        <a href="/saying">What people are saying</a>
+        <a href="/jev">Categorisation</a>
+      </nav>
+    </header>
+
+    <div id="voice" class="voice"></div>
+
+    <div id="transcript" class="transcript" aria-live="polite" hidden></div>
+
+    <form id="ask-form" class="ask-form" autocomplete="off">
+      <label class="ask-label" for="message">Your question</label>
+      <textarea
+        id="message"
+        name="message"
+        class="ask-input"
+        rows="3"
+        placeholder="What is going on?"
+        required
+      ></textarea>
+      <button type="submit" id="ask-btn" class="ask-btn">Ask</button>
+    </form>
+  </main>
+
+  <script>
+    if (!sessionStorage.getItem("politik-who")) location.replace("/onboard");
+  </script>
+  <script src="https://cdn.deepgram.com/widgets/latest/widget.umd.js"></script>
+  <script src="/app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+  </script>
+</body>
+</html>

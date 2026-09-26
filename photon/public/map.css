@@ -1,0 +1,125 @@
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #14110e;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  font-family: "Source Sans 3", "Segoe UI", sans-serif;
+  color: #1c1915;
+}
+
+.tabs--bar {
+  position: static;
+  flex: none;
+}
+
+.stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+#map {
+  position: absolute;
+  inset: 0;
+}
+
+.trace {
+  position: absolute;
+  z-index: 500;
+  top: 0.75rem;
+  left: 0.85rem;
+  width: min(22rem, calc(100% - 1.7rem));
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  pointer-events: none;
+}
+
+.trace a, .trace span {
+  pointer-events: auto;
+}
+
+.step {
+  position: relative;
+  margin: 0;
+  padding: 0.65rem 0.8rem 0.65rem 1.35rem;
+  background: #f6f1e7;
+  border: 1.5px solid #1c1915;
+  border-radius: 0.45rem;
+  color: #1c1915;
+  font-size: 0.95rem;
+  line-height: 1.35;
+  word-break: break-word;
+  text-decoration: none;
+}
+
+.step::before {
+  content: "";
+  position: absolute;
+  left: 0.55rem;
+  top: 0.95rem;
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: #c4a15a;
+}
+
+.step.web::before {
+  border-radius: 2px;
+  background: #1c1915;
+}
+
+.leaflet-popup-content-wrapper, .leaflet-popup-tip {
+  background: #1c1915;
+  color: #f6f1e7;
+  box-shadow: none;
+}
+
+.leaflet-popup-content {
+  margin: 0.7rem 0.85rem;
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+
+.leaflet-popup-content a,
+.mapboxgl-popup-content a {
+  color: #e8c468;
+}
+
+.mapboxgl-popup-content {
+  background: #1c1915;
+  color: #f6f1e7;
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+
+.mapboxgl-popup-anchor-bottom .mapboxgl-popup-tip,
+.mapboxgl-popup-anchor-top .mapboxgl-popup-tip,
+.mapboxgl-popup-anchor-left .mapboxgl-popup-tip,
+.mapboxgl-popup-anchor-right .mapboxgl-popup-tip {
+  border-top-color: #1c1915;
+  border-bottom-color: #1c1915;
+}
+
+.pin.university {
+  background: #e8c468;
+  border-radius: 50%;
+  box-shadow: 0 0 10px #e8c468;
+}
+
+.pin.datacentre {
+  background: #ef6b4a;
+  border-radius: 2px;
+  box-shadow: 0 0 10px #ef6b4a;
+}
+
+.pin {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #14110e;
+  cursor: pointer;
+}

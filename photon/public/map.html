@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#14110e">
+  <title>Politik</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,600&family=Source+Sans+3:wght@400;600&display=swap" rel="stylesheet">
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet">
+  <link rel="stylesheet" href="/tabs.css">
+  <link rel="stylesheet" href="/map.css">
+</head>
+<body>
+  <nav class="tabs tabs--bar" aria-label="Sections">
+    <a href="/">Ask</a>
+    <a href="/map" aria-current="page">Map</a>
+    <a href="/sources">Sources</a>
+    <a href="/saying">What people are saying</a>
+    <a href="/jev">Categorisation</a>
+  </nav>
+  <div class="stage">
+    <aside class="trace" id="trace"></aside>
+    <div id="map"></div>
+  </div>
+  <script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
+  <script src="/map.js"></script>
+</body>
+</html>

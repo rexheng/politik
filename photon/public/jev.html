@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#1c1915">
+  <title>Politik — Jev</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,600&family=Source+Sans+3:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/tabs.css">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0;
+      min-height: 100dvh;
+      background: #f6f1e7;
+      color: #1c1915;
+      font-family: "Source Sans 3", "Segoe UI", sans-serif;
+      font-size: 1.125rem;
+      line-height: 1.45;
+    }
+    .sheet {
+      width: min(100%, 68rem);
+      margin: 0 auto;
+      padding: 1.5rem 1.25rem 3rem;
+    }
+    .header { text-align: center; }
+    .brand {
+      margin: 0;
+      font-family: Newsreader, Georgia, serif;
+      font-size: clamp(2.5rem, 8vw, 3.25rem);
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+    }
+    .home { display: none; }
+    .kicker {
+      margin: 1.75rem 0 0.55rem;
+      font-variant-caps: all-small-caps;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      font-size: 0.95rem;
+    }
+    .paths, .slips { display: grid; gap: 0.75rem; }
+    .path, .slip {
+      padding: 0.85rem 0.95rem;
+      border: 1.5px solid #1c1915;
+      border-radius: 0.5rem;
+      background: #fffdf8;
+    }
+    h2, h3 {
+      margin: 0;
+      font-family: Newsreader, Georgia, serif;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+    h2 { font-size: 1.45rem; }
+    h3 { font-size: 1.15rem; font-family: "Source Sans 3", sans-serif; }
+    .where, .kind {
+      margin: 0.15rem 0 0.55rem;
+      font-size: 0.95rem;
+      opacity: 0.7;
+    }
+    ol, ul { margin: 0; padding: 0; list-style: none; }
+    li + li { margin-top: 0.3rem; }
+    .monitor {
+      margin: 0;
+      padding: 0.85rem 1rem;
+      background: #efe6d4;
+      border-left: 3px solid #c4a15a;
+      font-family: Newsreader, Georgia, serif;
+      font-size: 1.2rem;
+      font-weight: 500;
+      line-height: 1.35;
+    }
+    .weights {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+    }
+    .weight {
+      padding: 0.5rem 0.35rem;
+      text-align: center;
+      background: #1c1915;
+      color: #f6f1e7;
+      border-radius: 0.45rem;
+    }
+    .weight b {
+      display: block;
+      font-family: Newsreader, Georgia, serif;
+      font-size: 1.3rem;
+      font-weight: 600;
+    }
+    .weight span { font-size: 0.85rem; }
+    .bench { display: flex; flex-direction: column; gap: 0.7rem; }
+    .ask-input {
+      width: 100%;
+      padding: 0.85rem 1rem;
+      border: 2px solid #1c1915;
+      border-radius: 0.65rem;
+      background: #fffdf8;
+      color: #1c1915;
+      font: inherit;
+      resize: vertical;
+      min-height: 5.5rem;
+    }
+    .ask-input:focus { outline: 3px solid #1c1915; outline-offset: 2px; }
+    .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+    .chip, .ask-btn {
+      border-radius: 0.45rem;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .chip {
+      padding: 0.4rem 0.75rem;
+      border: 1.5px solid #1c1915;
+      background: transparent;
+      color: #1c1915;
+    }
+    .chip[aria-pressed="true"], .chip:hover, .ask-btn { background: #1c1915; color: #f6f1e7; }
+    .ask-btn {
+      margin-left: auto;
+      padding: 0.65rem 1.1rem;
+      border: none;
+      border-radius: 0.65rem;
+    }
+    .chip:focus-visible, .ask-btn:focus-visible, .home:focus-visible {
+      outline: 3px solid #1c1915;
+      outline-offset: 3px;
+    }
+    .audit {
+      margin-top: 0.75rem;
+      padding: 0.55rem 0.7rem;
+      background: #efe6d4;
+      border-left: 3px solid #c4a15a;
+    }
+    .audit[hidden] { display: none; }
+    .audit p { margin: 0.12rem 0; font-size: 1rem; }
+    .k {
+      font-variant-caps: all-small-caps;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      margin-right: 0.45rem;
+    }
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+    }
+    @media (min-width: 800px) {
+      .paths { grid-template-columns: 1fr 1fr; }
+      .slips { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    @media (max-width: 520px) {
+      .weights { grid-template-columns: 1fr 1fr; }
+      .ask-btn { margin-left: 0; width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="sheet">
+    <header class="header">
+      <h1 class="brand">Politik</h1>
+      <nav class="tabs" aria-label="Sections">
+        <a href="/">Ask</a>
+        <a href="/map">Map</a>
+        <a href="/sources">Sources</a>
+        <a href="/saying">What people are saying</a>
+        <a href="/jev" aria-current="page">Categorisation</a>
+      </nav>
+    </header>
+
+    <div class="paths">
+      <article class="path">
+        <h2>Ask</h2>
+        <p class="where">/api/ask</p>
+        <ol>
+          <li>Greeting skips Jev.</li>
+          <li>Question keeps the desk.</li>
+          <li>Fetched rows keep who and tier.</li>
+          <li>OpenAI writes the line.</li>
+        </ol>
+      </article>
+      <article class="path">
+        <h2>Saying</h2>
+        <p class="where">/api/saying</p>
+        <ol>
+          <li>local-worry, or a data center.</li>
+          <li>OpenAlex: “data center”.</li>
+          <li>Jev on every row.</li>
+          <li>Sort by weight.</li>
+        </ol>
+      </article>
+    </div>
+
+    <p class="kicker">Significance is judged against</p>
+    <blockquote class="monitor">Among California communities where a data center is proposed or operating, how many disputes over water, power, noise, or jobs show up in a season?</blockquote>
+
+    <p class="kicker">One call, three answers</p>
+    <div class="slips">
+      <article class="slip">
+        <h3>who</h3>
+        <p class="kind">choice</p>
+        <ul>
+          <li>residents</li>
+          <li>workers</li>
+          <li>water and power users</li>
+          <li>a company</li>
+          <li>lawmakers</li>
+          <li>no one named</li>
+        </ul>
+      </article>
+      <article class="slip">
+        <h3>significance</h3>
+        <p class="kind">score, rounded</p>
+        <ul>
+          <li>0 abstain</li>
+          <li>1 low</li>
+          <li>2 medium</li>
+          <li>3 high</li>
+        </ul>
+      </article>
+      <article class="slip">
+        <h3>desk</h3>
+        <p class="kind">choice</p>
+        <ul>
+          <li>bill-stuck</li>
+          <li>local-worry</li>
+          <li>lab-money</li>
+          <li>research</li>
+          <li>speech</li>
+          <li>other</li>
+        </ul>
+      </article>
+    </div>
+
+    <div class="weights" aria-label="Tier weights">
+      <div class="weight"><b>1</b><span>high</span></div>
+      <div class="weight"><b>0.62</b><span>medium</span></div>
+      <div class="weight"><b>0.28</b><span>low</span></div>
+      <div class="weight"><b>0.08</b><span>abstain</span></div>
+    </div>
+
+    <p class="kicker">No key: word rules</p>
+    <form class="bench" id="bench">
+      <label class="sr-only" for="line">Record</label>
+      <textarea id="line" class="ask-input" rows="3">Town hall clash over proposed data center. Residents in a Midwestern town are split over a large data center plan. Some want the jobs and tax base; others worry about water use and noise.</textarea>
+      <div class="row">
+        <button type="button" class="chip" aria-pressed="true">Town hall</button>
+        <button type="button" class="chip">California count</button>
+        <button type="button" class="chip">Policy question</button>
+        <button type="button" class="chip">Greeting</button>
+        <button type="submit" class="ask-btn">File it</button>
+      </div>
+    </form>
+    <div class="audit" id="out" hidden></div>
+  </main>
+  <script>
+    const WEIGHT = { high: 1, medium: 0.62, low: 0.28, abstain: 0.08 };
+    const POLICY = /\b(?:bills?|votes?|voting|laws?|statutes?|legislation|senate|house|congress|committees?|filibusters?|hearings?|speeches|speech|transcripts?|data\s*cent(?:er|re)s?|datacent(?:er|re)s?|towns?|cities|city|counties|county|districts?|neighborhoods?|communities|community|places?|california|water|noise|grids?|power|sources?|papers?|studies|study|journals?|research|funding|funds|funded|labs?|startups?|investments?|investors?|chips?|transparency|policies|policy|regulations?|ai|saying|briefings?|updates?|happening|watch)\b|\b(?:sb|ab|hb|hr)\s*\d+\b|\bgoing on\b|\bcatch me up\b|\bbrief me\b|\bwhat(?:'s| is) new\b|\bpeople are saying\b|\bwhat to watch\b/;
+    const SAMPLES = {
+      "Town hall": ["record", "Town hall clash over proposed data center. Residents in a Midwestern town are split over a large data center plan. Some want the jobs and tax base; others worry about water use and noise."],
+      "California count": ["record", "California data center water disputes. The state water board registry lists 14 official counts of permit fights over power and noise."],
+      "Policy question": ["question", "What is going on with data centers and water in California?"],
+      Greeting: ["question", "Hello"],
+    };
+
+    function wantsPolicy(message) {
+      const text = message.toLowerCase().replace(/[\u2019']/g, "'").replace(/[^a-z0-9'\s]/g, " ").replace(/\s+/g, " ").trim();
+      return Boolean(text) && POLICY.test(text);
+    }
+    function deskOf(text) {
+      const lower = text.toLowerCase();
+      if (/\b(bill|vote|filibuster|committee|statute)\b/.test(lower)) return "bill-stuck";
+      if (/\b(data\s*center|town|district|neighborhood|water|noise|power)\b/.test(lower)) return "local-worry";
+      if (/\b(funding|lab|startup|investment)\b/.test(lower)) return "lab-money";
+      if (/\b(paper|study|journal)\b/.test(lower)) return "research";
+      if (/\b(speech|hearing|transcript)\b/.test(lower)) return "speech";
+      return "other";
+    }
+    function inScope(text) {
+      const lower = text.toLowerCase();
+      return /\bcalifornia\b/.test(lower) && /data[\s-]*centers?/.test(lower) && /\b(water|power|grid|noise|jobs|dispute|permit)\b/.test(lower);
+    }
+    function tierOf(text) {
+      if (!inScope(text)) return "abstain";
+      const lower = text.toLowerCase();
+      if (/\b(registry|transparency report|official count|statute)\b/.test(lower)) return "high";
+      if (/\b\d+\b/.test(lower)) return "medium";
+      return "low";
+    }
+    function whoOf(text) {
+      const lower = text.toLowerCase();
+      if (/\b(resident|neighbor|community|town)\b/.test(lower)) return "residents";
+      if (/\b(worker|job)\b/.test(lower)) return "workers";
+      if (/\b(water|power|grid|ratepayer)\b/.test(lower)) return "water and power users";
+      if (/\b(bill|vote|legislature|board|commission)\b/.test(lower)) return "lawmakers";
+      if (/\b(company|lab|startup|developer)\b/.test(lower)) return "a company";
+      return "no one named";
+    }
+    function row(k, v) {
+      return `<p><span class="k">${k}</span>${v}</p>`;
+    }
+    function fileIt(kind, text) {
+      const out = document.getElementById("out");
+      const trimmed = text.trim();
+      out.hidden = false;
+      if (kind === "question" && !wantsPolicy(trimmed)) {
+        out.innerHTML = row("jev", "skipped") + row("reply", "What do you want to know?");
+        return;
+      }
+      const who = whoOf(trimmed);
+      const tier = tierOf(trimmed);
+      const desk = deskOf(trimmed);
+      const weight = WEIGHT[tier];
+      const use = kind === "question"
+        ? `desk ${desk}`
+        : `${desk} · ${who} · ${tier}`;
+      out.innerHTML = [
+        row("who", who),
+        row("tier", `${tier} ${weight}`),
+        row("desk", desk),
+        row("ask", use),
+        row("saying", kind === "question" ? "rows only" : `sort ${weight}`),
+      ].join("");
+    }
+
+    const form = document.getElementById("bench");
+    const area = document.getElementById("line");
+    let kind = "record";
+
+    document.querySelectorAll(".chip").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const sample = SAMPLES[btn.textContent.trim()];
+        kind = sample[0];
+        area.value = sample[1];
+        document.querySelectorAll(".chip").forEach((el) => el.setAttribute("aria-pressed", el === btn ? "true" : "false"));
+        fileIt(kind, area.value);
+      });
+    });
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const text = area.value.trim();
+      const pressed = document.querySelector('.chip[aria-pressed="true"]');
+      const sample = pressed && SAMPLES[pressed.textContent.trim()];
+      if (sample && text === sample[1]) kind = sample[0];
+      else kind = text.length < 180 && (text.endsWith("?") || /^(what|how|who|why|is|are|hello|hi)\b/i.test(text)) ? "question" : "record";
+      fileIt(kind, text);
+    });
+    fileIt(kind, area.value);
+  </script>
+</body>
+</html>

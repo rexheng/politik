@@ -1,0 +1,43 @@
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.45rem;
+  margin: 0.85rem 0 0;
+}
+
+.tabs a {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.42rem 0.75rem;
+  border: 1.5px solid #1c1915;
+  border-radius: 0.45rem;
+  background: transparent;
+  color: #1c1915;
+  font-weight: 600;
+  font-size: 0.98rem;
+  line-height: 1.2;
+  text-decoration: none;
+}
+
+.tabs a[aria-current="page"] {
+  background: #1c1915;
+  color: #f6f1e7;
+}
+
+.tabs a:focus-visible {
+  outline: 3px solid #1c1915;
+  outline-offset: 3px;
+}
+
+.tabs--bar {
+  position: absolute;
+  z-index: 500;
+  top: 0;
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 0.55rem 0.75rem;
+  background: #f6f1e7;
+  border-bottom: 1.5px solid #1c1915;
+}

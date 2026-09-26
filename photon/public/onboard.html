@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#1c1915">
+  <title>Politik</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,600&family=Source+Sans+3:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/onboard.css">
+</head>
+<body>
+  <main class="screen">
+    <form class="signup" id="signup" autocomplete="on">
+      <label class="field">
+        <span>Name</span>
+        <input id="name" name="name" type="text" required autocomplete="name" placeholder="Your name">
+      </label>
+      <label class="field">
+        <span>Region</span>
+        <input id="region" name="region" type="text" autocomplete="address-level1" placeholder="City or region">
+      </label>
+      <label class="field">
+        <span>Role</span>
+        <input id="role" name="role" type="text" autocomplete="organization-title" placeholder="What you do">
+      </label>
+      <button type="submit" class="enter" id="enter">Enter</button>
+    </form>
+  </main>
+  <script src="/onboard.js"></script>
+</body>
+</html>

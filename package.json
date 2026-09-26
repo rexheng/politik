@@ -1,8 +1,10 @@
 {
-  "name": "jevhack",
+  "name": "politik",
   "private": true,
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   },
   "type": "module",
   "scripts": {
@@ -18,6 +20,7 @@
   "devDependencies": {
     "@types/node": "^26.6.3",
     "tsx": "^4.23.15",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "wrangler": "4.139.0"
   }
 }

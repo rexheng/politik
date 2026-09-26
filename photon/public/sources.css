@@ -1,0 +1,138 @@
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: #f6f1e7;
+  color: #1c1915;
+  font-family: "Source Sans 3", "Segoe UI", sans-serif;
+  font-size: 1.0625rem;
+  line-height: 1.45;
+}
+
+main {
+  width: min(100% - 2rem, 52rem);
+  margin: 0 auto;
+  padding: 1.35rem 0 3rem;
+}
+
+.brand {
+  margin: 0;
+  text-align: center;
+  font-family: Newsreader, Georgia, serif;
+  font-size: clamp(2.2rem, 8vw, 2.75rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+h2 {
+  margin: 1.6rem 0 0.65rem;
+  font-family: Newsreader, Georgia, serif;
+  font-size: 1.45rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.grid,
+#blocked,
+#latest {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.grid {
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+}
+
+.card,
+.doc {
+  background: #fffdf8;
+  border: 1.5px solid #1c1915;
+  border-radius: 0.5rem;
+  padding: 0.9rem 1rem;
+}
+
+.card.blocked {
+  background: #efe6d4;
+  border-left: 3px solid #c4a15a;
+}
+
+.name,
+.doc h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  line-height: 1.3;
+  font-weight: 600;
+}
+
+.doc h3 { margin-bottom: 0.55rem; }
+
+.count {
+  margin: 0.35rem 0 0;
+  font-family: Newsreader, Georgia, serif;
+  font-size: 2rem;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.count span {
+  font-family: "Source Sans 3", sans-serif;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.meta {
+  margin: 0.28rem 0 0;
+  font-size: 0.92rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.k {
+  font-variant-caps: all-small-caps;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  margin-right: 0.4rem;
+}
+
+.chips {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  margin: 0.45rem 0 0.1rem;
+}
+
+.doc .chips {
+  margin-top: 0;
+  margin-bottom: 0.55rem;
+}
+
+.chip,
+.badge {
+  border-radius: 0.35rem;
+  padding: 0.12rem 0.45rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.chip {
+  border: 1.5px solid #1c1915;
+  background: #f6f1e7;
+}
+
+.badge {
+  border: 1.5px solid #1c1915;
+  background: #1c1915;
+  color: #f6f1e7;
+}
+
+a { color: #1c1915; }
+
+.doc h3 a,
+.meta a {
+  text-underline-offset: 0.12em;
+}
