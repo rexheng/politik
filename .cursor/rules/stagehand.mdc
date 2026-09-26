@@ -1,0 +1,29 @@
+---
+description: Stagehand v4 browser automation patterns for this project
+globs: scripts/**/*.ts
+alwaysApply: false
+---
+
+# Stagehand v4
+
+This project uses Stagehand v4 (`@browserbasehq/stagehand`) with Browserbase. There is no `agent` API. Compose `observe`, `act`, and `extract`.
+
+Stagehand does not read environment variables. Pass `BROWSERBASE_API_KEY` into `browserbase.launch()` yourself.
+
+```typescript
+import { browserbase, Stagehand } from "@browserbasehq/stagehand";
+import { z } from "zod/v4";
+
+const browser = await browserbase.launch({
+  apiKey: process.env.BROWSERBASE_API_KEY,
+});
+const stagehand = await Stagehand.create({ browser });
+const [page] = await browser.context.pages();
+```
+
+- Keep Zod on 4.4.x and import schemas from `zod/v4`.
+- `act` instructions are atomic. Use `observe`, then pass the returned action to `act` when you want a replay with no extra inference.
+- `extract` always takes an instruction and a schema. Read the value from `result.data`.
+- Pass secrets through `variables` so they are substituted locally.
+- Close Stagehand, then close the browser, both in `finally`.
+- With no model configured, Browserbase Model Gateway selects one. A local browser cannot use the Model Gateway.

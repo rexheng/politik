@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "gmi": {
+      "url": "https://mcp.gmicloud.ai/mcp"
+    },
+    "stagehand-docs": {
+      "url": "https://docs.stagehand.dev/mcp"
+    }
+  }
+}

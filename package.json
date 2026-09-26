@@ -1,0 +1,23 @@
+{
+  "name": "jevhack",
+  "private": true,
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  },
+  "type": "module",
+  "scripts": {
+    "check:jev": "tsx scripts/check-jev.ts",
+    "check:stagehand": "tsx scripts/check-stagehand.ts"
+  },
+  "dependencies": {
+    "@browserbasehq/stagehand": "^4.1.0",
+    "@typesafe-ai/sdk": "^0.6.0",
+    "dotenv": "^18.0.4",
+    "zod": "~4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
