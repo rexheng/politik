@@ -1,13 +1,17 @@
-import type { Category, SourceItem, SourceName, TaggedItem } from "./contracts.ts";
+import type { Category, SourceName, TaggedItem } from "./contracts.ts";
 import { categorise } from "./categoriser.ts";
-import { loadBriefings } from "./briefings.ts";
-import { fetchOpenAlex } from "./sources/openalex.ts";
 import type { Env } from "./ask.ts";
+import { searchPublicBluesky, type PublicBskyPost } from "./sources/bsky-search.ts";
 
-export const GROUP_URL =
-  "https://www.facebook.com/groups/saynotodatacenters/";
+export const GROUP_URL = "https://www.facebook.com/groups/saynotodatacenters/";
 
 export const BLUESKY_URL = "https://bsky.app/profile/datacenter.bsky.social";
+
+/** Last Browserbase read of the group. The page was a login wall and returned no posts. */
+export const FACEBOOK_READ_AT = "2026-09-26T21:56:10.387Z";
+
+export const FACEBOOK_NOTE =
+  "No public posts. The group reader returned none, and the mobile page redirects to Facebook login.";
 
 export type CommentSentiment = "for" | "against" | "unsure";
 
@@ -21,9 +25,12 @@ export interface SayingItem {
   plain: string;
   url?: string;
   happenedAt?: string;
+  fetchedAt?: string;
+  author?: string;
   source: string;
   category: Category;
   tags: Array<{ text: string; significance: number }>;
+  sentiment?: CommentSentiment;
 }
 
 export interface SayingPayload {
@@ -31,68 +38,65 @@ export interface SayingPayload {
   blueskyUrl: string;
   scannedAt: string;
   items: SayingItem[];
+  facebook: SayingItem[];
+  bluesky: SayingItem[];
   comments: SayingComment[];
+  facebookNote?: string;
+  facebookReadAt?: string;
 }
 
-function isDataCenterOrLocal(item: TaggedItem): boolean {
-  if (item.category === "local-worry") return true;
-  if (item.tags.some((tag) => /data[\s-]?center/i.test(tag) || tag === "data-center")) {
-    return true;
+async function tagPost(
+  row: PublicBskyPost,
+  source: SourceName,
+  fetchedAt: string,
+  apiKey?: string,
+): Promise<SayingItem> {
+  let category: Category = "other";
+  let tags: SayingItem["tags"] = [{ text: "other", significance: 0.2 }];
+  try {
+    const judged = await categorise(`${row.title}. ${row.plain}`, apiKey, source);
+    category = judged.category;
+    tags = [...judged.tags].sort((a, b) => b.significance - a.significance);
+  } catch {
+    /* keep fallbacks */
   }
-  return /data\s*center/i.test(`${item.title} ${item.plain}`);
-}
 
-function topSignificance(item: SayingItem): number {
-  return item.tags[0]?.significance ?? 0;
+  const out: SayingItem = {
+    title: row.title,
+    plain: row.plain,
+    url: row.url,
+    source,
+    category,
+    tags,
+    fetchedAt,
+    sentiment: row.sentiment,
+    author: row.author,
+  };
+  if (row.happenedAt) out.happenedAt = row.happenedAt;
+  return out;
 }
 
 export async function buildSaying(env: Env): Promise<SayingPayload> {
-  const briefings = loadBriefings().filter(isDataCenterOrLocal);
-  let papers: SourceItem[] = [];
-  try {
-    papers = await fetchOpenAlex("data center");
-  } catch {
-    papers = [];
-  }
+  const bluesky = await searchPublicBluesky();
+  const blueskyItems = await Promise.all(
+    bluesky.posts.map((post) => tagPost(post, "bluesky", bluesky.fetchedAt, env.TYPESAFE_API_KEY)),
+  );
 
-  const rows: SourceItem[] = [...briefings, ...papers];
-  const items: SayingItem[] = [];
-
-  for (const row of rows) {
-    let category: Category = "other";
-    let tags: SayingItem["tags"] = [{ text: "other", significance: 0.2 }];
-    try {
-      const judged = await categorise(
-        `${row.title}. ${row.plain}`,
-        env.TYPESAFE_API_KEY,
-        row.source,
-      );
-      category = judged.category;
-      tags = [...judged.tags].sort((a, b) => b.significance - a.significance);
-    } catch {
-      /* keep fallbacks */
-    }
-
-    const out: SayingItem = {
-      title: row.title,
-      plain: row.plain,
-      source: row.source,
-      category,
-      tags,
-    };
-    if (row.url) out.url = row.url;
-    if (row.happenedAt) out.happenedAt = row.happenedAt;
-    items.push(out);
-  }
-
-  items.sort((a, b) => topSignificance(b) - topSignificance(a));
+  const comments: SayingComment[] = blueskyItems.map((item) => ({
+    text: item.plain,
+    sentiment: item.sentiment ?? "unsure",
+  }));
 
   return {
     groupUrl: GROUP_URL,
     blueskyUrl: BLUESKY_URL,
-    scannedAt: new Date().toISOString(),
-    items,
-    comments: [],
+    scannedAt: bluesky.fetchedAt,
+    items: blueskyItems,
+    facebook: [],
+    bluesky: blueskyItems,
+    comments,
+    facebookNote: FACEBOOK_NOTE,
+    facebookReadAt: FACEBOOK_READ_AT,
   };
 }
 

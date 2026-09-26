@@ -1,4 +1,4 @@
-const CACHE_NAME = "politik-shell-v18";
+const CACHE_NAME = "politik-shell-v23";
 
 const SHELL_ASSETS = [
   "/",
@@ -32,13 +32,20 @@ self.addEventListener("install", (event) => {
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(
+    (async () => {
+      const keys = await caches.keys();
+      await Promise.all(
         keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)),
-      ),
-    ),
+      );
+      await self.clients.claim();
+      const windows = await self.clients.matchAll({ type: "window" });
+      await Promise.all(
+        windows
+          .filter((client) => new URL(client.url).pathname === "/map")
+          .map((client) => client.navigate(client.url)),
+      );
+    })(),
   );
-  self.clients.claim();
 });
 
 self.addEventListener("fetch", (event) => {
@@ -51,7 +58,7 @@ self.addEventListener("fetch", (event) => {
   }
 
   const url = new URL(request.url);
-  if (url.pathname === "/api/voice/listen") {
+  if (url.pathname === "/api/voice/listen" || url.pathname === "/api/map-token") {
     return;
   }
 
@@ -60,10 +67,19 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  if (isMapAsset(url.pathname)) {
+    event.respondWith(networkFirst(request));
+    return;
+  }
+
   if (isShellAsset(url.pathname)) {
     event.respondWith(cacheFirst(request));
   }
 });
+
+function isMapAsset(pathname) {
+  return pathname === "/map" || pathname === "/map.js" || pathname === "/map.css";
+}
 
 function isShellAsset(pathname) {
   return SHELL_ASSETS.includes(pathname);

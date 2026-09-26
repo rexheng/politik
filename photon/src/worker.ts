@@ -9,10 +9,12 @@ export type { Env };
 
 const FAIL_REPLY = "I could not check that just now. Try again in a minute.";
 
-function json(data: unknown, status = 200): Response {
+function json(data: unknown, status = 200, cache?: string): Response {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (cache) headers["cache-control"] = cache;
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json" },
+    headers,
   });
 }
 
@@ -31,6 +33,8 @@ async function handleAsk(request: Request, env: Env): Promise<Response> {
       message?: unknown;
       audioUrl?: unknown;
       who?: unknown;
+      knowledge?: unknown;
+      history?: unknown;
     };
     const message = typeof body.message === "string" ? body.message.trim() : "";
     if (!message) return json({ error: "Ask a question." }, 400);
@@ -38,7 +42,7 @@ async function handleAsk(request: Request, env: Env): Promise<Response> {
       typeof body.audioUrl === "string" && body.audioUrl.trim()
         ? body.audioUrl.trim()
         : undefined;
-    return json(await askShared(message, env, audioUrl, body.knowledge, body.who));
+    return json(await askShared(message, env, audioUrl, body.knowledge, body.who, body.history));
   } catch {
     return failResponse();
   }
@@ -46,13 +50,15 @@ async function handleAsk(request: Request, env: Env): Promise<Response> {
 
 async function handleSaying(env: Env): Promise<Response> {
   try {
-    return json(await buildSaying(env));
+    return json(await buildSaying(env), 200, "no-store");
   } catch {
     return json({
       groupUrl: GROUP_URL,
       blueskyUrl: BLUESKY_URL,
       scannedAt: new Date().toISOString(),
       items: [],
+      facebook: [],
+      bluesky: [],
       comments: [],
     });
   }
@@ -87,7 +93,7 @@ export default {
         const key = env.DEEPGRAM_API_KEY?.trim();
         if (!key) return json({ error: "Voice is unavailable." }, 503);
         try {
-          return await proxyAgent(request, key);
+          return await proxyAgent(request, key, env);
         } catch {
           return new Response("Voice is unavailable.", { status: 502 });
         }
@@ -119,9 +125,20 @@ export default {
         return json(await loadCatalog());
       }
 
+      if (url.pathname === "/api/map-token" && request.method === "GET") {
+        const token = env.MAPBOX_ACCESS_TOKEN?.trim();
+        if (!token) return new Response("Map is unavailable.", { status: 404 });
+        return new Response(token, {
+          headers: {
+            "content-type": "text/plain; charset=utf-8",
+            "cache-control": "no-store",
+          },
+        });
+      }
+
       if (url.pathname === "/api/map" && request.method === "GET") {
         const query = url.searchParams.get("q")?.trim() || "data center";
-        return json(await loadMap(query));
+        return json(await loadMap(query), 200, "no-store");
       }
 
       if (url.pathname === "/telegram" && request.method === "POST") {

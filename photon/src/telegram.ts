@@ -30,8 +30,9 @@ export async function handleTelegram(request: Request, env: Env): Promise<Respon
   try {
     const result = await ask(text, env);
     const lines = [result.reply];
-    for (const item of result.items.slice(0, 2)) {
-      lines.push(item.url ? `${item.title}\n${item.url}` : item.title);
+    for (const item of result.items.slice(0, 5)) {
+      const title = item.placeNote ? `${item.placeNote}: ${item.title}` : item.title;
+      lines.push(item.url ? `${title}\n${item.url}` : title);
     }
     await sendMessage(token, chatId, lines.join("\n\n"));
   } catch {

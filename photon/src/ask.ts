@@ -1,6 +1,7 @@
 import type {
   AskResponse,
   Category,
+  ChatTurn,
   SourceItem,
   SourceName,
   TaggedItem,
@@ -8,7 +9,7 @@ import type {
 import { categorise } from "./categoriser.ts";
 import { answer, wantsPolicy } from "./orchestrate.ts";
 import { loadBriefings } from "./briefings.ts";
-import { knownJurisdiction } from "./place.ts";
+import { catalogItems, siteItems, topicQuestion } from "./select.ts";
 import { fetchOpenAlex } from "./sources/openalex.ts";
 import { transcribeSpeech } from "./sources/elevenlabs.ts";
 
@@ -19,6 +20,7 @@ export interface Env {
   ELEVENLABS_API_KEY?: string;
   TELEGRAM_BOT_TOKEN?: string;
   DEEPGRAM_API_KEY?: string;
+  MAPBOX_ACCESS_TOKEN?: string;
 }
 
 const CATEGORIES = new Set<string>([
@@ -36,67 +38,56 @@ export async function ask(
   audioUrl?: string,
   knowledge?: unknown,
   _who?: unknown,
+  history?: unknown,
 ): Promise<AskResponse> {
-  if (!wantsPolicy(message)) {
-    return {
-      reply: await answer({ message, category: "other", items: [] }),
-      category: "other",
-      items: [],
-    };
+  const turns = normalizeHistory(history);
+  if (!wantsPolicy(message, turns)) {
+    return answer({ message, items: [], history: turns });
   }
 
-  const { category } = await categorise(message, env.TYPESAFE_API_KEY);
   const known = normalizeKnowledge(knowledge);
-
-  let pool: TaggedItem[];
-  if (known.length > 0) {
-    pool = known;
-  } else {
-    const [openalexItems, speechItems] = await Promise.all([
-      fetchOpenAlex(message),
-      audioUrl
-        ? transcribeSpeech({
-            apiKey: env.ELEVENLABS_API_KEY,
-            audioUrl,
-          })
-        : Promise.resolve([] as SourceItem[]),
-    ]);
-    const taggedSources = await Promise.all(
-      [...openalexItems, ...speechItems].map((item) =>
-        tagItem(item, env.TYPESAFE_API_KEY),
-      ),
-    );
-    pool = [...loadBriefings(), ...taggedSources];
-  }
-
-  const matching = preferMatching(category, pool);
-  const reply = await answer({
+  const topic = topicQuestion(message, turns);
+  const [openalexItems, speechItems] = await Promise.all([
+    fetchOpenAlex(topic.slice(0, 300)),
+    audioUrl
+      ? transcribeSpeech({
+          apiKey: env.ELEVENLABS_API_KEY,
+          audioUrl,
+        })
+      : Promise.resolve([] as SourceItem[]),
+  ]);
+  const taggedSources = await Promise.all(
+    [...openalexItems, ...speechItems].map((item) => tagItem(item, env.TYPESAFE_API_KEY)),
+  );
+  const pool = dedupe([
+    ...loadBriefings(),
+    ...catalogItems(),
+    ...siteItems(),
+    ...known,
+    ...taggedSources,
+  ]);
+  return answer({
     message,
-    category,
-    items: matching,
-    openaiKey: env.OPENAI_API_KEY,
+    items: pool,
+    history: turns,
+    typesafeKey: env.TYPESAFE_API_KEY,
   });
-
-  return {
-    reply,
-    category,
-    items: toResponseItems(matching),
-  };
 }
 
 const inflightAsks = new Map<string, Promise<AskResponse>>();
 
-function askKey(message: string, knowledge: unknown): string {
+function askKey(message: string, knowledge: unknown, history: unknown): string {
   const text = message.trim().toLowerCase().replace(/\s+/g, " ");
   let notes = "";
-  if (knowledge !== undefined) {
-    try {
-      notes = JSON.stringify(knowledge);
-    } catch {
-      notes = "";
-    }
+  let prior = "";
+  try {
+    if (knowledge !== undefined) notes = JSON.stringify(knowledge);
+    if (history !== undefined) prior = JSON.stringify(history);
+  } catch {
+    notes = "";
+    prior = "";
   }
-  return `${text}\n${notes}`;
+  return `${text}\n${notes}\n${prior}`;
 }
 
 export function askShared(
@@ -105,15 +96,50 @@ export function askShared(
   audioUrl?: string,
   knowledge?: unknown,
   who?: unknown,
+  history?: unknown,
 ): Promise<AskResponse> {
-  const key = askKey(message, knowledge);
+  const key = askKey(message, knowledge, history);
   const existing = inflightAsks.get(key);
   if (existing) return existing;
-  const work = ask(message, env, audioUrl, knowledge, who).finally(() => {
+  const work = ask(message, env, audioUrl, knowledge, who, history).finally(() => {
     if (inflightAsks.get(key) === work) inflightAsks.delete(key);
   });
   inflightAsks.set(key, work);
   return work;
+}
+
+function dedupe(items: TaggedItem[]): TaggedItem[] {
+  const seen = new Set<string>();
+  const out: TaggedItem[] = [];
+  for (const item of items) {
+    const key = item.title.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
+function normalizeHistory(raw: unknown): ChatTurn[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ChatTurn[] = [];
+  for (const row of raw) {
+    if (!row || typeof row !== "object") continue;
+    const record = row as Record<string, unknown>;
+    const role = record.role === "assistant" || record.role === "user" ? record.role : null;
+    if (!role || typeof record.text !== "string") continue;
+    const text = record.text.trim().slice(0, 2000);
+    if (!text) continue;
+    const titles = Array.isArray(record.titles)
+      ? record.titles
+          .filter((title): title is string => typeof title === "string" && title.trim() !== "")
+          .slice(0, 8)
+      : undefined;
+    const turn: ChatTurn = { role, text };
+    if (titles && titles.length > 0) turn.titles = titles;
+    out.push(turn);
+  }
+  return out.slice(-8);
 }
 
 function normalizeKnowledge(raw: unknown): TaggedItem[] {
@@ -172,43 +198,4 @@ async function tagItem(item: SourceItem, apiKey?: string): Promise<TaggedItem> {
     item.source,
   );
   return { ...item, category, tags: tags.map((t) => t.text) };
-}
-
-function preferMatching(category: Category, items: TaggedItem[]): TaggedItem[] {
-  const matched = items.filter((item) => item.category === category);
-  return matched.length > 0 ? matched : items;
-}
-
-const SOURCE_LABEL: Record<string, string> = {
-  briefing: "briefing",
-  openalex: "openalex",
-  browserbase: "facebook group",
-  "facebook-group": "facebook group",
-  "facebook group": "facebook group",
-  bluesky: "bluesky",
-};
-
-function auditSource(source: string): string {
-  const named = SOURCE_LABEL[source];
-  if (named) return named;
-  return source.trim();
-}
-
-function toResponseItems(items: TaggedItem[]): AskResponse["items"] {
-  return items.slice(0, 4).map((item) => {
-    const out: AskResponse["items"][number] = {
-      title: item.title,
-      plain: item.plain,
-    };
-    const source = auditSource(item.source);
-    if (source) out.source = source;
-    if (item.url) out.url = item.url;
-    if (item.happenedAt) out.fetched = item.happenedAt;
-    const place =
-      item.jurisdiction && item.jurisdiction !== "Unplaced"
-        ? item.jurisdiction
-        : knownJurisdiction(`${item.title} ${item.plain}`, item.url);
-    if (place) out.jurisdiction = place;
-    return out;
-  });
 }

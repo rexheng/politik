@@ -119,24 +119,42 @@
   }
 
   async function revealText(node, text) {
-    const words = text.trim() ? text.trim().split(/\s+/) : [];
+    const paragraphs = text.trim() ? text.trim().split(/\n\n+/) : [];
+    const words = paragraphs.flatMap(function (paragraph) {
+      return paragraph.trim().split(/\s+/).filter(Boolean);
+    });
     if (prefersReducedMotion() || words.length === 0) {
       node.textContent = text;
       return;
     }
     node.setAttribute("aria-hidden", "true");
     node.textContent = "";
-    const step = Math.min(52, Math.max(16, Math.round(1000 / words.length)));
-    for (let i = 0; i < words.length; i++) {
-      node.textContent = words.slice(0, i + 1).join(" ");
-      if (i < words.length - 1) await wait(step);
+    const step = Math.min(28, Math.max(12, Math.round(700 / words.length)));
+    const shown = [];
+    for (let p = 0; p < paragraphs.length; p++) {
+      const part = paragraphs[p].trim().split(/\s+/).filter(Boolean);
+      const built = [];
+      for (let i = 0; i < part.length; i++) {
+        built.push(part[i]);
+        node.textContent = shown.concat(built.join(" ")).join("\n\n");
+        if (!(p === paragraphs.length - 1 && i === part.length - 1)) await wait(step);
+      }
+      shown.push(built.join(" "));
     }
+    node.textContent = shown.join("\n\n");
     node.removeAttribute("aria-hidden");
   }
 
   function itemCard(item) {
     const card = document.createElement("article");
     card.className = "item-card";
+
+    if (item && item.placeNote) {
+      const note = document.createElement("p");
+      note.className = "item-relation";
+      note.textContent = item.placeNote;
+      card.appendChild(note);
+    }
 
     const title = document.createElement("p");
     title.className = "item-title";
@@ -174,7 +192,7 @@
 
     await revealText(bubble, reply || "");
 
-    const list = Array.isArray(items) ? items.slice(0, 2) : [];
+    const list = Array.isArray(items) ? items.slice(0, 5) : [];
     if (list.length === 0) {
       bubble.scrollIntoView({ behavior: "smooth", block: "end" });
       return;
@@ -184,7 +202,7 @@
     tail.className = "reply-tail reply-tail--in";
 
     const label = CATEGORY_LABELS[category];
-    if (label) {
+    if (label && category !== "other") {
       const cat = document.createElement("p");
       cat.className = "category";
       cat.textContent = label;
@@ -227,8 +245,21 @@
   const tagline = document.querySelector(".tagline");
   if (who && tagline) tagline.textContent = who.name;
 
+  const turns = [];
+
+  function rememberTurn(message, data) {
+    turns.push({ role: "user", text: message });
+    const titles = [];
+    const list = data && Array.isArray(data.items) ? data.items : [];
+    list.forEach(function (item) {
+      if (item && item.title) titles.push(item.title);
+    });
+    turns.push({ role: "assistant", text: (data && data.reply) || "", titles: titles });
+    while (turns.length > 8) turns.shift();
+  }
+
   function askBody(message, knowledge) {
-    const payload = { message };
+    const payload = { message, history: turns.slice() };
     if (knowledge) payload.knowledge = knowledge;
     if (who) {
       payload.who = {
@@ -272,6 +303,7 @@
     try {
       const data = await postAsk(message);
       clearPending(pending);
+      rememberTurn(message, data);
       await appendPhoton(data.reply || "", data.category, data.items);
     } catch (err) {
       clearPending(pending);
@@ -437,6 +469,7 @@
         const data = await postAsk(message);
         showTranscript();
         appendUser(message);
+        rememberTurn(message, data);
         await appendPhoton(data.reply || "", data.category, data.items);
         setLabel("Speaking");
         await playReply(data.reply || GREETING);
@@ -646,6 +679,13 @@
     } catch (err) {
       useFallback();
     }
+
+    host.addEventListener("click", function (event) {
+      const target = event.target;
+      if (!(target instanceof Element) || target.closest("button") || !target.closest("canvas")) return;
+      const talk = host.querySelector("button");
+      if (talk && !talk.disabled) talk.click();
+    });
   }
 
   mountVoice();

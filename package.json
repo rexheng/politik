@@ -9,6 +9,7 @@
   "type": "module",
   "scripts": {
     "check:jev": "tsx scripts/check-jev.ts",
+    "check:select": "tsx scripts/check-select.ts",
     "check:stagehand": "tsx scripts/check-stagehand.ts"
   },
   "dependencies": {

@@ -37,6 +37,9 @@
         </div>
         <time class="clock" id="clock" datetime=""></time>
         <p class="stage" id="stage">open</p>
+        <p class="fetched" id="facebook-fetched" hidden></p>
+        <p class="note" id="facebook-note" hidden></p>
+        <ul class="posts" id="facebook-posts"></ul>
         <div class="tags" id="tags" aria-live="polite"></div>
       </section>
       <section class="lane" aria-label="Bluesky">
@@ -57,6 +60,8 @@
           <span class="weight" data-bucket="against">against <span class="count">0</span></span>
           <span class="weight" data-bucket="unsure">unsure <span class="count">0</span></span>
         </div>
+        <p class="fetched" id="bluesky-fetched" hidden></p>
+        <ul class="posts" id="bluesky-posts"></ul>
       </section>
     </div>
     <a class="ask" id="ask-link" href="/" hidden>Ask</a>

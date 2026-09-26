@@ -65,12 +65,15 @@ body {
   width: 0.45rem;
   height: 0.45rem;
   border-radius: 50%;
-  background: #c4a15a;
+  background: #8a6230;
 }
 
 .step.web::before {
-  border-radius: 2px;
-  background: #1c1915;
+  background: #c2412d;
+}
+
+.step.policy::before {
+  background: #1f6b4a;
 }
 
 .leaflet-popup-content-wrapper, .leaflet-popup-tip {
@@ -105,21 +108,42 @@ body {
   border-bottom-color: #1c1915;
 }
 
-.pin.university {
-  background: #e8c468;
-  border-radius: 50%;
-  box-shadow: 0 0 10px #e8c468;
+.pin svg {
+  display: block;
 }
 
-.pin.datacentre {
-  background: #ef6b4a;
-  border-radius: 2px;
-  box-shadow: 0 0 10px #ef6b4a;
+.frames {
+  position: absolute;
+  z-index: 500;
+  left: 50%;
+  bottom: 1.4rem;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 0.35rem;
+}
+
+.frames button {
+  font: inherit;
+  font-size: 0.85rem;
+  border: 1.5px solid #1c1915;
+  background: #f6f1e7;
+  color: #1c1915;
+  padding: 0.4rem 0.75rem;
+  cursor: pointer;
+}
+
+.frames button[aria-pressed="true"] {
+  background: #1c1915;
+  color: #f6f1e7;
 }
 
 .pin {
-  width: 14px;
-  height: 14px;
-  border: 2px solid #14110e;
+  width: 22px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
   cursor: pointer;
+  line-height: 0;
 }

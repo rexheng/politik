@@ -1,4 +1,6 @@
 import { DATACENTRES } from "./datacentres.ts";
+import { loadPolicy, POLICY_HOME } from "./policy.ts";
+import { SAVED_UNIVERSITIES } from "./universities.ts";
 
 export interface TraceStep {
   id: string;
@@ -12,10 +14,11 @@ export interface MapPoint {
   lat: number;
   lng: number;
   place: string;
-  source: "web" | "openalex";
+  source: "web" | "openalex" | "policytracker";
   url: string;
-  kind: "datacentre" | "university";
+  kind: "datacentre" | "university" | "policy";
   detail?: string;
+  frame?: "west" | "singapore";
 }
 
 export interface Unplaced {
@@ -96,7 +99,12 @@ function datacentrePoints(): MapPoint[] {
   }));
 }
 
-function sourceTrace(datacentres: number, universities: number): TraceStep[] {
+function sourceTrace(
+  datacentres: number,
+  universities: number,
+  contracts: number,
+  filings: number,
+): TraceStep[] {
   return [
     { id: "web", label: `${datacentres} datacentres · web` },
     {
@@ -104,17 +112,63 @@ function sourceTrace(datacentres: number, universities: number): TraceStep[] {
       label: `${universities} universities · arXiv on OpenAlex`,
       url: "https://openalex.org/S4306400194",
     },
+    {
+      id: "policy",
+      label: `${contracts} Singapore contracts · Policy Tracker`,
+      url: `${POLICY_HOME}/contracts`,
+    },
+    {
+      id: "policy",
+      label: `${filings} California filings · Policy Tracker`,
+      url: POLICY_HOME,
+    },
   ];
 }
 
 export async function loadMap(query = "data center"): Promise<MapPayload> {
   const datacentres = datacentrePoints();
-  const universities = await loadUniversities(query);
+  const [live, policy] = await Promise.all([
+    loadUniversities(query),
+    loadPolicy().catch(() => []),
+  ]);
+  const universities = live.length > 0 ? live : savedUniversities();
+  const contracts = policy.filter((pin) => pin.frame === "singapore");
+  const filings = policy.filter((pin) => pin.frame === "west");
+  const points: MapPoint[] = [
+    ...datacentres,
+    ...universities,
+    ...policy.map((pin) => ({
+      id: pin.id,
+      title: pin.title,
+      lat: pin.lat,
+      lng: pin.lng,
+      place: pin.place,
+      source: "policytracker" as const,
+      url: pin.url,
+      kind: "policy" as const,
+      detail: pin.detail,
+      frame: pin.frame,
+    })),
+  ];
   return {
-    trace: sourceTrace(datacentres.length, universities.length),
-    points: [...datacentres, ...universities],
+    trace: sourceTrace(datacentres.length, universities.length, contracts.length, filings.length),
+    points,
     unplaced: [],
   };
+}
+
+function savedUniversities(): MapPoint[] {
+  return SAVED_UNIVERSITIES.map((row) => ({
+    id: row.id,
+    title: row.title,
+    lat: row.lat,
+    lng: row.lng,
+    place: row.place,
+    source: "openalex",
+    url: row.url,
+    kind: "university",
+    detail: row.detail,
+  }));
 }
 
 async function loadUniversities(query: string): Promise<MapPoint[]> {

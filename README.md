@@ -41,6 +41,7 @@ Put secrets in `.dev.vars`. Git ignores that file. Key names:
 
 - TYPESAFE_API_KEY
 - DEEPGRAM_API_KEY
+- MAPBOX_ACCESS_TOKEN
 - BROWSERBASE_API_KEY
 - TELEGRAM_BOT_TOKEN
 - OPENAI_API_KEY

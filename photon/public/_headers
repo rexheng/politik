@@ -1,0 +1,11 @@
+/sw.js
+  Cache-Control: no-store
+
+/map
+  Cache-Control: no-store
+
+/map.js
+  Cache-Control: no-store
+
+/map.css
+  Cache-Control: no-store
