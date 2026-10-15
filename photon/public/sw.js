@@ -1,4 +1,4 @@
-const CACHE_NAME = "politik-shell-v29";
+const CACHE_NAME = "politik-shell-v30";
 
 const SHELL_ASSETS = [
   "/",
@@ -32,16 +32,28 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     (async () => {
       const keys = await caches.keys();
+      // An update finds the cache of an older version; a first install finds none. Decided before the old ones go.
+      const isUpdate = keys.some((key) => key.startsWith("politik-shell-") && key !== CACHE_NAME);
       await Promise.all(
         keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)),
       );
       await self.clients.claim();
+      if (!isUpdate) {
+        return;
+      }
+      // Open chat and map pages are reloaded onto the new shell, but never waited for: the browser holds a reload of a
+      // page this worker controls until activation finishes, so waiting here would hang the activation and the page.
+      // A page whose address carries a question (?q=) is left alone: reloading it would ask the question again.
       const windows = await self.clients.matchAll({ type: "window" });
-      await Promise.all(
-        windows
-          .filter((client) => ["/", "/map"].includes(new URL(client.url).pathname))
-          .map((client) => client.navigate(client.url)),
-      );
+      for (const client of windows) {
+        const url = new URL(client.url);
+        if (!["/", "/map"].includes(url.pathname) || url.searchParams.has("q")) {
+          continue;
+        }
+        try {
+          client.navigate(client.url).catch(() => {});
+        } catch (error) {}
+      }
     })(),
   );
 });
