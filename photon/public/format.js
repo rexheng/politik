@@ -228,9 +228,10 @@ function isVoiceAgentUrl(url, base) {
  *
  * With `onFailed(socketUrl)`, an agent socket that fails without ever opening is reported once, with its address. The
  * Worker refuses a session over the rate limit with an HTTP 429 before the upgrade, and a browser tells the page nothing
- * of why a handshake failed, so `voiceBusyLine` asks the address again to find out.
+ * of why a handshake failed, so `voiceBusyLine` asks the address again to find out. With `onStarted(socketUrl)`, each new
+ * agent socket is announced as it is made, so the page can forget what it learned from the one before.
  */
-export function tapVoiceAnswers(target, base, onAnswer, onFailed) {
+export function tapVoiceAnswers(target, base, onAnswer, onFailed, onStarted) {
   const Native = target && target.WebSocket;
   if (typeof Native !== "function" || Native.politikTapped) return false;
   class TappedWebSocket extends Native {
@@ -244,7 +245,13 @@ export function tapVoiceAnswers(target, base, onAnswer, onFailed) {
           onAnswer(answer.question, answer.response);
         } catch (err) {}
       });
-      if (typeof onFailed !== "function" || !isVoiceAgentUrl(url, base)) return;
+      if (!isVoiceAgentUrl(url, base)) return;
+      if (typeof onStarted === "function") {
+        try {
+          onStarted(new URL(String(url), base).href);
+        } catch (err) {}
+      }
+      if (typeof onFailed !== "function") return;
       let opened = false;
       let reported = false;
       const failed = function () {
@@ -280,17 +287,55 @@ export async function busyLineOf(res) {
   return line || BUSY_LINE;
 }
 
+/** How long the check on a refused voice socket may take before the page gives up on it and shows the usual error. */
+const PROBE_TIMEOUT_MS = 5000;
+
 /**
  * The line to show when the Worker refused to open the voice socket `socketUrl` because Politik is busy, else "". The
  * Worker answers an over-limit caller with a 429 and a JSON `error` to any request for that address, so a plain GET
- * (`doFetch`, the page's fetch) finds out what the socket's failed handshake cannot say. Any other answer, or none, is "".
+ * (`doFetch`, the page's fetch) finds out what the socket's failed handshake cannot say. Any other answer, no answer, or
+ * one that takes more than 5 seconds (`options.timeoutMs`, with `options.setTimeout` and `options.clearTimeout` for a
+ * test) is "", so the page is never left waiting on it.
  */
-export async function voiceBusyLine(socketUrl, doFetch) {
+export async function voiceBusyLine(socketUrl, doFetch, options) {
+  const opts = options || {};
+  const timeoutMs = opts.timeoutMs > 0 ? opts.timeoutMs : PROBE_TIMEOUT_MS;
+  const later =
+    opts.setTimeout ||
+    function (fn, ms) {
+      return setTimeout(fn, ms);
+    };
+  const cancel =
+    opts.clearTimeout ||
+    function (id) {
+      clearTimeout(id);
+    };
+  let timer;
+  let started = false;
   try {
     const url = new URL(String(socketUrl));
     url.protocol = url.protocol === "wss:" ? "https:" : url.protocol === "ws:" ? "http:" : url.protocol;
-    return await busyLineOf(await doFetch(url.href, { cache: "no-store" }));
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timedOut = new Promise(function (resolve) {
+      timer = later(function () {
+        if (controller) {
+          try {
+            controller.abort();
+          } catch (err) {}
+        }
+        resolve("");
+      }, timeoutMs);
+    });
+    started = true;
+    const asked = (async function () {
+      const init = controller ? { cache: "no-store", signal: controller.signal } : { cache: "no-store" };
+      return busyLineOf(await doFetch(url.href, init));
+    })();
+    asked.catch(function () {}); // a failure after the time is up is not an unhandled rejection
+    return await Promise.race([asked, timedOut]);
   } catch (err) {
     return "";
+  } finally {
+    if (started) cancel(timer);
   }
 }

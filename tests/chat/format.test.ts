@@ -20,8 +20,12 @@ type Format = {
   spokenReply(view: { reply: string; mode?: string; citations?: { title?: string; shortTitle?: string }[] }, max?: number): string;
   voiceAnswerOf(data: unknown): { question: string; response: Record<string, unknown> } | null;
   isVoiceSocketUrl(url: string, base?: string): boolean;
-  tapVoiceAnswers(target: { WebSocket?: unknown }, base: string, onAnswer: (question: string, response: Record<string, unknown>) => void, onFailed?: (socketUrl: string) => void): boolean;
-  voiceBusyLine(socketUrl: string, doFetch: (url: string, init?: object) => Promise<{ status: number; json(): Promise<unknown> }>): Promise<string>;
+  tapVoiceAnswers(target: { WebSocket?: unknown }, base: string, onAnswer: (question: string, response: Record<string, unknown>) => void, onFailed?: (socketUrl: string) => void, onStarted?: (socketUrl: string) => void): boolean;
+  voiceBusyLine(
+    socketUrl: string,
+    doFetch: (url: string, init?: { cache?: string; signal?: AbortSignal }) => Promise<{ status: number; json(): Promise<unknown> }>,
+    options?: { timeoutMs?: number; setTimeout?: (fn: () => void, ms: number) => unknown; clearTimeout?: (id: unknown) => void },
+  ): Promise<string>;
   busyLineOf(res: { status: number; json(): Promise<unknown> }): Promise<string>;
   BUSY_LINE: string;
   VOICE_ANSWER_TYPE: string;
@@ -384,6 +388,28 @@ describe("tapVoiceAnswers", () => {
       assert.deepEqual(failed, []);
     });
 
+    test("a new agent socket is announced as it is made, so a refusal left over from the last attempt can be forgotten", () => {
+      FakeSocket.instances = [];
+      const target: { WebSocket: unknown } = { WebSocket: FakeSocket };
+      const started: string[] = [];
+      tapVoiceAnswers(target, base, () => {}, undefined, (url) => void started.push(url));
+      const Tapped = target.WebSocket as typeof FakeSocket;
+      new Tapped("wss://politik.example/api/voice/v1/agent/converse", ["bearer", "proxy"]);
+      new Tapped("/api/voice/v1/agent/converse");
+      new Tapped("wss://politik.example/api/voice/listen");
+      new Tapped("wss://elsewhere.example/stream");
+      assert.deepEqual(started, ["wss://politik.example/api/voice/v1/agent/converse", "https://politik.example/api/voice/v1/agent/converse"]);
+    });
+
+    test("a start handler that throws does not stop the socket being made", () => {
+      FakeSocket.instances = [];
+      const target: { WebSocket: unknown } = { WebSocket: FakeSocket };
+      tapVoiceAnswers(target, base, () => {}, undefined, () => {
+        throw new Error("boom");
+      });
+      assert.doesNotThrow(() => new (target.WebSocket as typeof FakeSocket)("wss://politik.example/api/voice/v1/agent/converse"));
+    });
+
     test("without a handler nothing is listened for, and one that throws does not disturb the socket", () => {
       FakeSocket.instances = [];
       const plain: { WebSocket: unknown } = { WebSocket: FakeSocket };
@@ -424,7 +450,7 @@ describe("voiceBusyLine: was the voice session refused because Politik is busy?"
     assert.equal(line, "Politik is busy — try later.");
     assert.equal(asked.length, 1);
     assert.equal(asked[0]![0], "https://politik.example/api/voice/v1/agent/converse");
-    assert.deepEqual(asked[0]![1], { cache: "no-store" });
+    assert.equal((asked[0]![1] as { cache?: string }).cache, "no-store");
   });
 
   test("ws:// is asked as http://", async () => {
@@ -444,6 +470,73 @@ describe("voiceBusyLine: was the voice session refused because Politik is busy?"
     for (const status of [426, 503, 502, 200, 500]) assert.equal(await voiceBusyLine(agent, async () => reply(status, { error: "x" })), "", String(status));
     assert.equal(await voiceBusyLine(agent, async () => Promise.reject(new TypeError("offline"))), "");
     assert.equal(await voiceBusyLine("not a url", async () => reply(429)), "", "an address that cannot be read");
+  });
+});
+
+describe("voiceBusyLine gives up after 5 seconds, so the page is never left waiting", () => {
+  const agent = "wss://politik.example/api/voice/v1/agent/converse";
+  /** Timers that only run when the test says so. */
+  function manual() {
+    const waiting = new Map<number, { fn: () => void; ms: number }>();
+    let next = 1;
+    return {
+      waiting,
+      options: {
+        setTimeout: (fn: () => void, ms: number) => (waiting.set(next, { fn, ms }), next++),
+        clearTimeout: (id: unknown) => void waiting.delete(id as number),
+      },
+      fire: () => {
+        for (const [id, timer] of [...waiting]) {
+          waiting.delete(id);
+          timer.fn();
+        }
+      },
+    };
+  }
+
+  test("the default wait is 5 seconds", async () => {
+    const clock = manual();
+    const answer = voiceBusyLine(agent, async () => ({ status: 429, json: async () => ({ error: "busy" }) }), clock.options);
+    assert.deepEqual([...clock.waiting.values()].map((t) => t.ms), [5000]);
+    assert.equal(await answer, "busy");
+  });
+
+  test("a probe that never answers gives \"\" when the time is up, and the request is aborted", async () => {
+    const clock = manual();
+    let signal: AbortSignal | undefined;
+    const answer = voiceBusyLine(agent, (_url, init) => ((signal = init?.signal), new Promise(() => {})), clock.options);
+    assert.equal(signal?.aborted, false);
+    clock.fire();
+    assert.equal(await answer, "");
+    assert.equal(signal?.aborted, true);
+  });
+
+  test("an answer whose body never arrives is cut off the same way", async () => {
+    const clock = manual();
+    const answer = voiceBusyLine(agent, async () => ({ status: 429, json: () => new Promise(() => {}) }), clock.options);
+    await new Promise((resolve) => setImmediate(resolve));
+    clock.fire();
+    assert.equal(await answer, "");
+  });
+
+  test("the timer is cleared once there is an answer, and a late failure is not an unhandled rejection", async () => {
+    const clock = manual();
+    assert.equal(await voiceBusyLine(agent, async () => ({ status: 503, json: async () => ({}) }), clock.options), "");
+    assert.equal(clock.waiting.size, 0);
+    const slow = manual();
+    let reject: (e: Error) => void = () => {};
+    const answer = voiceBusyLine(agent, () => new Promise((_resolve, rej) => (reject = rej)), slow.options);
+    slow.fire();
+    assert.equal(await answer, "");
+    reject(new Error("late"));
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+
+  test("the wait can be set, and a real timer is used when none is given", async () => {
+    const clock = manual();
+    void voiceBusyLine(agent, () => new Promise(() => {}), { ...clock.options, timeoutMs: 1200 });
+    assert.deepEqual([...clock.waiting.values()].map((t) => t.ms), [1200]);
+    assert.equal(await voiceBusyLine(agent, () => new Promise(() => {}), { timeoutMs: 20 }), "");
   });
 });
 

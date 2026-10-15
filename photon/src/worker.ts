@@ -22,17 +22,31 @@ function failResponse(): Response {
 }
 
 /**
- * The 429 for a caller who is over the limit on something that spends the owner's Deepgram key (a voice session, a listen
- * socket, a spoken reply), or null when the request may go ahead. It is the same limiter, key and skip rules as a question.
- * Any GET to a socket's address is counted and answered this way, with or without an `Upgrade` header: the page, which
- * cannot see why a socket was refused, asks that way.
+ * A 403 for a browser request that comes from a page on another site, or null. A browser says which page a request comes
+ * from in `Origin`; one whose host is not this Worker's own is some other site using our endpoints (and the owner's
+ * Groq and Deepgram keys) from its visitors' browsers. No `Origin` is allowed: a browser sends none for its own page's
+ * simple requests, and a script that is not a browser is limited by the rate limit, not by this.
  */
-async function voiceBusy(request: Request, env: Env): Promise<Response | null> {
+function crossOrigin(request: Request): Response | null {
+  const origin = request.headers.get("Origin");
+  if (origin === null) return null;
+  try {
+    if (new URL(origin).host === new URL(request.url).host) return null;
+  } catch {
+    // an Origin that is not a URL ("null" from a sandboxed page, or nonsense) is not this site
+  }
+  return json({ error: "Requests from other sites are not allowed." }, 403);
+}
+
+/** The 429 for a caller who is over the limit on something that is not a chat answer (an error, not a reply the page shows), or null. */
+async function busyError(request: Request, env: Env): Promise<Response | null> {
   return (await overLimit(env, limitKey(request))) ? json({ error: BUSY_REPLY }, 429) : null;
 }
 
 async function handleAsk(request: Request, env: Env): Promise<Response> {
   try {
+    const refused = crossOrigin(request);
+    if (refused) return refused;
     // Over the limit is an answer, not an error (status 200), so the page shows it like any other reply.
     if (await overLimit(env, limitKey(request))) return json(busyResponse());
     const input = normalizeChatRequest(await request.json());
@@ -72,6 +86,11 @@ export default {
         url.pathname === "/api/saying" &&
         (request.method === "GET" || request.method === "POST")
       ) {
+        // Each call searches Bluesky and has every post judged by a model, so it is counted like a question.
+        const refused = request.method === "POST" ? crossOrigin(request) : null;
+        if (refused) return refused;
+        const busy = await busyError(request, env);
+        if (busy) return busy;
         return await handleSaying(env);
       }
 
@@ -85,10 +104,12 @@ export default {
       }
 
       if (url.pathname === "/api/voice/v1/agent/converse" && request.method === "GET") {
+        const refused = crossOrigin(request);
+        if (refused) return refused;
         const key = env.DEEPGRAM_API_KEY?.trim();
         if (!key) return json({ error: "Voice is unavailable." }, 503);
         // Each session the Worker opens spends the owner's Deepgram key, so the upgrade is counted like a question.
-        const busy = await voiceBusy(request, env);
+        const busy = await busyError(request, env);
         if (busy) return busy;
         try {
           return await proxyAgent(request, key, env);
@@ -102,9 +123,11 @@ export default {
       }
 
       if (url.pathname === "/api/voice/listen" && request.method === "GET") {
+        const refused = crossOrigin(request);
+        if (refused) return refused;
         const key = env.DEEPGRAM_API_KEY?.trim();
         if (!key) return json({ error: "Voice is unavailable." }, 503);
-        const busy = await voiceBusy(request, env);
+        const busy = await busyError(request, env);
         if (busy) return busy;
         try {
           return await proxyListen(request, key);
@@ -116,11 +139,15 @@ export default {
       if (url.pathname === "/api/voice/speak" && request.method === "POST") {
         const key = env.DEEPGRAM_API_KEY?.trim();
         if (!key) return json({ error: "Voice is unavailable." }, 503);
-        const busy = await voiceBusy(request, env);
+        const busy = await busyError(request, env);
         if (busy) return busy;
         const body = (await request.json()) as { text?: unknown };
         const text = typeof body.text === "string" ? body.text : "";
-        return speak(key, text);
+        try {
+          return await speak(key, text);
+        } catch {
+          return new Response("Voice is unavailable.", { status: 502 });
+        }
       }
 
       if (url.pathname === "/api/sources" && request.method === "GET") {

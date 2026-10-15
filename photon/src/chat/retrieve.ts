@@ -112,20 +112,22 @@ function clipText(text: string, max = MAX_PASSAGE_CHARS): string {
 const WINDOW_LEAD_CHARS = 120;
 
 /**
- * Where a search term (or, for a longer term, its stem: "registries" finds "registry") starts a word in `text`. The full
- * text index stems with Porter, so a literal match would miss "regulator" for "regulators".
+ * Where a search term (or, for a longer term, its stem: "registries" finds "registry") starts a word in `text`, and how long
+ * the word that matched is. The full text index stems with Porter, so a literal match would miss "regulator" for
+ * "regulators"; and a longer term is matched as the start of a word, so "regulators" finds "regulations" and "data" finds
+ * "database", which are longer than the term. A term of up to three letters must be the whole word.
  */
-function termStarts(text: string, term: string): number[] {
+function termStarts(text: string, term: string): { at: number; length: number }[] {
   const stem = term.length >= 6 ? term.slice(0, Math.max(5, term.length - 3)) : term;
   const safe = stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const end = term.length <= 3 ? String.raw`(?![\p{L}\p{N}])` : "";
-  const found = text.matchAll(new RegExp(String.raw`(?<![\p{L}\p{N}])${safe}${end}`, "giu"));
-  const starts: number[] = [];
+  const rest = term.length <= 3 ? "" : String.raw`[\p{L}\p{N}]*`;
+  const found = text.matchAll(new RegExp(String.raw`(?<![\p{L}\p{N}])${safe}${rest}(?![\p{L}\p{N}])`, "giu"));
+  const matches: { at: number; length: number }[] = [];
   for (const m of found) {
-    starts.push(m.index);
-    if (starts.length === 60) break;
+    matches.push({ at: m.index, length: m[0].length });
+    if (matches.length === 60) break;
   }
-  return starts;
+  return matches;
 }
 
 /** `start` moved on to the next word start (within a few characters), and past half a surrogate pair. */
@@ -148,17 +150,17 @@ function snapToWord(text: string, start: number): number {
  */
 export function windowText(text: string, terms: string[], max = MAX_PASSAGE_CHARS): string {
   if (text.length <= max) return text;
-  const found = terms.map((term) => ({ length: term.length, starts: termStarts(text, term) }));
-  if (found.every((f) => f.starts.length === 0)) return clipText(text, max);
+  const found = terms.map((term) => termStarts(text, term));
+  if (found.every((list) => list.length === 0)) return clipText(text, max);
 
   const starts = new Set<number>([0]);
-  for (const f of found) for (const at of f.starts) starts.add(snapToWord(text, Math.max(0, at - WINDOW_LEAD_CHARS)));
+  for (const list of found) for (const { at } of list) starts.add(snapToWord(text, Math.max(0, at - WINDOW_LEAD_CHARS)));
   let best = { start: 0, covered: -1 };
   for (const start of [...starts].sort((a, b) => a - b)) {
     const room = max - (start > 0 ? 1 : 0) - 1;
-    // A term counts only when all of it fits, with a character to spare: the cut backs off to the last space, so a word that
-    // ends exactly at the edge is dropped with the partial word it would have been.
-    const covered = found.filter((f) => f.starts.some((at) => at >= start && at + f.length < start + room)).length;
+    // A term counts only when the word that matched fits whole, with a character to spare: the cut backs off to the last
+    // space, so a word that ends exactly at the edge is dropped with the partial word it would have been.
+    const covered = found.filter((list) => list.some(({ at, length }) => at >= start && at + length < start + room)).length;
     if (covered > best.covered) best = { start, covered };
   }
   if (best.start === 0) return clipText(text, max);

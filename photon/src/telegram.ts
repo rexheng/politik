@@ -3,12 +3,7 @@ import { GENERAL_LABEL } from "./chat/index.ts";
 import type { ChatResponse } from "./chat/types.ts";
 import { BUSY_REPLY, overLimit, telegramLimitKey } from "./limit.ts";
 
-type TelegramUpdate = {
-  message?: {
-    chat?: { id?: number };
-    text?: string;
-  };
-};
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** Text for Telegram, which shows plain text: no **bold** stars and no "### " heading marks. */
 const plain = (text: string): string => text.replaceAll("**", "").replace(/^[ \t]*#{1,6}[ \t]+/gm, "");
@@ -30,32 +25,36 @@ function sameSecret(given: string, expected: string): boolean {
 
 export async function handleTelegram(request: Request, env: Env): Promise<Response> {
   // When TELEGRAM_WEBHOOK_SECRET is set, only Telegram (which sends it with every update once setWebhook was given the
-  // same secret_token) may use this endpoint.
+  // same secret_token) may use this endpoint. An update that passed that check is `verified`: its chat id can be trusted.
   const secret = env.TELEGRAM_WEBHOOK_SECRET?.trim();
   if (secret && !sameSecret(request.headers.get("X-Telegram-Bot-Api-Secret-Token") ?? "", secret)) {
     return new Response("Forbidden", { status: 401 });
   }
+  const verified = Boolean(secret);
 
   const token = env.TELEGRAM_BOT_TOKEN?.trim();
   if (!token) return new Response("ok");
 
-  let update: TelegramUpdate;
+  // Anyone can post to this endpoint (until the secret is set), so the body is read as untrusted: whatever it is, the
+  // answer is 200 "ok" (Telegram sends an update again when it gets an error), and only a text from a numbered chat is run.
+  let update: unknown;
   try {
-    update = (await request.json()) as TelegramUpdate;
+    update = await request.json();
   } catch {
     return new Response("ok");
   }
-
-  const chatId = update.message?.chat?.id;
-  const text = update.message?.text?.trim();
-  if (chatId == null || !text || text.startsWith("/")) {
-    if (chatId != null && text?.startsWith("/")) {
+  const message = isRecord(update) && isRecord(update.message) ? update.message : null;
+  const chat = message && isRecord(message.chat) ? message.chat : null;
+  const chatId = typeof chat?.id === "number" && Number.isFinite(chat.id) ? chat.id : null;
+  const text = typeof message?.text === "string" ? message.text.trim() : "";
+  if (chatId === null || !text || text.startsWith("/")) {
+    if (chatId !== null && text.startsWith("/")) {
       await sendQuietly(token, chatId, "Ask what is going on.", "the command reply");
     }
     return new Response("ok");
   }
 
-  if (await overLimit(env, telegramLimitKey(request, chatId))) {
+  if (await overLimit(env, telegramLimitKey(request, chatId, verified))) {
     await sendQuietly(token, chatId, BUSY_REPLY, "the busy reply");
     return new Response("ok");
   }

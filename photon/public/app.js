@@ -422,6 +422,12 @@ async function showVoiceAnswer(question, data) {
 
 let voiceRefusal = null; // the check on the last agent socket that failed to open: resolves to the busy line, or ""
 
+// A new voice attempt forgets what the last one learned: a refusal left over from it must not hold back the plain Talk
+// button when this attempt fails for some other reason.
+function voiceSocketStarted() {
+  voiceRefusal = null;
+}
+
 function voiceSocketFailed(url) {
   const check = voiceBusyLine(url, function (target, init) {
     return fetch(target, init);
@@ -739,6 +745,7 @@ function mountVoice() {
   try {
     widget.init({
       tokenFactory: function () {
+        voiceRefusal = null;
         return fetch("/api/deepgram-token").then(function (res) {
           if (!res.ok) throw new Error("token");
           return res.text();
@@ -817,7 +824,7 @@ function mountVoice() {
 }
 
 // The tap must be in place before the widget opens its socket.
-tapVoiceAnswers(window, window.location.href, showVoiceAnswer, voiceSocketFailed);
+tapVoiceAnswers(window, window.location.href, showVoiceAnswer, voiceSocketFailed, voiceSocketStarted);
 mountVoice();
 
 form.addEventListener("submit", async function (event) {

@@ -821,6 +821,36 @@ describe("a term at the edge of the first 900 characters is not cut off", () => 
     }
   });
 
+  test("the word that matched counts, not the search term: 'regulators' finds 'regulations', which is one character longer", () => {
+    const shown = windowText(passageWith("regulations", 888), ["regulators"]);
+    assert.match(shown, /(?<![a-z])regulations(?![a-z])/, shown.slice(-60));
+    assert.ok(shown.length <= MAX_PASSAGE_CHARS);
+  });
+
+  test("the word that matched counts, not the search term: 'data' finds 'database' (a prefix match) at 891 to 894", () => {
+    for (let at = 891; at <= 894; at++) {
+      const shown = windowText(passageWith("database", at), ["data"]);
+      assert.match(shown, /(?<![a-z])database(?![a-z])/, `database at ${at}: ${shown.slice(-60)}`);
+      assert.ok(shown.length <= MAX_PASSAGE_CHARS, String(at));
+    }
+  });
+
+  test("a sweep of start positions for words longer than their term: always whole", () => {
+    const pairs: [string, string][] = [["database", "data"], ["regulations", "regulators"], ["registrations", "registry"], ["administrative", "administer"]];
+    for (const [word, term] of pairs) {
+      for (let at = 870; at <= 905; at++) {
+        const shown = windowText(passageWith(word, at), [term]);
+        assert.match(shown, new RegExp(`(?<![a-z])${word}(?![a-z])`), `${word} for ${term} at ${at}: ${shown.slice(-60)}`);
+      }
+    }
+  });
+
+  test("a short term (up to three letters) still matches only the whole word", () => {
+    const text = `${"word ".repeat(100)}AI is used. ${"word ".repeat(100)}AIRLINES fly. ${"word ".repeat(300)}`;
+    const shown = windowText(text, ["ai"]);
+    assert.ok(shown.includes("AI is used"));
+  });
+
   test("a term that sits well inside the first 900 characters still leaves the start of the passage", () => {
     const shown = windowText(passageWith("sanctuary", 700), ["sanctuary"]);
     assert.ok(shown.startsWith("word word"), shown.slice(0, 40));

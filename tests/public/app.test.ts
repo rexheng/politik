@@ -84,7 +84,7 @@ describe("I3: a spoken question runs the pipeline once", () => {
   });
 
   test("the answer frames are read off the voice socket before the widget connects, and shown without asking", () => {
-    const tap = js.indexOf("tapVoiceAnswers(window, window.location.href, showVoiceAnswer, voiceSocketFailed);");
+    const tap = js.indexOf("tapVoiceAnswers(window, window.location.href, showVoiceAnswer, voiceSocketFailed, voiceSocketStarted);");
     assert.ok(tap > 0);
     assert.ok(tap < js.indexOf("\nmountVoice();"), "the tap is installed before the widget starts");
     const show = /async function showVoiceAnswer[\s\S]*?\n}\n/.exec(js)![0];
@@ -144,8 +144,20 @@ describe("a voice session the Worker refuses because Politik is busy", () => {
     assert.ok(play.indexOf("res.status === 429") < play.indexOf("if (!res.ok)"), "checked before the generic failure");
   });
 
+  test("a refusal left over from an earlier attempt is forgotten when a new one starts: at the widget's token request and at the new agent socket", () => {
+    assert.match(js, /function voiceSocketStarted\(\) \{\s*voiceRefusal = null;\s*\}/);
+    const token = /tokenFactory: function \(\) \{[\s\S]*?\n      \},/.exec(js)![0];
+    assert.ok(token.indexOf("voiceRefusal = null") > 0 && token.indexOf("voiceRefusal = null") < token.indexOf("fetch("), "cleared before the token is asked for");
+  });
+
+  test("the check on a refused session has a 5 second limit, so the Talk button and the fallback never wait on it for ever", () => {
+    assert.match(read("format.js"), /const PROBE_TIMEOUT_MS = 5000;/);
+    const talk = /function mountFallbackTalk[\s\S]*?\nfunction mountVoice/.exec(js)![0];
+    assert.match(talk, /line = await voiceBusyLine\(listenHref,[\s\S]*?\n      \}\n      failOnce\(line\);/, "the label goes back to Talk when the check is over, answered or not");
+  });
+
   test("the service worker has a new cache name for the changed shell", () => {
-    assert.ok(Number(/politik-shell-v(\d+)/.exec(read("sw.js"))?.[1]) >= 28);
+    assert.ok(Number(/politik-shell-v(\d+)/.exec(read("sw.js"))?.[1]) >= 29);
   });
 });
 

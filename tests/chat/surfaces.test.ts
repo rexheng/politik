@@ -13,7 +13,7 @@ import type { Manifest, Passage, PolicyRecord } from "../../photon/src/data/sche
 import { snapshotStatements } from "../../photon/src/data/seed.ts";
 import worker from "../../photon/src/worker.ts";
 import { handleTelegram, formatTelegramReply } from "../../photon/src/telegram.ts";
-import { BUSY_REPLY, busyResponse, telegramLimitKey, type RateLimiter } from "../../photon/src/limit.ts";
+import { BUSY_REPLY, busyResponse, limitKey, telegramLimitKey, type RateLimiter } from "../../photon/src/limit.ts";
 import { answerFunctionCall, think, tuneSettings, VOICE_ANSWER_TYPE } from "../../photon/src/voice.ts";
 import { openTestDb } from "../helpers/d1.ts";
 
@@ -336,10 +336,76 @@ describe("surfaces", () => {
     const asPost = (path: string, body: unknown, e: Env, ip = "203.0.113.7") =>
       worker.fetch(new Request(`https://politik.test${path}`, { method: "POST", headers: { "content-type": "application/json", "CF-Connecting-IP": ip }, body: JSON.stringify(body) }), e);
     const noModel = (): Response => assert.fail("no model call");
+    /** A limiter that counts calls for each key and lets the first `max` of each through. */
+    function counting(max: number): { counts: Map<string, number>; binding: RateLimiter } {
+      const counts = new Map<string, number>();
+      return {
+        counts,
+        binding: {
+          limit: async ({ key }) => {
+            const n = (counts.get(key) ?? 0) + 1;
+            counts.set(key, n);
+            return { success: n <= max };
+          },
+        },
+      };
+    }
+    /** The error a failed Telegram send can really be: its message and cause both hold the request URL, which holds the bot token. */
+    const tokenLeak = () =>
+      new TypeError("fetch failed: https://api.telegram.org/bottok-secret/sendMessage", { cause: new Error("connect ECONNRESET https://api.telegram.org/bottok-secret/sendMessage") });
 
     test("the busy response is a fallback ChatResponse with the fixed line and nothing else", () => {
       assert.equal(BUSY_REPLY, "Politik is busy — please try again in a minute.");
       assert.deepEqual(busyResponse(), { reply: BUSY_REPLY, mode: "fallback", citations: [], followUps: [], asOf: "" });
+    });
+
+    describe("an IPv6 caller is counted by its /64 prefix", () => {
+      const key = (ip: string | undefined, url = "https://politik.test/api/ask") => limitKey(new Request(url, { headers: ip ? { "CF-Connecting-IP": ip } : {} }));
+
+      test("addresses in one /64 share a key, however they are written", () => {
+        const one = key("2001:db8:1:2:aaaa:bbbb:cccc:dddd");
+        assert.equal(one, "2001:db8:1:2::/64");
+        for (const ip of ["2001:db8:1:2::1", "2001:0DB8:0001:0002:0:0:0:ffff", "2001:db8:1:2:ffff:ffff:ffff:ffff", " 2001:db8:1:2::9 ", "[2001:db8:1:2::5]", "2001:db8:1:2:1::", "2001:db8:1:2::"]) {
+          assert.equal(key(ip), one, ip);
+        }
+      });
+
+      test("another /64 is another caller", () => {
+        assert.notEqual(key("2001:db8:1:3::1"), key("2001:db8:1:2::1"));
+        assert.notEqual(key("2001:db8:2:2::1"), key("2001:db8:1:2::1"));
+        assert.notEqual(key("2001:db9:1:2::1"), key("2001:db8:1:2::1"));
+        assert.equal(key("2001:db8::1"), "2001:db8:0:0::/64", "a compressed address has its zero groups put back");
+        assert.equal(key("::1"), "0:0:0:0::/64");
+      });
+
+      test("an IPv4 address is its own key, also when it is written as an IPv4-mapped IPv6 address", () => {
+        assert.equal(key("203.0.113.7"), "203.0.113.7");
+        assert.equal(key("::ffff:203.0.113.7"), "203.0.113.7");
+        assert.equal(key("::FFFF:cb00:7107"), "203.0.113.7");
+      });
+
+      test("something that is not an address is kept as it is, not turned into no key", () => {
+        assert.equal(key("2001:db8:zz::1"), "2001:db8:zz::1");
+        assert.equal(key("1:2:3:4:5:6:7:8:9"), "1:2:3:4:5:6:7:8:9");
+        assert.equal(key("1::2::3"), "1::2::3");
+      });
+
+      test("no address, or a local request, is still no key", () => {
+        assert.equal(key(undefined), "");
+        assert.equal(key("2001:db8::1", "http://localhost:8787/api/ask"), "");
+      });
+
+      test("end to end: 30 questions from one /64, each from a different address, are limited after 10", async () => {
+        const { binding, counts } = counting(10);
+        const e = env({ ASK_LIMITER: binding });
+        let busy = 0;
+        for (let i = 0; i < 30; i++) {
+          const res = await asPost("/api/ask", { message: "hi" }, e, `2001:db8:77:5:${i.toString(16)}:abcd::${i + 1}`);
+          if (((await res.json()) as ChatResponse).reply === BUSY_REPLY) busy++;
+        }
+        assert.deepEqual([...counts.keys()], ["2001:db8:77:5::/64"]);
+        assert.equal(busy, 20);
+      });
     });
 
     test("/api/ask over the limit: HTTP 200 and the busy ChatResponse, with no pipeline and no database read", async () => {
@@ -605,7 +671,7 @@ describe("surfaces", () => {
       });
     });
 
-    test("Telegram over the limit sends the busy line to the chat and runs nothing", async () => {
+    test("Telegram over the limit (a verified update) sends the busy line to the chat and runs nothing", async () => {
       const { binding, keys } = limiter(false);
       const sent: any[] = [];
       const update = { message: { chat: { id: 9 }, text: "What is going on?" } };
@@ -617,13 +683,13 @@ describe("surfaces", () => {
         },
         () =>
           worker.fetch(
-            new Request("https://politik.test/telegram", { method: "POST", headers: { "CF-Connecting-IP": "91.108.4.1" }, body: JSON.stringify(update) }),
-            env({ TELEGRAM_BOT_TOKEN: "tok", ASK_LIMITER: binding, GROQ_API_KEY: "gsk-test" }),
+            new Request("https://politik.test/telegram", { method: "POST", headers: { "CF-Connecting-IP": "91.108.4.1", "X-Telegram-Bot-Api-Secret-Token": "s3cret" }, body: JSON.stringify(update) }),
+            env({ TELEGRAM_BOT_TOKEN: "tok", TELEGRAM_WEBHOOK_SECRET: "s3cret", ASK_LIMITER: binding, GROQ_API_KEY: "gsk-test" }),
           ),
       );
       assert.equal(await result.text(), "ok");
       assert.deepEqual(sent, [{ chat_id: 9, text: BUSY_REPLY }]);
-      assert.deepEqual(keys, ["telegram:9"], "keyed on the chat, not on Telegram's address");
+      assert.deepEqual(keys, ["telegram:9"], "the secret was checked, so the chat id can be trusted: keyed on the chat, not on Telegram's address");
       assert.equal(urls.length, 1, "only the Telegram send");
     });
 
@@ -635,7 +701,7 @@ describe("surfaces", () => {
         (url) => {
           assert.match(url, /^https:\/\/api\.telegram\.org\/bottok-secret\/sendMessage$/);
           sends++;
-          throw new TypeError("Network connection lost.");
+          throw tokenLeak();
         },
         () =>
           worker.fetch(
@@ -657,7 +723,7 @@ describe("surfaces", () => {
       const hook = (update: unknown, e: Env, handler: (url: string, init?: RequestInit) => Response | Promise<Response>) =>
         withFetch(handler, () => worker.fetch(new Request("https://politik.test/telegram", { method: "POST", headers: { "CF-Connecting-IP": "91.108.4.1" }, body: JSON.stringify(update) }), e));
       const down = (): Response => {
-        throw new TypeError("Network connection lost.");
+        throw tokenLeak();
       };
 
       test("the reply to a /command: when it cannot be sent the answer is still 200 ok, and the failure is logged", async () => {
@@ -702,7 +768,7 @@ describe("surfaces", () => {
       });
     });
 
-    test("Telegram: two chats that reach us from the same Telegram address do not share a limit", async () => {
+    test("Telegram: with the secret set and checked, two chats that reach us from the same Telegram address do not share a limit", async () => {
       const { binding, keys } = limiter((key) => key !== "telegram:9");
       const sent: any[] = [];
       const ask = (chat: number) =>
@@ -716,8 +782,8 @@ describe("surfaces", () => {
           },
           () =>
             worker.fetch(
-              new Request("https://politik.test/telegram", { method: "POST", headers: { "CF-Connecting-IP": "91.108.4.1" }, body: JSON.stringify({ message: { chat: { id: chat }, text: "What is going on?" } }) }),
-              env({ TELEGRAM_BOT_TOKEN: "tok", ASK_LIMITER: binding, GROQ_API_KEY: "gsk-test" }),
+              new Request("https://politik.test/telegram", { method: "POST", headers: { "CF-Connecting-IP": "91.108.4.1", "X-Telegram-Bot-Api-Secret-Token": "s3cret" }, body: JSON.stringify({ message: { chat: { id: chat }, text: "What is going on?" } }) }),
+              env({ TELEGRAM_BOT_TOKEN: "tok", TELEGRAM_WEBHOOK_SECRET: "s3cret", ASK_LIMITER: binding, GROQ_API_KEY: "gsk-test" }),
             ),
         );
       await ask(9);
@@ -728,14 +794,268 @@ describe("surfaces", () => {
       assert.notEqual(sent[1].text, BUSY_REPLY, "chat 10 is answered");
     });
 
-    test("telegramLimitKey: the chat id, else the caller's address, and nothing for a local request", () => {
+    test("Telegram with no secret set: a chat id proves nothing, so 30 updates with made-up chat ids from one address are limited after 10", async () => {
+      const { binding, counts } = counting(10);
+      const sent: any[] = [];
+      const e = env({ TELEGRAM_BOT_TOKEN: "tok", ASK_LIMITER: binding, GROQ_API_KEY: "gsk-test" });
+      await withFetch(
+        (url, init) => {
+          if (url.startsWith("https://api.telegram.org/")) {
+            sent.push(JSON.parse(String(init?.body)));
+            return new Response("{}");
+          }
+          return fakeGroq(url, init);
+        },
+        async () => {
+          for (let i = 0; i < 30; i++) {
+            const update = { message: { chat: { id: 5000 + i }, text: "What is going on?" } };
+            await worker.fetch(new Request("https://politik.test/telegram", { method: "POST", headers: { "CF-Connecting-IP": "91.108.4.1" }, body: JSON.stringify(update) }), e);
+          }
+        },
+      );
+      assert.deepEqual([...counts.keys()], ["91.108.4.1"], "every update was counted against the address");
+      assert.equal(counts.get("91.108.4.1"), 30);
+      assert.equal(sent.length, 30);
+      assert.equal(sent.filter((m) => m.text === BUSY_REPLY).length, 20, "10 answered, 20 told it is busy");
+      assert.equal(sent.slice(0, 10).filter((m) => m.text === BUSY_REPLY).length, 0, "the first 10 were answered");
+    });
+
+    test("Telegram with the secret set and checked: the same 30 chats each have their own allowance", async () => {
+      const { binding, counts } = counting(10);
+      const sent: any[] = [];
+      const e = env({ TELEGRAM_BOT_TOKEN: "tok", TELEGRAM_WEBHOOK_SECRET: "s3cret", ASK_LIMITER: binding, GROQ_API_KEY: "gsk-test" });
+      await withFetch(
+        (url, init) => {
+          if (url.startsWith("https://api.telegram.org/")) {
+            sent.push(JSON.parse(String(init?.body)));
+            return new Response("{}");
+          }
+          return fakeGroq(url, init);
+        },
+        async () => {
+          for (let i = 0; i < 30; i++) {
+            const update = { message: { chat: { id: 5000 + i }, text: "What is going on?" } };
+            await worker.fetch(new Request("https://politik.test/telegram", { method: "POST", headers: { "CF-Connecting-IP": "91.108.4.1", "X-Telegram-Bot-Api-Secret-Token": "s3cret" }, body: JSON.stringify(update) }), e);
+          }
+        },
+      );
+      assert.equal(counts.size, 30);
+      assert.equal(sent.filter((m) => m.text === BUSY_REPLY).length, 0);
+    });
+
+    test("telegramLimitKey: the chat id only for a verified update, else the caller's address, and nothing for a local request", () => {
       const from = (url: string, ip?: string) => new Request(url, { method: "POST", headers: ip ? { "CF-Connecting-IP": ip } : {} });
-      assert.equal(telegramLimitKey(from("https://politik.test/telegram", "91.108.4.1"), 42), "telegram:42");
-      assert.equal(telegramLimitKey(from("https://politik.test/telegram", "91.108.4.1"), -1001234567890), "telegram:-1001234567890", "a group's id is negative");
-      assert.equal(telegramLimitKey(from("https://politik.test/telegram", "91.108.4.1"), undefined), "91.108.4.1", "no chat id: the address");
-      assert.equal(telegramLimitKey(from("https://politik.test/telegram", "91.108.4.1"), "not a number" as unknown as number), "91.108.4.1");
-      assert.equal(telegramLimitKey(from("https://politik.test/telegram"), undefined), "", "no chat id and no address: nothing to count");
-      assert.equal(telegramLimitKey(from("http://localhost:8787/telegram", "127.0.0.1"), 42), "", "local runs are never limited");
+      const tg = "https://politik.test/telegram";
+      assert.equal(telegramLimitKey(from(tg, "91.108.4.1"), 42, true), "telegram:42");
+      assert.equal(telegramLimitKey(from(tg, "91.108.4.1"), -1001234567890, true), "telegram:-1001234567890", "a group's id is negative");
+      assert.equal(telegramLimitKey(from(tg, "91.108.4.1"), 42, false), "91.108.4.1", "not verified: the address, whatever the update says");
+      assert.equal(telegramLimitKey(from(tg, "91.108.4.1"), 42), "91.108.4.1", "verified is false unless it is said to be true");
+      assert.equal(telegramLimitKey(from(tg, "91.108.4.1"), undefined, true), "91.108.4.1", "no chat id: the address");
+      assert.equal(telegramLimitKey(from(tg, "91.108.4.1"), "not a number" as unknown as number, true), "91.108.4.1");
+      assert.equal(telegramLimitKey(from(tg), undefined, true), "", "no chat id and no address: nothing to count");
+      assert.equal(telegramLimitKey(from("http://localhost:8787/telegram", "127.0.0.1"), 42, true), "", "local runs are never limited");
+    });
+
+    describe("a forged Telegram update is ignored, not an error", () => {
+      const forge = (body: string, e: Env = env({ TELEGRAM_BOT_TOKEN: "tok" })) =>
+        withFetch(noModel, () => worker.fetch(new Request("https://politik.test/telegram", { method: "POST", headers: { "CF-Connecting-IP": "91.108.4.1" }, body }), e));
+
+      test("a JSON null, a number, a string, a list or an empty object: 200 ok, nothing sent, nothing run", async () => {
+        for (const body of ["null", "5", '"hi"', "[]", "[1,2]", "{}", "true"]) {
+          const { result, urls } = await forge(body);
+          assert.equal(result.status, 200, body);
+          assert.equal(await result.text(), "ok", body);
+          assert.deepEqual(urls, [], body);
+        }
+      });
+
+      test("a text that is not a string, or a message or chat that is not an object: 200 ok, nothing sent, nothing run", async () => {
+        const bodies = [
+          { message: { chat: { id: 1 }, text: 5 } },
+          { message: { chat: { id: 1 }, text: { trim: "x" } } },
+          { message: { chat: { id: 1 }, text: ["/start"] } },
+          { message: { chat: { id: 1 }, text: null } },
+          { message: null },
+          { message: "hi" },
+          { message: [1] },
+          { message: { chat: "x", text: "hi" } },
+          { message: { chat: null, text: "hi" } },
+          { message: { chat: { id: "1" }, text: "hi" } },
+          { message: { chat: { id: null }, text: "hi" } },
+          { message: { chat: { id: { a: 1 } }, text: "hi" } },
+        ];
+        for (const body of bodies) {
+          const { result, urls } = await forge(JSON.stringify(body));
+          assert.equal(result.status, 200, JSON.stringify(body));
+          assert.equal(await result.text(), "ok", JSON.stringify(body));
+          assert.deepEqual(urls, [], JSON.stringify(body));
+        }
+      });
+
+      test("a body that is not JSON at all is still ignored", async () => {
+        const { result, urls } = await forge("not json {");
+        assert.equal(result.status, 200);
+        assert.deepEqual(urls, []);
+      });
+
+      test("a real update is still answered", async () => {
+        const sent: any[] = [];
+        const { result } = await withFetch(
+          (_url, init) => (sent.push(JSON.parse(String(init?.body))), new Response("{}")),
+          () => worker.fetch(new Request("https://politik.test/telegram", { method: "POST", body: JSON.stringify({ message: { chat: { id: 7 }, text: "/start" } }) }), env({ TELEGRAM_BOT_TOKEN: "tok" })),
+        );
+        assert.equal(await result.text(), "ok");
+        assert.deepEqual(sent, [{ chat_id: 7, text: "Ask what is going on." }]);
+      });
+    });
+  });
+
+  describe("/api/saying is limited like the questions", () => {
+    const limiter = (allow: boolean | ((key: string) => boolean)) => {
+      const keys: string[] = [];
+      return { keys, binding: { limit: async ({ key }: { key: string }) => (keys.push(key), { success: typeof allow === "function" ? allow(key) : allow }) } as RateLimiter };
+    };
+    const saying = (method: "GET" | "POST", ip?: string, url = "https://politik.test/api/saying") =>
+      new Request(url, { method, headers: ip ? { "CF-Connecting-IP": ip } : {}, ...(method === "POST" ? { body: "{}" } : {}) });
+    const run = (request: Request, e: Env) => withFetch(() => Promise.reject(new TypeError("no network in tests")), () => worker.fetch(request, e));
+
+    test("GET and POST over the limit: HTTP 429 with the JSON error, and nothing is fetched or tagged", async () => {
+      for (const method of ["GET", "POST"] as const) {
+        const { binding, keys } = limiter(false);
+        const { result, urls } = await run(saying(method, "203.0.113.7"), env({ ASK_LIMITER: binding, TYPESAFE_API_KEY: "tk" }));
+        assert.equal(result.status, 429, method);
+        assert.match(result.headers.get("content-type") ?? "", /^application\/json/);
+        assert.deepEqual(await result.json(), { error: BUSY_REPLY }, method);
+        assert.deepEqual(urls, [], `${method}: no Bluesky search`);
+        assert.deepEqual(keys, ["203.0.113.7"], method);
+      }
+    });
+
+    test("under the limit it answers as before, after one check on the caller's IP", async () => {
+      for (const method of ["GET", "POST"] as const) {
+        const { binding, keys } = limiter(true);
+        const { result, urls } = await run(saying(method, "198.51.100.4"), env({ ASK_LIMITER: binding }));
+        assert.equal(result.status, 200, method);
+        assert.ok(Array.isArray(((await result.json()) as { items: unknown }).items), method);
+        assert.ok(urls.length >= 1, `${method}: the Bluesky search was tried`);
+        assert.deepEqual(keys, ["198.51.100.4"], method);
+      }
+    });
+
+    test("per caller, and skipped with no binding, no address or a local request", async () => {
+      const { binding, keys } = limiter((key) => key !== "203.0.113.7");
+      const e = env({ ASK_LIMITER: binding });
+      assert.equal((await run(saying("GET", "203.0.113.7"), e)).result.status, 429);
+      assert.equal((await run(saying("GET", "203.0.113.8"), e)).result.status, 200);
+      assert.equal((await run(saying("GET", "203.0.113.7"), env())).result.status, 200, "no binding");
+      const over = limiter(false);
+      const limited = env({ ASK_LIMITER: over.binding });
+      assert.equal((await run(saying("GET"), limited)).result.status, 200, "no CF-Connecting-IP");
+      assert.equal((await run(saying("GET", "127.0.0.1", "http://localhost:8787/api/saying"), limited)).result.status, 200, "wrangler dev");
+      assert.deepEqual(over.keys, []);
+      assert.deepEqual(keys, ["203.0.113.7", "203.0.113.8"]);
+    });
+  });
+
+  describe("a browser page from another site cannot use the open endpoints", () => {
+    const keysOf = () => {
+      const keys: string[] = [];
+      return { keys, binding: { limit: async ({ key }: { key: string }) => (keys.push(key), { success: true }) } as RateLimiter };
+    };
+    const at = (path: string, init: RequestInit & { origin?: string } = {}) => {
+      const { origin, ...rest } = init;
+      const headers = new Headers(rest.headers);
+      headers.set("CF-Connecting-IP", "203.0.113.7");
+      if (origin !== undefined) headers.set("Origin", origin);
+      return new Request(`https://politik.test${path}`, { ...rest, headers });
+    };
+    const run = (request: Request, e: Env) => withFetch(() => Promise.reject(new TypeError("no network in tests")), () => worker.fetch(request, e));
+    const askPost = (origin?: string) => at("/api/ask", { method: "POST", origin, headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "hi" }) });
+    const sayingPost = (origin?: string) => at("/api/saying", { method: "POST", origin, body: "{}" });
+    const upgrade = (path: string, origin?: string) => at(path, { origin, headers: { Upgrade: "websocket", Connection: "Upgrade" } });
+    const AGENT = "/api/voice/v1/agent/converse";
+    const LISTEN = "/api/voice/listen";
+
+    test("POST /api/ask from another origin is a 403 with a short JSON error: no answer, no limiter token spent", async () => {
+      for (const origin of ["https://evil.example", "https://politik.test:8443", "https://politik.test.evil.example", "https://evil.example/https://politik.test", "null", "garbage", ""]) {
+        const { binding, keys } = keysOf();
+        const { result, urls } = await run(askPost(origin), env({ ASK_LIMITER: binding, GROQ_API_KEY: "gsk-test" }));
+        assert.equal(result.status, 403, JSON.stringify(origin));
+        assert.match(result.headers.get("content-type") ?? "", /^application\/json/);
+        assert.equal(typeof ((await result.json()) as { error: unknown }).error, "string");
+        assert.deepEqual(urls, [], "the pipeline did not run");
+        assert.deepEqual(keys, [], "the limiter was not asked");
+      }
+    });
+
+    test("POST /api/ask from this site (the same host) or with no Origin header is answered", async () => {
+      for (const origin of ["https://politik.test", "http://politik.test", undefined]) {
+        const res = await worker.fetch(askPost(origin), env());
+        assert.equal(res.status, 200, String(origin));
+        assert.equal(((await res.json()) as ChatResponse).mode, "greeting", String(origin));
+      }
+    });
+
+    test("POST /api/saying: another origin is 403 and fetches nothing; the same origin or none is answered", async () => {
+      const cross = await run(sayingPost("https://evil.example"), env());
+      assert.equal(cross.result.status, 403);
+      assert.deepEqual(cross.urls, []);
+      for (const origin of ["https://politik.test", undefined]) {
+        const res = await run(sayingPost(origin), env());
+        assert.equal(res.result.status, 200, String(origin));
+        assert.ok(res.urls.length >= 1);
+      }
+    });
+
+    test("the voice agent and listen upgrades: another origin is 403 and Deepgram is not contacted; the same origin or none gets through to Deepgram", async () => {
+      for (const path of [AGENT, LISTEN]) {
+        const { binding, keys } = keysOf();
+        const e = env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" });
+        const cross = await run(upgrade(path, "https://evil.example"), e);
+        assert.equal(cross.result.status, 403, path);
+        assert.deepEqual(cross.urls, [], path);
+        assert.deepEqual(keys, [], `${path}: no limiter token`);
+        const plainProbe = await run(at(path, { origin: "https://evil.example" }), e);
+        assert.equal(plainProbe.result.status, 403, `${path}: a plain GET from another origin is refused too`);
+        for (const origin of ["https://politik.test", undefined]) {
+          const ok = await run(upgrade(path, origin), e);
+          assert.equal(ok.urls.length, 1, `${path} ${origin}: one Deepgram connection`);
+          assert.equal(ok.result.status, 502, "Deepgram is not reachable in tests");
+        }
+      }
+    });
+
+    test("the check comes before the missing-key 503 is needed: with no Deepgram key another origin is still refused as 403", async () => {
+      assert.equal((await run(upgrade(AGENT, "https://evil.example"), env())).result.status, 403);
+    });
+
+    test("endpoints that are not on the list are not affected: GET /api/saying and the page itself", async () => {
+      const res = await run(at("/api/saying", { origin: "https://evil.example" }), env());
+      assert.equal(res.result.status, 200, "GET /api/saying has no origin check");
+    });
+  });
+
+  describe("the spoken reply endpoint turns a Deepgram failure into an answer", () => {
+    test("when the speech request fails, /api/voice/speak is a 502 and not an unhandled rejection", async () => {
+      const request = new Request("https://politik.test/api/voice/speak", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "Hello there" }) });
+      const { result, urls } = await withFetch(
+        () => {
+          throw new TypeError("fetch failed");
+        },
+        () => worker.fetch(request, env({ DEEPGRAM_API_KEY: "dg-test" })),
+      );
+      assert.equal(result.status, 502);
+      assert.equal(urls.length, 1);
+      assert.doesNotMatch(await result.text(), /fetch failed|dg-test/);
+    });
+
+    test("a refusal from Deepgram is still a 502, and good audio is passed on", async () => {
+      const request = () => new Request("https://politik.test/api/voice/speak", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "Hello there" }) });
+      const refused = await withFetch(() => new Response("no", { status: 401 }), () => worker.fetch(request(), env({ DEEPGRAM_API_KEY: "dg-test" })));
+      assert.equal(refused.result.status, 502);
+      const good = await withFetch(() => new Response("audio", { headers: { "content-type": "audio/mpeg" } }), () => worker.fetch(request(), env({ DEEPGRAM_API_KEY: "dg-test" })));
+      assert.equal(good.result.status, 200);
+      assert.equal(await good.result.text(), "audio");
     });
   });
 
@@ -966,8 +1286,11 @@ describe("surfaces", () => {
       assert.deepEqual(tune(settings({ prompt })).knowledge, [{ title: "A post" }]);
     });
 
-    test("other messages (audio settings of another kind, keep-alives, text that is not JSON) are not touched", () => {
-      for (const raw of [JSON.stringify({ type: "KeepAlive" }), JSON.stringify({ type: "InjectUserMessage", content: "hi" }), "not json", JSON.stringify([1, 2])]) {
+    test("other messages (keep-alives, injected text) keep their content; text that is not a JSON object is dropped", () => {
+      for (const message of [{ type: "KeepAlive" }, { type: "InjectUserMessage", content: "hi" }]) {
+        assert.deepEqual(tune(JSON.stringify(message)).msg, message);
+      }
+      for (const raw of ["not json", JSON.stringify([1, 2])]) {
         assert.equal(tuneSettings(raw, ORIGIN), null, raw);
       }
     });
@@ -1047,9 +1370,10 @@ describe("surfaces", () => {
       assert.deepEqual(msg.agent.speak, speak);
     });
 
-    test("a message with neither a think nor a speak section to pin is not touched", () => {
-      assert.equal(tuneSettings(JSON.stringify({ type: "Settings", agent: { language: "en" } }), ORIGIN), null);
-      assert.equal(tuneSettings(JSON.stringify({ type: "UpdateSpeak" }), ORIGIN), null);
+    test("a message with neither a think nor a speak section to pin keeps its content", () => {
+      for (const message of [{ type: "Settings", agent: { language: "en" } }, { type: "UpdateSpeak" }]) {
+        assert.deepEqual(tune(message).msg, message);
+      }
     });
   });
 });

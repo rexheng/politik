@@ -51,12 +51,13 @@ export function resolveChatModels(env: Record<string, string | undefined>): { co
 }
 
 /**
- * True when `model` is one Groq lists as a reasoning model, the only kind that takes `reasoning_effort`: `openai/gpt-oss-*`
- * and the `qwen/qwen3*` family. GROQ_CHAT_MODEL and GROQ_ROUTER_MODEL can name any model, and a model without the setting
- * may answer a request that has it with a 400, so the field is sent only when this is true.
+ * True when `model` is a gpt-oss model (`openai/gpt-oss-*`), the models Groq documents as taking `reasoning_effort`
+ * with low, medium or high. GROQ_CHAT_MODEL and GROQ_ROUTER_MODEL can name any model, and a model without the setting may
+ * answer a request that has it with a 400, so the field is sent only when this is true. (Other reasoning models, such as
+ * the qwen3 family, take other values or other settings, so they are left out until they are tested.)
  */
 export function supportsReasoningEffort(model: string): boolean {
-  return /^(openai\/gpt-oss-|qwen\/qwen3)/.test(model.trim().toLowerCase());
+  return /^openai\/gpt-oss-/.test(model.trim().toLowerCase());
 }
 
 /** Models the docs list under "Models with Strict Mode" (constrained decoding). */

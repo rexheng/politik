@@ -51,6 +51,13 @@ const POLITIK_FN = {
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
 /**
+ * The language model the voice agent thinks with: the server's choice, not the page's. The owner's Deepgram plan pays for
+ * every token of it, so whatever provider and model the page's settings name, this is what the agent gets. (It is what the
+ * page asks for today.)
+ */
+export const VOICE_THINK_PROVIDER = { type: "open_ai", model: "gpt-4o-mini" } as const;
+
+/**
  * The think endpoint the Worker offers Deepgram: its own /api/voice/think and nothing the page names. It exists only on
  * an https origin, because Deepgram's servers call it; a local `wrangler dev` (http) has none.
  */
@@ -66,30 +73,6 @@ function ownThinkEndpoint(origin: string): { url: string; headers: Record<string
 const INSTRUCTION =
   "When the person asks a real question, call politik with that question. Speak the function result as the whole reply. Do not answer a real question from your own knowledge.";
 
-/**
- * Makes one `think` section safe to hand to the owner's Deepgram agent, whatever the page put in it, and returns the
- * session notes found in its prompt. The agent only ever calls the Worker:
- * - A page that asks for a custom think endpoint (any `endpoint`, whatever it names) is given the Worker's own
- *   /api/voice/think, with no headers of its own, and none of its functions: a function can carry an `endpoint` that
- *   Deepgram would call.
- * - Otherwise (the page asks for none, or the origin is not reachable from Deepgram) the agent gets the `politik` function,
- *   which it calls on this socket, and the prompt tells it to use it.
- */
-function pinThink(section: Record<string, unknown>, origin: string): unknown {
-  const prompt = typeof section.prompt === "string" ? section.prompt : "";
-  const knowledge = knowledgeFromPrompt(prompt);
-  const own = "endpoint" in section ? ownThinkEndpoint(origin) : null;
-  if (own) {
-    section.endpoint = own;
-    delete section.functions;
-    return knowledge;
-  }
-  delete section.endpoint;
-  section.functions = [POLITIK_FN];
-  section.prompt = prompt.includes("call politik") ? prompt : `${prompt}\n${INSTRUCTION}`.trim();
-  return knowledge;
-}
-
 function knowledgeFromPrompt(prompt: string): unknown {
   const at = prompt.lastIndexOf(NOTES);
   if (at === -1) return undefined;
@@ -102,52 +85,154 @@ function knowledgeFromPrompt(prompt: string): unknown {
   return undefined;
 }
 
-/**
- * The sections of a `think` or `speak` setting as a list of objects, which are the ones that can carry an endpoint: the
- * setting itself when it is an object, or the objects in it when it is a list. A list is cut down to those objects in
- * place, so an entry that is not an object (or a list inside the list) cannot carry one past the pin. Null when the
- * setting is neither.
- */
-function sectionsOf(holder: Record<string, unknown>, key: string): Record<string, unknown>[] | null {
-  const value = holder[key];
-  if (isRecord(value)) return [value];
-  if (!Array.isArray(value)) return null;
-  const objects = value.filter(isRecord);
-  holder[key] = objects;
-  return objects;
+// ---- what the page may say to the owner's Deepgram agent ---------------------------------------------------------------
+// The page is untrusted: anyone can open the voice socket with their own script. Deepgram would follow any URL in the
+// think or speak settings (a custom language model, a function that is called over HTTP, a custom voice), and would read
+// a lenient parse of a frame that this Worker read differently. So no text frame is ever passed on as the page wrote it:
+// it is parsed here (a frame that does not parse is dropped), every URL under a think or speak section is taken out, the
+// think provider is the server's, and what is sent is the JSON of what was kept.
+
+/** How deep a message may nest before the rest of it is cut off (a real message is three or four levels deep). */
+const MAX_DEPTH = 32;
+const DROP = Symbol("drop");
+/** A key that names a URL: url, uri, href, endpoint and anything built on them (baseUrl, api_url, webhookUri). "security" and "during" are not. */
+const URL_KEY = /url|endpoint|href|(^|[^a-z])uri|uri$/i;
+/** A string that is a URL, whatever the key: a scheme and `//` (also `//host`), or a scheme that runs code or carries data. */
+const URL_VALUE = /^\s*(?:(?:[a-z][a-z0-9+.-]*:)?\/\/|(?:https?|wss?|ftp|file|data|blob|javascript|mailto):)\S/i;
+
+/** A string that holds a JSON object, array or string is the value it holds (some parsers read it so); anything else is itself. */
+function unwrapJson(value: unknown): unknown {
+  let v = value;
+  for (let i = 0; i < 4 && typeof v === "string"; i++) {
+    const text = v.trim();
+    if (!/^[{["]/.test(text)) break;
+    try {
+      const parsed: unknown = JSON.parse(text);
+      if (typeof parsed !== "string" && (typeof parsed !== "object" || parsed === null)) break;
+      v = parsed;
+    } catch {
+      break;
+    }
+  }
+  return v;
 }
 
 /**
- * The page's messages that set the agent's think or speak section, rewritten so that the agent only calls the Worker or
- * Deepgram's own voices, with the session notes from the think prompt. A think section is pinned by `pinThink`. A speak
- * section loses its `endpoint`: Deepgram would send every spoken line to the URL it names, and the Worker has no speech
- * endpoint of its own to put there. These are `Settings`, and also `UpdateThink` and `UpdateSpeak`, which replace one
- * section in the middle of a session and would otherwise undo the pin. Null for any other message, or one with neither
- * section, which goes on unchanged. `origin` is the Worker's own origin, taken from the request that opened the socket.
+ * `value` with every URL taken out: a key that names one is dropped with its value, a string that is one is dropped from
+ * its object or list, and a string that holds JSON is read through and cleaned too. A `prompt` is text for the model,
+ * not a setting, so it is kept as written unless it is itself a URL. Too deep a value is dropped.
+ */
+function scrub(value: unknown, depth = 0, isPrompt = false): unknown {
+  if (depth > MAX_DEPTH) return DROP;
+  if (typeof value === "string") {
+    if (URL_VALUE.test(value)) return DROP;
+    if (isPrompt) return value;
+    const inner = unwrapJson(value);
+    return inner === value ? value : scrub(inner, depth + 1);
+  }
+  if (Array.isArray(value)) return value.map((item) => scrub(item, depth + 1)).filter((item) => item !== DROP);
+  if (isRecord(value)) {
+    const out: Record<string, unknown> = Object.create(null);
+    for (const [key, item] of Object.entries(value)) {
+      if (key === "__proto__" || URL_KEY.test(key)) continue;
+      const clean = scrub(item, depth + 1, key.toLowerCase() === "prompt");
+      if (clean !== DROP) out[key] = clean;
+    }
+    return out;
+  }
+  return value;
+}
+
+type Tuning = { origin: string; notes: unknown[] };
+
+/** Settings that the Worker sets itself: a page's spelling of them in another letter case is not left beside them. */
+const OWN_KEYS = ["prompt", "provider", "functions", "endpoint"];
+
+/**
+ * One think or speak section, safe to hand to the owner's Deepgram agent. A speak section is the page's with its URLs taken
+ * out. A think section is that too, and in addition:
+ * - its provider and model are the server's (`VOICE_THINK_PROVIDER`);
+ * - a page that asks for a custom think endpoint (any `endpoint` key) is given the Worker's own /api/voice/think, with no
+ *   headers of its own, and none of its functions (a function can carry an endpoint that Deepgram would call);
+ * - otherwise (or on an origin Deepgram cannot reach) the agent gets the `politik` function, which it calls on this socket,
+ *   and the prompt tells it to use it.
+ * The session notes found in the think prompt go to `tuning.notes`.
+ */
+function tuneSection(section: Record<string, unknown>, kind: "think" | "speak", tuning: Tuning): Record<string, unknown> {
+  const clean = scrub(section) as Record<string, unknown>;
+  if (kind === "speak") return clean;
+  const wantsEndpoint = Object.keys(section).some((key) => key.toLowerCase() === "endpoint");
+  let prompt = typeof clean.prompt === "string" ? clean.prompt : "";
+  for (const key of Object.keys(clean)) {
+    if (key !== key.toLowerCase() && OWN_KEYS.includes(key.toLowerCase())) {
+      if (key.toLowerCase() === "prompt" && !prompt && typeof clean[key] === "string") prompt = clean[key] as string;
+      delete clean[key];
+    }
+  }
+  tuning.notes.push(knowledgeFromPrompt(prompt));
+  clean.provider = { ...VOICE_THINK_PROVIDER };
+  const own = wantsEndpoint ? ownThinkEndpoint(tuning.origin) : null;
+  if (own) {
+    if (prompt) clean.prompt = prompt;
+    clean.endpoint = own;
+    delete clean.functions;
+    return clean;
+  }
+  delete clean.endpoint;
+  clean.functions = [POLITIK_FN];
+  clean.prompt = prompt.includes("call politik") ? prompt : `${prompt}\n${INSTRUCTION}`.trim();
+  return clean;
+}
+
+/** A think or speak setting, as an object or a list of objects (or either written as a JSON string); anything else is no section and is left out. */
+function tuneSections(value: unknown, kind: "think" | "speak", tuning: Tuning): unknown {
+  const unwrapped = unwrapJson(value);
+  if (Array.isArray(unwrapped)) {
+    return unwrapped
+      .map(unwrapJson)
+      .filter(isRecord)
+      .map((section) => tuneSection(section, kind, tuning));
+  }
+  return isRecord(unwrapped) ? tuneSection(unwrapped, kind, tuning) : DROP;
+}
+
+/** `node` with every think and speak section in it, wherever it sits, replaced by its safe form. */
+function tuneNode(node: unknown, tuning: Tuning, depth: number): unknown {
+  if (depth > MAX_DEPTH) return DROP;
+  if (Array.isArray(node)) return node.map((item) => tuneNode(item, tuning, depth + 1)).filter((item) => item !== DROP);
+  if (!isRecord(node)) return node;
+  const out: Record<string, unknown> = Object.create(null);
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "__proto__") continue;
+    const lower = key.toLowerCase();
+    const tuned =
+      lower === "think" || lower === "speak"
+        ? tuneSections(value, lower, tuning)
+        : tuneNode(lower === "agent" ? unwrapJson(value) : value, tuning, depth + 1);
+    if (tuned !== DROP) out[lower === "think" || lower === "speak" ? lower : key] = tuned;
+  }
+  return out;
+}
+
+/**
+ * The text to send Deepgram for a text frame from the page, with the session notes found in the think prompt; null when
+ * the frame is dropped, which is when it does not parse as JSON (NaN, a byte-order mark, text after the JSON, plain text)
+ * or is not a JSON object. The raw text is never sent: what is sent is the JSON of the parsed message with every think and
+ * speak section made safe (`tuneSection`), in any message, whatever its `type` says, because a parser that reads the type
+ * differently, or the same message twice, must find nothing to follow. `origin` is the Worker's own origin, taken from the
+ * request that opened the socket.
  */
 export function tuneSettings(raw: string, origin: string): { text: string; knowledge: unknown } | null {
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    const parsed = unwrapJson(JSON.parse(raw));
+    if (!isRecord(parsed)) return null;
+    const tuning: Tuning = { origin, notes: [] };
+    const tuned = tuneNode(parsed, tuning, 0);
+    if (!isRecord(tuned)) return null;
+    return { text: JSON.stringify(tuned), knowledge: tuning.notes.find((found) => found !== undefined) };
   } catch {
     return null;
   }
-  if (!isRecord(parsed)) return null;
-  let think: Record<string, unknown>[] | null = null;
-  let speak: Record<string, unknown>[] | null = null;
-  if (parsed.type === "Settings") {
-    if (!isRecord(parsed.agent)) return null;
-    think = sectionsOf(parsed.agent, "think");
-    speak = sectionsOf(parsed.agent, "speak");
-  } else if (parsed.type === "UpdateThink") {
-    think = sectionsOf(parsed, "think");
-  } else if (parsed.type === "UpdateSpeak") {
-    speak = sectionsOf(parsed, "speak");
-  }
-  if (!think && !speak) return null;
-  const notes = (think ?? []).map((section) => pinThink(section, origin)); // every section is pinned, not just the first
-  for (const section of speak ?? []) delete section.endpoint;
-  return { text: JSON.stringify(parsed), knowledge: notes.find((found) => found !== undefined) };
 }
 
 function questionFromArguments(raw: unknown): string {
@@ -242,40 +327,91 @@ export async function answerFunctionCall(raw: string, env: Env, remote: WebSocke
   return true;
 }
 
-async function proxySocket(
-  request: Request,
-  upstreamUrl: string,
-  apiKey: string,
-  env?: Env,
-): Promise<Response> {
-  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-    return new Response("Expected websocket", { status: 426 });
-  }
+/** The part of a WebSocket that the bridge uses (a Workers WebSocket, or a fake in a test). */
+export type BridgeSocket = {
+  send(data: string | ArrayBuffer | ArrayBufferView): void;
+  close(code?: number, reason?: string): void;
+  addEventListener(type: string, listener: (event: any) => void): void;
+  accept(options?: { allowHalfOpen?: boolean }): void;
+};
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(upstreamUrl, {
-      headers: {
-        Upgrade: "websocket",
-        Connection: "Upgrade",
-        Authorization: `Token ${apiKey}`,
-      },
-    });
-  } catch {
-    return unavailable();
-  }
+/** The timer functions the session guard uses; a test gives it ones that only move when it says so. */
+export type Timers = { setTimeout(fn: () => void, ms: number): unknown; clearTimeout(id: unknown): void };
 
-  const remote = upstream.webSocket;
-  if (!remote) return unavailable();
+/** The longest a voice session may last. Deepgram bills agent time, and a socket the page never closes would run for ever. */
+export const MAX_SESSION_MS = 10 * 60_000;
+/** How long a session may go without a frame from the page (audio, or a keep-alive) before it is closed. */
+export const IDLE_MS = 60_000;
 
-  const pair = new WebSocketPair();
-  const client = pair[0];
-  const server = pair[1];
+/**
+ * Ends a session that has gone on too long or has gone quiet: `onExpire("session limit")` after `maxMs` from the start,
+ * or `onExpire("idle")` after `idleMs` with no `touch()` (a frame from the page). It fires once and leaves no timer
+ * running; `stop()` cancels it for a session that ended by itself.
+ */
+export function sessionGuard(opts: {
+  onExpire(reason: "session limit" | "idle"): void;
+  maxMs?: number;
+  idleMs?: number;
+  timers?: Timers;
+}): { touch(): void; stop(): void } {
+  const timers: Timers = opts.timers ?? { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>) };
+  const idleMs = opts.idleMs ?? IDLE_MS;
+  let done = false;
+  let idle: unknown;
+  let limit: unknown;
+  const stop = () => {
+    done = true;
+    timers.clearTimeout(idle);
+    timers.clearTimeout(limit);
+  };
+  const expire = (reason: "session limit" | "idle") => {
+    if (done) return;
+    stop();
+    opts.onExpire(reason);
+  };
+  const arm = () => timers.setTimeout(() => expire("idle"), idleMs);
+  idle = arm();
+  limit = timers.setTimeout(() => expire("session limit"), opts.maxMs ?? MAX_SESSION_MS);
+  return {
+    touch() {
+      if (done) return;
+      timers.clearTimeout(idle);
+      idle = arm();
+    },
+    stop,
+  };
+}
+
+/**
+ * Joins the page's socket (`server`) to Deepgram's (`remote`) and accepts both. Audio goes through as it is. A text frame
+ * from the page goes through `tuneSettings`, so Deepgram only ever gets a rewritten copy, and a frame that does not parse
+ * is dropped. A text frame from Deepgram is checked for the agent's `politik` function call (`answerFunctionCall`), and
+ * otherwise goes on to the page. Both sockets are closed after `MAX_SESSION_MS`, and after `IDLE_MS` with no frame from
+ * the page (any frame, even one that is dropped, shows the page is there).
+ */
+export function bridgeSockets(opts: {
+  server: BridgeSocket;
+  remote: BridgeSocket;
+  /** With the environment the agent's function calls are answered; the listen proxy has none. */
+  env?: Env;
+  /** The Worker's own origin, for the think endpoint it offers. */
+  origin: string;
+  /** The rate limit's key for the caller, for the questions of this session. */
+  ip: string;
+  timers?: Timers;
+  maxSessionMs?: number;
+  idleMs?: number;
+  /** For tests: replaces `answerFunctionCall`. */
+  answerCall?: typeof answerFunctionCall;
+}): void {
+  const { server, remote, env, origin } = opts;
+  const answerCall = opts.answerCall ?? answerFunctionCall;
 
   let shuttingDown = false;
   const shutdown = (code = 1011, reason = "unavailable") => {
     if (shuttingDown) return;
     shuttingDown = true;
+    guard.stop();
     try {
       remote.close(code, reason);
     } catch {
@@ -287,9 +423,11 @@ async function proxySocket(
       // already closed
     }
   };
+  const guard = sessionGuard({ onExpire: (reason) => shutdown(1000, reason), timers: opts.timers, maxMs: opts.maxSessionMs, idleMs: opts.idleMs });
 
-  const forwardClose = (from: WebSocket, to: WebSocket) => {
+  const forwardClose = (from: BridgeSocket, to: BridgeSocket) => {
     from.addEventListener("close", (event) => {
+      guard.stop();
       if (shuttingDown) return;
       shuttingDown = true;
       try {
@@ -300,21 +438,16 @@ async function proxySocket(
     });
   };
 
-  const origin = new URL(request.url).origin;
   let sessionKnowledge: unknown;
-  const session: FunctionCallSession = { client: server, ip: limitKey(request), history: [] };
+  const session: FunctionCallSession = { client: server as unknown as WebSocket, ip: opts.ip, history: [] };
   server.addEventListener("message", (event) => {
+    guard.touch();
     try {
       if (typeof event.data === "string") {
-        if (env) {
-          const tuned = tuneSettings(event.data, origin);
-          if (tuned) {
-            sessionKnowledge = tuned.knowledge;
-            remote.send(tuned.text);
-            return;
-          }
-        }
-        remote.send(event.data);
+        const tuned = tuneSettings(event.data, origin);
+        if (!tuned) return; // not JSON the Worker can read: not passed on
+        if (tuned.knowledge !== undefined) sessionKnowledge = tuned.knowledge;
+        remote.send(tuned.text);
         return;
       }
       const bytes = asBytes(event.data);
@@ -344,7 +477,7 @@ async function proxySocket(
       if (typeof event.data === "string") {
         if (env) {
           const raw = event.data;
-          void answerFunctionCall(raw, env, remote, sessionKnowledge, session).then(
+          void answerCall(raw, env, remote as unknown as WebSocket, sessionKnowledge, session).then(
             (handled) => {
               if (handled || shuttingDown) return;
               try {
@@ -389,6 +522,39 @@ async function proxySocket(
 
   server.accept({ allowHalfOpen: true });
   remote.accept({ allowHalfOpen: true });
+}
+
+async function proxySocket(
+  request: Request,
+  upstreamUrl: string,
+  apiKey: string,
+  env?: Env,
+): Promise<Response> {
+  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+    return new Response("Expected websocket", { status: 426 });
+  }
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(upstreamUrl, {
+      headers: {
+        Upgrade: "websocket",
+        Connection: "Upgrade",
+        Authorization: `Token ${apiKey}`,
+      },
+    });
+  } catch {
+    return unavailable();
+  }
+
+  const remote = upstream.webSocket;
+  if (!remote) return unavailable();
+
+  const pair = new WebSocketPair();
+  const client = pair[0];
+  const server = pair[1];
+
+  bridgeSockets({ server, remote, env, origin: new URL(request.url).origin, ip: limitKey(request) });
 
   const headers = new Headers();
   const protocol = selectedProtocol(request);
