@@ -62,6 +62,11 @@ export interface BuildOptions {
   models: { enrich: string; verify: string };
   fetchImpl?: typeof fetch;
   browserbaseKey?: string;
+  /**
+   * Ignore the raw caches and download again: "downloads" the files an earlier run downloaded and the GeBIZ list, "all"
+   * also the files placed in rawDir by hand. See fetch.ts.
+   */
+  refresh?: "downloads" | "all";
   /** Adds the GeBIZ tenders chosen by the selection rule. Default false. */
   gebiz?: boolean;
   /** The GeBIZ selection rule. Default: GEBIZ_RULE. */
@@ -246,7 +251,7 @@ function ruleFingerprint(rule: GebizRule): string {
  * Every tender the rule matches is cached in `${rawDir}/gebiz-tenders.json` on the first fetch, together with a fingerprint
  * of the rule, and read from there while the rule is unchanged, so the output stays the same even though the live dataset
  * grows. A changed rule fetches again; a changed `max` or quota does not, because they only cut the cached list.
- * Delete the file to take a fresh selection.
+ * `refresh` (or deleting the file) takes a fresh selection.
  */
 async function loadTenders(opts: BuildOptions): Promise<Tender[]> {
   const rule = opts.gebizRule ?? GEBIZ_RULE;
@@ -255,7 +260,7 @@ async function loadTenders(opts: BuildOptions): Promise<Tender[]> {
   const cachePath = join(opts.rawDir, "gebiz-tenders.json");
   const fingerprint = ruleFingerprint(rule);
 
-  const cached = TenderCacheSchema.safeParse(await readJsonOrUndefined(cachePath));
+  const cached = TenderCacheSchema.safeParse(opts.refresh ? undefined : await readJsonOrUndefined(cachePath));
   if (cached.success && cached.data.fingerprint === fingerprint) return selectTenders(rule, cached.data.tenders);
 
   let tenders: Tender[];
@@ -317,6 +322,14 @@ function llmReason(e: LlmError): string {
   return "invalid model output";
 }
 
+/** What goes into the manifest when a step fails for a reason that is not an LlmError. The message itself goes to the console. */
+const NOT_VALID_REASON = { enrichment: "enrichment failed: invalid model output", verification: "verification failed: invalid model output" } as const;
+function failureReason(stage: string): string {
+  if (stage === "loading") return "loading failed";
+  if (stage === "verification") return NOT_VALID_REASON.verification;
+  return NOT_VALID_REASON.enrichment; // enrichment, or assembly of what the model returned
+}
+
 type Done =
   | { kind: "built"; record: PolicyRecord; passages: Passage[]; stat: RecordStat; reachedEnrichment: true }
   | {
@@ -326,6 +339,8 @@ type Done =
       reachedEnrichment: boolean;
       /** Set when a Groq call failed. */
       llmError?: LlmError;
+      /** What really went wrong, for the console log only: the manifest gets the fixed `reason`. */
+      detail?: string;
     };
 
 /**
@@ -395,18 +410,19 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       dropped: [],
     };
     let reachedEnrichment = false;
-    const exclude = (reason: string, failed = false, llmError?: LlmError): Done => ({
+    const exclude = (reason: string, o: { failed?: boolean; llmError?: LlmError; detail?: string } = {}): Done => ({
       kind: "excluded",
       reason,
       stat: {
         ...stat,
         outcome: "excluded",
         reason,
-        ...(failed ? { failed: true } : {}),
-        ...(llmError?.status !== undefined ? { llmStatus: llmError.status } : {}),
+        ...(o.failed ? { failed: true } : {}),
+        ...(o.llmError?.status !== undefined ? { llmStatus: o.llmError.status } : {}),
       },
       reachedEnrichment,
-      ...(llmError ? { llmError } : {}),
+      ...(o.llmError ? { llmError: o.llmError } : {}),
+      ...(o.detail ? { detail: o.detail } : {}),
     });
 
     let stage = "loading";
@@ -416,15 +432,15 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       const loaded =
         tenderText !== undefined
           ? ({ ok: true, text: tenderText } as const)
-          : await loadSource(c, { rawDir: opts.rawDir, fetchImpl: opts.fetchImpl, browserbaseKey: opts.browserbaseKey });
-      if (!loaded.ok) return exclude(loaded.reason);
+          : await loadSource(c, { rawDir: opts.rawDir, fetchImpl: opts.fetchImpl, browserbaseKey: opts.browserbaseKey, refresh: opts.refresh, now });
+      if (!loaded.ok) return exclude(loaded.reason, { detail: loaded.detail });
 
       const text = loaded.text;
       const sha = sha256Hex(text);
       const passages = splitPassages(c.id, text);
       stat.words = wordCount(text);
       stat.passages = passages.length;
-      if (passages.length === 0) return exclude("no text to split into passages");
+      if (passages.length === 0) return exclude("too little text", { detail: "no text to split into passages" });
       const fetched = await fetchedFor(c.id, sha);
 
       stage = "enrichment";
@@ -511,16 +527,17 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       });
       if (!checked.success) {
         const why = checked.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
-        return exclude(clip(`the assembled record is not valid: ${why}`), true);
+        return exclude(NOT_VALID_REASON.enrichment, { failed: true, detail: clip(`the assembled record is not valid: ${why}`) });
       }
       return { kind: "built", record: checked.data, passages, stat: { ...stat, outcome: "built" }, reachedEnrichment: true };
     } catch (e) {
       // A thrown error (a model error such as HTTP 413, a failed repair) costs this record, not the build,
       // unless they are so many that the run as a whole is not usable (see the guard below).
       if (e instanceof LlmError && (stage === "enrichment" || stage === "verification")) {
-        return exclude(`${stage} failed: ${llmReason(e)}`, true, e);
+        return exclude(`${stage} failed: ${llmReason(e)}`, { failed: true, llmError: e });
       }
-      return exclude(clip(`${stage} failed: ${oneLine(errorMessage(e))}`), true);
+      // Anything else is a bad answer from the model or a bug. The manifest gets a fixed phrase; the console gets the message.
+      return exclude(failureReason(stage), { failed: true, detail: clip(`${stage} failed: ${oneLine(errorMessage(e))}`) });
     }
   }
 
@@ -530,7 +547,8 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
     done.push(result);
     const s = result.stat;
     // The console gets what Groq actually said; the manifest only gets the short reason.
-    const raw = result.kind === "excluded" && result.llmError ? ` [${oneLine(errorMessage(result.llmError))}]` : "";
+    const raw =
+      result.kind === "excluded" && (result.llmError || result.detail) ? ` [${oneLine(result.llmError ? errorMessage(result.llmError) : result.detail!)}]` : "";
     const how = result.kind === "built" ? `built (${s.words} words, ${s.passages} passages; enrich ${s.enrich}, verify ${s.verify})` : `excluded: ${result.reason}${raw}`;
     log(`[${i + 1}/${work.length}] ${c.id}: ${how}`);
 

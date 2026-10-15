@@ -1,11 +1,22 @@
 // Loads the text of one candidate's source document: the raw-download cache first, then a plain fetch,
 // then (for blocked sites, when a key is set) a Browserbase browser session.
+//
+// The raw cache is `${rawDir}/${id}.txt|.md|.html|.pdf`. Every file this module downloads comes with a sidecar,
+// `${rawDir}/${id}.source.json`, holding `{ "url": "<the candidate's url>", "fetchedAt": "<ISO time>" }`. The sidecar says
+// which URL the cached files came from: if the candidate's url has changed since, the cache is ignored and the page is
+// fetched again, so a corrected URL never keeps serving the old document. A hand-placed .txt or .md with no sidecar is
+// trusted whatever the url (so is a Firecrawl capture the operator writes without one); to make the cache check the url
+// of such a file, write the sidecar next to it. Where there is a sidecar, it covers every cached file of that id.
+// `refresh` ignores the cache: "downloads" the files that have a sidecar (an earlier run's downloads), "all" every file.
+//
+// Why a load fails is returned as a short, fixed `reason` (it goes into the committed manifest) and, for the console only,
+// the raw `detail`.
 // Node-only build code: never import this from photon/src.
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { Candidate } from "./candidates.ts";
-import { htmlToText, pdfToText } from "./extract.ts";
+import { htmlToText, markdownToText, pdfToText } from "./extract.ts";
 import { wordCount } from "./passages.ts";
 
 /** A page with fewer words than this is a login wall, an error page or an empty shell, not a document. */
@@ -19,7 +30,8 @@ const SAFE_ID = /^[a-z0-9][a-z0-9._-]*$/;
 
 export type LoadResult =
   | { ok: true; text: string; via: "cache" | "fetch" | "browserbase" }
-  | { ok: false; reason: string };
+  /** `reason` is one of: "HTTP <status>", "too little text", "unreachable", "pdf extraction failed", "browser fetch failed", "loading failed". */
+  | { ok: false; reason: string; /** What actually went wrong, for the console only. */ detail?: string };
 
 /** Returns the rendered HTML of a page, fetched through a Browserbase browser session. */
 export type BrowserReader = (url: string, apiKey: string) => Promise<string>;
@@ -30,6 +42,10 @@ export interface LoadSourceOptions {
   browserbaseKey?: string;
   /** Replaces the Browserbase session, for tests. */
   browserReader?: BrowserReader;
+  /** Ignore cached files and fetch again: "downloads" those with a sidecar, "all" every one (hand-placed files too). */
+  refresh?: "downloads" | "all";
+  /** The clock, for the sidecar's `fetchedAt`. */
+  now?: () => Date;
 }
 
 /**
@@ -110,19 +126,63 @@ async function writeCache(path: string, data: Uint8Array | string): Promise<void
 
 const tooLittle = (text: string): boolean => wordCount(text) < MIN_WORDS;
 
-async function readCache(rawDir: string, id: string): Promise<LoadResult | undefined> {
+/** The sidecar's name and content. `undefined` when there is none, `null` when it is there but not usable. */
+const sidecarPath = (rawDir: string, id: string) => join(rawDir, `${id}.source.json`);
+async function readSidecar(rawDir: string, id: string): Promise<{ url: string } | null | undefined> {
+  let raw: string;
+  try {
+    raw = await readFile(sidecarPath(rawDir, id), "utf8");
+  } catch {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    const url = (parsed as { url?: unknown } | null)?.url;
+    return typeof url === "string" ? { url } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Stores a download: first removes the cached files of other kinds for this id (an old .html would otherwise be read
+ * before a new .pdf, and a hand-placed .txt before either), then writes the file, then the sidecar.
+ */
+async function storeDownload(opts: LoadSourceOptions, c: Candidate, ext: (typeof CACHE_EXTENSIONS)[number], data: Uint8Array | string): Promise<void> {
+  await mkdir(opts.rawDir, { recursive: true });
+  for (const other of CACHE_EXTENSIONS) if (other !== ext) await rm(join(opts.rawDir, `${c.id}.${other}`), { force: true });
+  await writeCache(join(opts.rawDir, `${c.id}.${ext}`), data);
+  const fetchedAt = (opts.now ?? (() => new Date()))().toISOString();
+  await writeCache(sidecarPath(opts.rawDir, c.id), `${JSON.stringify({ url: c.url, fetchedAt }, null, 2)}\n`);
+}
+
+/** A hand-placed .txt or .md, or an earlier download, as text. The byte-order mark Windows editors add is dropped. */
+const plainText = (ext: "txt" | "md", bytes: Buffer): string => {
+  const text = bytes.toString("utf8").replace(/^\uFEFF/, "");
+  return ext === "md" ? markdownToText(text) : text;
+};
+
+async function readCache(opts: LoadSourceOptions, c: Candidate): Promise<LoadResult | undefined> {
+  const sidecar = await readSidecar(opts.rawDir, c.id);
+  if (sidecar !== undefined) {
+    // An earlier run's download. It is only good for the url it came from, and not at all when a refresh is asked for.
+    if (sidecar === null || sidecar.url !== c.url || opts.refresh) return undefined;
+  } else if (opts.refresh === "all") {
+    return undefined;
+  }
+
   for (const ext of CACHE_EXTENSIONS) {
     let bytes: Buffer;
     try {
-      bytes = await readFile(join(rawDir, `${id}.${ext}`));
+      bytes = await readFile(join(opts.rawDir, `${c.id}.${ext}`));
     } catch {
       continue; // not cached under this extension
     }
     try {
-      const text = ext === "txt" || ext === "md" ? bytes.toString("utf8") : await extract(ext, bytes);
+      const text = ext === "txt" || ext === "md" ? plainText(ext, bytes) : await extract(ext, bytes);
       return tooLittle(text) ? { ok: false, reason: "too little text" } : { ok: true, text, via: "cache" };
     } catch (e) {
-      return { ok: false, reason: `cached ${id}.${ext} unreadable: ${errorMessage(e)}` };
+      return { ok: false, reason: ext === "pdf" ? "pdf extraction failed" : "loading failed", detail: `cached ${c.id}.${ext} unreadable: ${errorMessage(e)}` };
     }
   }
   return undefined;
@@ -131,7 +191,7 @@ async function readCache(rawDir: string, id: string): Promise<LoadResult | undef
 type Download =
   | { ok: true; bytes: Uint8Array; contentType: string }
   /** `blocked` marks the failures a browser session may get past: HTTP 403/429 and network errors. */
-  | { ok: false; reason: string; blocked: boolean };
+  | { ok: false; reason: string; detail?: string; blocked: boolean };
 
 async function download(url: string, fetchImpl: typeof fetch): Promise<Download> {
   try {
@@ -147,22 +207,22 @@ async function download(url: string, fetchImpl: typeof fetch): Promise<Download>
     if (!res.ok) return { ok: false, reason: `HTTP ${res.status}`, blocked: res.status === 403 || res.status === 429 };
     return { ok: true, bytes: new Uint8Array(await res.arrayBuffer()), contentType: res.headers.get("content-type") ?? "" };
   } catch (e) {
-    return { ok: false, reason: `network error: ${errorMessage(e)}`, blocked: true };
+    return { ok: false, reason: "unreachable", detail: `network error: ${errorMessage(e)}`, blocked: true };
   }
 }
 
 /**
  * Returns the text of a candidate's source document.
- * The cache is read first (`${rawDir}/${id}.txt|.md|.html|.pdf`). Otherwise the URL is fetched, the raw bytes are cached
- * (an HTML page whose charset only the HTTP header states is cached as UTF-8, so a cache hit decodes like the fetch did),
- * and the text is extracted. On HTTP 403/429 or a network error, a Browserbase key (if given) retries in a browser session
- * and caches the resulting text as `${id}.txt`. A result under 150 words is a failure with reason "too little text" and
- * is not cached, so a transient error page is retried on the next run.
+ * The cache is read first (see the header: `${rawDir}/${id}.txt|.md|.html|.pdf`, with a sidecar for downloads). Otherwise
+ * the URL is fetched, the raw bytes are cached (an HTML page whose charset only the HTTP header states is cached as UTF-8,
+ * so a cache hit decodes like the fetch did), and the text is extracted. On HTTP 403/429 or a network error, a Browserbase
+ * key (if given) retries in a browser session and caches the resulting text as `${id}.txt`. A result under 150 words is a
+ * failure with reason "too little text" and is not cached, so a transient error page is retried on the next run.
  */
 export async function loadSource(c: Candidate, opts: LoadSourceOptions): Promise<LoadResult> {
-  if (!SAFE_ID.test(c.id)) return { ok: false, reason: `unsafe id "${c.id}" for a cache file name` };
+  if (!SAFE_ID.test(c.id)) return { ok: false, reason: "loading failed", detail: `unsafe id "${c.id}" for a cache file name` };
 
-  const cached = await readCache(opts.rawDir, c.id);
+  const cached = await readCache(opts, c);
   if (cached) return cached;
 
   const got = await download(c.url, opts.fetchImpl ?? fetch);
@@ -170,33 +230,31 @@ export async function loadSource(c: Candidate, opts: LoadSourceOptions): Promise
   if (got.ok) {
     const isPdfResponse = /pdf/i.test(got.contentType) || isPdf(got.bytes);
     const isTextResponse = got.contentType === "" || /html|xml|text\//i.test(got.contentType);
-    if (!isPdfResponse && !isTextResponse) return { ok: false, reason: `unsupported content-type ${got.contentType}` };
+    if (!isPdfResponse && !isTextResponse) return { ok: false, reason: "loading failed", detail: `unsupported content-type ${got.contentType}` };
 
     const type = isPdfResponse ? "pdf" : "html";
     let text: string;
     try {
       text = await extract(type, got.bytes, got.contentType);
     } catch (e) {
-      return { ok: false, reason: `${type} extraction failed: ${errorMessage(e)}` };
+      return { ok: false, reason: type === "pdf" ? "pdf extraction failed" : "loading failed", detail: `${type} extraction failed: ${errorMessage(e)}` };
     }
     if (tooLittle(text)) return { ok: false, reason: "too little text" };
-    await mkdir(opts.rawDir, { recursive: true });
-    await writeCache(join(opts.rawDir, `${c.id}.${type}`), type === "html" ? htmlCacheBytes(got.bytes, got.contentType) : got.bytes);
+    await storeDownload(opts, c, type, type === "html" ? htmlCacheBytes(got.bytes, got.contentType) : got.bytes);
     return { ok: true, text, via: "fetch" };
   }
 
   // Blocked or unreachable: only a Browserbase key can still get the page.
   const key = opts.browserbaseKey?.trim();
-  if (!got.blocked || !key) return { ok: false, reason: got.reason };
+  if (!got.blocked || !key) return { ok: false, reason: got.reason, ...(got.detail ? { detail: got.detail } : {}) };
   let html: string;
   try {
     html = await (opts.browserReader ?? readWithBrowserbase)(c.url, key);
   } catch (e) {
-    return { ok: false, reason: `${got.reason}; browserbase failed: ${errorMessage(e)}` };
+    return { ok: false, reason: "browser fetch failed", detail: `${got.detail ?? got.reason}; browserbase failed: ${errorMessage(e)}` };
   }
   const text = htmlToText(html);
   if (tooLittle(text)) return { ok: false, reason: "too little text" };
-  await mkdir(opts.rawDir, { recursive: true });
-  await writeCache(join(opts.rawDir, `${c.id}.txt`), text);
+  await storeDownload(opts, c, "txt", text);
   return { ok: true, text, via: "browserbase" };
 }

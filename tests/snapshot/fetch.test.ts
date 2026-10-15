@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 
 import type { Candidate } from "../../photon/scripts/snapshot/candidates.ts";
+import { markdownToText } from "../../photon/scripts/snapshot/extract.ts";
 import { loadSource } from "../../photon/scripts/snapshot/fetch.ts";
 
 const fixture = (name: string) => readFileSync(new URL(`../fixtures/sources/${name}`, import.meta.url));
@@ -118,7 +119,8 @@ test("HTTP 429 and a network error also fail with their reason when there is no 
   });
   const result = await loadSource(candidate("doc-e"), { rawDir: dir, fetchImpl: boom.impl });
   assert.equal(result.ok, false);
-  assert.ok(!result.ok && /network error.*fetch failed/.test(result.reason), JSON.stringify(result));
+  assert.ok(!result.ok && result.reason === "unreachable", JSON.stringify(result));
+  assert.ok(!result.ok && /network error.*fetch failed/.test(result.detail ?? ""), "the raw error is kept as detail, for the console");
 });
 
 test("other HTTP errors fail with the status and do not use browserbase", async () => {
@@ -219,7 +221,8 @@ test("a short PDF fails with too little text and a broken PDF fails with the ext
   const broken = fakeFetch(() => respond("%PDF-1.4 this is not really a pdf", { type: "application/pdf" }));
   const result = await loadSource(candidate("doc-j3"), { rawDir: dir, fetchImpl: broken.impl });
   assert.equal(result.ok, false);
-  assert.ok(!result.ok && /^pdf extraction failed/.test(result.reason), JSON.stringify(result));
+  assert.ok(!result.ok && result.reason === "pdf extraction failed", JSON.stringify(result));
+  assert.ok(!result.ok && (result.detail ?? "").length > 0, "what pdf.js said is kept as detail");
   assert.equal(existsSync(join(dir, "doc-j3.pdf")), false);
 });
 
@@ -228,7 +231,8 @@ test("an unsupported content-type fails without being cached", async () => {
   const { impl } = fakeFetch(() => respond("PNG...", { type: "image/png" }));
   const result = await loadSource(candidate("doc-k"), { rawDir: dir, fetchImpl: impl });
   assert.equal(result.ok, false);
-  assert.ok(!result.ok && /content-type.*image\/png/.test(result.reason), JSON.stringify(result));
+  assert.ok(!result.ok && result.reason === "loading failed", JSON.stringify(result));
+  assert.ok(!result.ok && /content-type.*image\/png/.test(result.detail ?? ""), JSON.stringify(result));
 });
 
 test("a plain-text response is accepted", async () => {
@@ -368,7 +372,8 @@ test("a browser reader failure or thin page is reported, naming browserbase", as
     },
   });
   assert.equal(failed.ok, false);
-  assert.ok(!failed.ok && /HTTP 403/.test(failed.reason) && /browserbase.*session limit/.test(failed.reason), JSON.stringify(failed));
+  assert.ok(!failed.ok && failed.reason === "browser fetch failed", JSON.stringify(failed));
+  assert.ok(!failed.ok && /HTTP 403/.test(failed.detail ?? "") && /browserbase.*session limit/.test(failed.detail ?? ""), JSON.stringify(failed));
 
   const thin = await loadSource(candidate("doc-o"), {
     rawDir: dir,
@@ -392,5 +397,191 @@ test("a candidate id that could leave the cache directory is refused", async () 
   const { impl, calls } = fakeFetch(() => respond(bill, { type: "text/html" }));
   const result = await loadSource(candidate("../evil"), { rawDir: dir, fetchImpl: impl });
   assert.equal(result.ok, false);
+  assert.ok(!result.ok && result.reason === "loading failed", "the id (a path) is not in the reason");
   assert.equal(calls.length, 0);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// I4: the raw cache remembers which URL each download came from
+
+const sidecarOf = async (dir: string, id: string) => JSON.parse(await readFile(join(dir, `${id}.source.json`), "utf8"));
+const CLOCK = () => new Date("2026-10-15T09:00:00.000Z");
+
+test("I4: every download writes <id>.source.json with its url and the time it was fetched", async () => {
+  const dir = await nextDir();
+  const { impl } = fakeFetch(() => respond(bill, { type: "text/html; charset=utf-8" }));
+  await loadSource(candidate("sc-html", "https://example.test/a"), { rawDir: dir, fetchImpl: impl, now: CLOCK });
+  assert.deepEqual(await sidecarOf(dir, "sc-html"), { url: "https://example.test/a", fetchedAt: "2026-10-15T09:00:00.000Z" });
+
+  const pdfFetch = fakeFetch(() => respond(makePdf(words(200)), { type: "application/pdf" }));
+  await loadSource(candidate("sc-pdf", "https://example.test/b"), { rawDir: dir, fetchImpl: pdfFetch.impl, now: CLOCK });
+  assert.deepEqual(await sidecarOf(dir, "sc-pdf"), { url: "https://example.test/b", fetchedAt: "2026-10-15T09:00:00.000Z" });
+
+  const blocked = fakeFetch(() => respond("Forbidden", { status: 403 }));
+  await loadSource(candidate("sc-bb", "https://example.test/c"), {
+    rawDir: dir,
+    fetchImpl: blocked.impl,
+    browserbaseKey: "k",
+    browserReader: async () => `<p>${words(200)}</p>`,
+    now: CLOCK,
+  });
+  assert.deepEqual(await sidecarOf(dir, "sc-bb"), { url: "https://example.test/c", fetchedAt: "2026-10-15T09:00:00.000Z" });
+});
+
+test("I4: nothing is written for a failed download", async () => {
+  const dir = await nextDir();
+  const { impl } = fakeFetch(() => respond("Forbidden", { status: 403 }));
+  await loadSource(candidate("sc-fail"), { rawDir: dir, fetchImpl: impl });
+  assert.equal(existsSync(join(dir, "sc-fail.source.json")), false);
+});
+
+test("I4: the same url is a cache hit, and a changed url ignores the cache and fetches again", async () => {
+  const dir = await nextDir();
+  const { impl, calls } = fakeFetch((url) => respond(url.endsWith("/new") ? `<p>${words(180)} fresh</p>` : bill, { type: "text/html; charset=utf-8" }));
+  const first = await loadSource(candidate("sc-url", "https://example.test/old"), { rawDir: dir, fetchImpl: impl, now: CLOCK });
+  assert.ok(first.ok && first.via === "fetch");
+
+  const again = await loadSource(candidate("sc-url", "https://example.test/old"), { rawDir: dir, fetchImpl: impl });
+  assert.ok(again.ok && again.via === "cache" && again.text === first.text);
+  assert.equal(calls.length, 1);
+
+  const moved = await loadSource(candidate("sc-url", "https://example.test/new"), { rawDir: dir, fetchImpl: impl, now: () => new Date("2026-11-01T00:00:00.000Z") });
+  assert.ok(moved.ok && moved.via === "fetch" && moved.text.includes("fresh"), "the old document is not served for the new url");
+  assert.equal(calls.length, 2);
+  assert.deepEqual(await sidecarOf(dir, "sc-url"), { url: "https://example.test/new", fetchedAt: "2026-11-01T00:00:00.000Z" });
+  const next = await loadSource(candidate("sc-url", "https://example.test/new"), { rawDir: dir, fetchImpl: impl });
+  assert.ok(next.ok && next.via === "cache" && next.text.includes("fresh"));
+  assert.equal(calls.length, 2);
+});
+
+test("I4: when the new url fails, the old download is still not served", async () => {
+  const dir = await nextDir();
+  const ok = fakeFetch(() => respond(bill, { type: "text/html; charset=utf-8" }));
+  await loadSource(candidate("sc-fail2", "https://example.test/old"), { rawDir: dir, fetchImpl: ok.impl });
+  const gone = fakeFetch(() => respond("gone", { status: 404 }));
+  assert.deepEqual(await loadSource(candidate("sc-fail2", "https://example.test/new"), { rawDir: dir, fetchImpl: gone.impl }), { ok: false, reason: "HTTP 404" });
+});
+
+test("I4: a new url that gives a different kind of file does not leave the old file shadowing it", async () => {
+  const dir = await nextDir();
+  const html = fakeFetch(() => respond(bill, { type: "text/html; charset=utf-8" }));
+  await loadSource(candidate("sc-kind", "https://example.test/old"), { rawDir: dir, fetchImpl: html.impl });
+  assert.ok(existsSync(join(dir, "sc-kind.html")));
+
+  const asPdf = fakeFetch(() => respond(makePdf(words(200)), { type: "application/pdf" }));
+  const moved = await loadSource(candidate("sc-kind", "https://example.test/new"), { rawDir: dir, fetchImpl: asPdf.impl });
+  assert.ok(moved.ok && moved.via === "fetch");
+  assert.equal(existsSync(join(dir, "sc-kind.html")), false, "the page from the old url is gone");
+  const again = await loadSource(candidate("sc-kind", "https://example.test/new"), { rawDir: dir, fetchImpl: html.impl });
+  assert.ok(again.ok && again.via === "cache" && again.text.includes("word199"));
+});
+
+test("I4: a hand-placed .md or .txt with no sidecar is trusted whatever the url", async () => {
+  const dir = await nextDir();
+  await writeFile(join(dir, "hand-md.md"), `# Placed by hand\n\n${words(200)}`);
+  await writeFile(join(dir, "hand-txt.txt"), words(200));
+  const { impl, calls } = fakeFetch(() => respond("should not be fetched"));
+  for (const id of ["hand-md", "hand-txt"]) {
+    const result = await loadSource(candidate(id, "https://example.test/any-url"), { rawDir: dir, fetchImpl: impl });
+    assert.ok(result.ok && result.via === "cache", id);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("I4: a sidecar that cannot be read counts as a different url", async () => {
+  const dir = await nextDir();
+  const { impl, calls } = fakeFetch(() => respond(bill, { type: "text/html; charset=utf-8" }));
+  await loadSource(candidate("sc-bad", "https://example.test/a"), { rawDir: dir, fetchImpl: impl });
+  await writeFile(join(dir, "sc-bad.source.json"), "{ not json");
+  const result = await loadSource(candidate("sc-bad", "https://example.test/a"), { rawDir: dir, fetchImpl: impl });
+  assert.ok(result.ok && result.via === "fetch");
+  assert.equal(calls.length, 2);
+  assert.equal((await sidecarOf(dir, "sc-bad")).url, "https://example.test/a");
+});
+
+test("I4: refresh=downloads refetches what an earlier run downloaded, and keeps a hand-placed file that has no sidecar", async () => {
+  const dir = await nextDir();
+  const { impl, calls } = fakeFetch(() => respond(bill, { type: "text/html; charset=utf-8" }));
+  await loadSource(candidate("rf-dl", "https://example.test/a"), { rawDir: dir, fetchImpl: impl });
+  await writeFile(join(dir, "rf-hand.txt"), words(200));
+  assert.equal(calls.length, 1);
+
+  const refreshed = await loadSource(candidate("rf-dl", "https://example.test/a"), { rawDir: dir, fetchImpl: impl, refresh: "downloads" });
+  assert.ok(refreshed.ok && refreshed.via === "fetch");
+  assert.equal(calls.length, 2);
+
+  const kept = await loadSource(candidate("rf-hand", "https://example.test/h"), { rawDir: dir, fetchImpl: impl, refresh: "downloads" });
+  assert.ok(kept.ok && kept.via === "cache" && kept.text.startsWith("word0"));
+  assert.equal(calls.length, 2, "the hand-placed file survives --refresh");
+});
+
+test("I4: refresh=all ignores a hand-placed file too, and the fetched page replaces it", async () => {
+  const dir = await nextDir();
+  await writeFile(join(dir, "rf-all.txt"), words(200));
+  const { impl, calls } = fakeFetch(() => respond(bill, { type: "text/html; charset=utf-8" }));
+  const result = await loadSource(candidate("rf-all", "https://example.test/a"), { rawDir: dir, fetchImpl: impl, refresh: "all" });
+  assert.ok(result.ok && result.via === "fetch" && result.text.includes("# Part 1"));
+  assert.equal(calls.length, 1);
+  assert.equal(existsSync(join(dir, "rf-all.txt")), false, "the old hand-placed file would shadow the new download");
+  const again = await loadSource(candidate("rf-all", "https://example.test/a"), { rawDir: dir, fetchImpl: impl });
+  assert.ok(again.ok && again.via === "cache" && again.text.includes("# Part 1"));
+});
+
+test("I4: a refresh that fails leaves the old download in place for a later run without --refresh", async () => {
+  const dir = await nextDir();
+  const ok = fakeFetch(() => respond(bill, { type: "text/html; charset=utf-8" }));
+  const first = await loadSource(candidate("rf-keep", "https://example.test/a"), { rawDir: dir, fetchImpl: ok.impl });
+  const down = fakeFetch(() => respond("down", { status: 503 }));
+  assert.deepEqual(await loadSource(candidate("rf-keep", "https://example.test/a"), { rawDir: dir, fetchImpl: down.impl, refresh: "downloads" }), { ok: false, reason: "HTTP 503" });
+  const later = await loadSource(candidate("rf-keep", "https://example.test/a"), { rawDir: dir, fetchImpl: down.impl });
+  assert.ok(later.ok && later.via === "cache" && first.ok && later.text === first.text);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M6: a Markdown capture is cleaned before it is split into passages
+
+test("M6: a leading byte-order mark is stripped from a .md or .txt file", async () => {
+  const dir = await nextDir();
+  await writeFile(join(dir, "bom-md.md"), `\ufeff# Title\n\n${words(200)}`);
+  await writeFile(join(dir, "bom-txt.txt"), `\ufeff${words(200)}`);
+  const { impl } = fakeFetch(() => respond("no"));
+  const md = await loadSource(candidate("bom-md"), { rawDir: dir, fetchImpl: impl });
+  const txt = await loadSource(candidate("bom-txt"), { rawDir: dir, fetchImpl: impl });
+  assert.ok(md.ok && md.text.startsWith("# Title"), "so the first heading is still a heading");
+  assert.ok(txt.ok && txt.text.startsWith("word0"));
+});
+
+test("M6: links keep their text, images go, and bare reference definitions go", async () => {
+  const dir = await nextDir();
+  const md = [
+    "# The Act",
+    "",
+    "See [section 4](https://example.test/s4) and [the guidance](https://example.test/g \"Guidance\") for the [rules][1].",
+    "![A logo](https://example.test/logo.png)",
+    "A [nested (paren)](https://example.test/a_(b)) link and a [bare](<https://example.test/x y>) one.",
+    "[[1]](https://example.test/fn) stays as [1].",
+    "",
+    "[1]: https://example.test/rules",
+    '[2]: https://example.test/other "Other"',
+    "  [3]: <https://example.test/third>",
+    "",
+    words(200),
+  ].join("\n");
+  await writeFile(join(dir, "md-clean.md"), md);
+  const { impl } = fakeFetch(() => respond("no"));
+  const result = await loadSource(candidate("md-clean"), { rawDir: dir, fetchImpl: impl });
+  assert.ok(result.ok);
+  const text = result.ok ? result.text : "";
+  assert.ok(text.includes("See section 4 and the guidance for the [rules][1]."), text);
+  assert.ok(text.includes("A nested (paren) link and a bare one."), text);
+  assert.ok(text.includes("[1] stays as [1]."), text);
+  assert.ok(!text.includes("https://example.test"), text);
+  assert.ok(!text.includes("A logo") && !text.includes("logo.png"), text);
+  assert.ok(!/^\s*\[\d\]:/m.test(text), text);
+  assert.ok(text.startsWith("# The Act"));
+});
+
+test("M6: markdownToText leaves ordinary prose, headings and bracketed text alone", () => {
+  const prose = "# Heading\n\nA plain paragraph with [a bracket] and (a paren) and a: colon.\n\n- one\n- two\n";
+  assert.equal(markdownToText(prose), prose);
 });

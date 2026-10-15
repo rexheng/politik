@@ -113,3 +113,25 @@ export async function pdfToText(bytes: Uint8Array): Promise<string> {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
+
+// The target of an inline link or image, `(url)` or `(url "title")`: one level of parentheses inside the url is allowed.
+const LINK_TARGET = String.raw`\(\s*(?:<[^>]*>|[^\s()]*(?:\([^\s()]*\)[^\s()]*)*)(?:\s+(?:"[^"]*"|'[^']*'))?\s*\)`;
+// Link text may hold one level of square brackets, as in `[[1]](url)`.
+const LINK_TEXT = String.raw`\[((?:[^\[\]]|\[[^\[\]]*\])*)\]`;
+const IMAGE = new RegExp(String.raw`!${LINK_TEXT}${LINK_TARGET}`, "g");
+const LINK = new RegExp(`${LINK_TEXT}${LINK_TARGET}`, "g");
+// `[1]: https://example.test "title"` on a line of its own: a reference-style link definition.
+const LINK_DEFINITION = /^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*\S+(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?[ \t]*$/gm;
+
+/**
+ * Text from a hand-placed Markdown file (such as a Firecrawl capture), ready for the passage splitter: a leading
+ * byte-order mark is removed, `[text](url)` becomes `text`, `![alt](url)` images are dropped, and bare reference-style
+ * link definitions (`[1]: url`) are dropped. Headings (`# `) are kept, because the splitter reads them.
+ */
+export function markdownToText(markdown: string): string {
+  return markdown
+    .replace(/^\uFEFF/, "")
+    .replace(IMAGE, "")
+    .replace(LINK, "$1")
+    .replace(LINK_DEFINITION, "");
+}

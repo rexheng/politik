@@ -387,6 +387,66 @@ test("a failed enrichment is not cached, so the next run retries it", async () =
 });
 
 // ---------------------------------------------------------------------------------------------------------------------
+// I4: the raw cache is tied to the url, and can be refreshed
+
+test("I4: a corrected url in candidates.md is fetched, not served from the old download", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025", { url: "https://example.test/old" })));
+  const web = fakeWeb({ "https://example.test/old": page("ca-a-2025"), "https://example.test/new": page("ca-a-2025-new") });
+  const llms = fakeLlms();
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
+  const before = await env.readJson<PolicyRecord[]>("policies.json");
+
+  await writeFile(env.paths.candidatesPath, candidatesMd(row("ca-a-2025", { url: "https://example.test/new" })));
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
+  assert.deepEqual(web.calls, ["https://example.test/old", "https://example.test/new"]);
+  const after = await env.readJson<PolicyRecord[]>("policies.json");
+  assert.notEqual(after[0]!.sha256, before[0]!.sha256, "the record is built from the new document");
+  assert.equal(after[0]!.url, "https://example.test/new");
+  assert.equal(llms.enrichCalls.length, 2, "and enriched again, because its text changed");
+});
+
+test("I4: refresh=downloads fetches again and keeps a hand-placed file that has no sidecar; refresh=all replaces that too", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025"), row("ca-b-2025")));
+  const web = fakeWeb(siteFor("ca-a-2025", "ca-b-2025"));
+  const llms = fakeLlms();
+  await mkdir(env.paths.rawDir, { recursive: true });
+  await writeFile(join(env.paths.rawDir, "ca-b-2025.txt"), `${words("hand", 200)}\n`);
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
+  assert.deepEqual(web.calls, ["https://example.test/ca-a-2025"], "the hand-placed file stood in for ca-b-2025");
+  assert.ok(await exists(join(env.paths.rawDir, "ca-a-2025.source.json")));
+  assert.equal(await exists(join(env.paths.rawDir, "ca-b-2025.source.json")), false);
+
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
+  assert.equal(web.calls.length, 1, "a plain re-run fetches nothing");
+
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl, refresh: "downloads" }));
+  assert.equal(web.calls.length, 2, "only the download is fetched again");
+  assert.equal(llms.total(), 4, "its text did not change, so the model is not asked again");
+  assert.match(await readFile(join(env.paths.rawDir, "ca-b-2025.txt"), "utf8"), /^hand0 /, "the hand-placed file survives");
+
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl, refresh: "all" }));
+  assert.equal(web.calls.length, 4, "both are fetched again");
+  assert.equal(await exists(join(env.paths.rawDir, "ca-b-2025.txt")), false, "the hand-placed file was replaced by the download");
+  assert.ok(await exists(join(env.paths.rawDir, "ca-b-2025.html")));
+});
+
+test("I4: refresh also fetches the GeBIZ list again, whether or not the rule changed", async () => {
+  const env = await makeEnv(candidatesMd());
+  const web = gebizWeb();
+  const llms = fakeLlms();
+  const build = (refresh?: "downloads" | "all") => buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl, gebiz: true, gebizRule: gebizRule(), refresh }));
+  await build();
+  await build();
+  assert.equal(web.urls.length, 1);
+  await build("downloads");
+  assert.equal(web.urls.length, 2);
+  await build("all");
+  assert.equal(web.urls.length, 3);
+  await build();
+  assert.equal(web.urls.length, 3, "the refreshed list is cached again");
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Human review
 
 const reviewedEntry = (over: Partial<Record<string, string>> = {}) => ({
@@ -489,28 +549,35 @@ test("a thrown verification error excludes that record too", async () => {
   assert.deepEqual(manifest.excluded.map((e) => [e.id, e.reason]), [["ca-b-2025", "verification failed: invalid model output"]]);
 });
 
-test("a step that throws something other than an LlmError keeps the error's own message", async () => {
+test("M8: a step that throws something other than an LlmError gets a fixed phrase, and the console keeps the message", async () => {
   const env = await makeEnv(candidatesMd(row("ca-a-2025"), row("ca-b-2025")));
   const llms = fakeLlms({ enrichThrows: { "ca-a-2025": new Error("the summary is empty or has no valid citation") } });
-  const manifest = await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: fakeWeb(siteFor("ca-a-2025", "ca-b-2025")).impl }));
-  assert.equal(manifest.excluded[0]!.reason, "enrichment failed: the summary is empty or has no valid citation");
+  const lines: string[] = [];
+  const { manifest } = await runBuild(env.opts({ llm: llms.llm, fetchImpl: fakeWeb(siteFor("ca-a-2025", "ca-b-2025")).impl, log: (l) => void lines.push(l) }));
+  assert.equal(manifest.excluded[0]!.reason, "enrichment failed: invalid model output");
+  assert.ok(lines.some((l) => l.includes("ca-a-2025") && l.includes("the summary is empty or has no valid citation")), "the console has the real message");
 });
 
-test("a multi-line or very long error message is folded into one short line", async () => {
+test("M8: a multi-line or very long error message is folded into one short line in the console, and stays out of the manifest", async () => {
   const env = await makeEnv(candidatesMd(row("ca-a-2025")));
   const llms = fakeLlms({ enrichThrows: { "ca-a-2025": new Error(`first line\nsecond line ${"x".repeat(2000)}`) } });
-  const manifest = await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: fakeWeb(siteFor("ca-a-2025")).impl }));
+  const lines: string[] = [];
+  const { manifest } = await runBuild(env.opts({ llm: llms.llm, fetchImpl: fakeWeb(siteFor("ca-a-2025")).impl, log: (l) => void lines.push(l) }));
   const { reason } = manifest.excluded[0]!;
-  assert.ok(!reason.includes("\n"));
-  assert.ok(reason.includes("first line second line"));
-  assert.ok(reason.length <= 400, `reason is ${reason.length} characters`);
+  assert.equal(reason, "enrichment failed: invalid model output");
+  const line = lines.find((l) => l.includes("ca-a-2025"))!;
+  assert.ok(!line.includes("\n"));
+  assert.ok(line.includes("first line second line"));
+  assert.ok(line.length <= 500, `the console line is ${line.length} characters`);
 });
 
-test("an error that is not an Error object still becomes a reason", async () => {
+test("M8: an error that is not an Error object still becomes a fixed reason", async () => {
   const env = await makeEnv(candidatesMd(row("ca-a-2025")));
   const llm = { enrich: (async () => { throw "plain string failure"; }) as Llm, verify: fakeLlms().llm.verify };
-  const manifest = await buildSnapshot(env.opts({ llm, fetchImpl: fakeWeb(siteFor("ca-a-2025")).impl }));
-  assert.match(manifest.excluded[0]!.reason, /plain string failure/);
+  const lines: string[] = [];
+  const { manifest } = await runBuild(env.opts({ llm, fetchImpl: fakeWeb(siteFor("ca-a-2025")).impl, log: (l) => void lines.push(l) }));
+  assert.equal(manifest.excluded[0]!.reason, "enrichment failed: invalid model output");
+  assert.ok(lines.some((l) => l.includes("plain string failure")));
 });
 
 test("the snapshot date goes to both models as today's date", async () => {
@@ -1015,6 +1082,62 @@ test("M5: an entry with no pipeline version (written before it existed) is a mis
   }
   await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
   assert.equal(llms.total(), 4);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M8: every exclusion reason is one of a fixed set
+
+const REASON_SET =
+  /^(?:HTTP \d{3}|too little text|unreachable|pdf extraction failed|browser fetch failed|loading failed|source does not match the listed document|summary unsupported|status unsupported|(?:enrichment|verification) failed: (?:HTTP \d{3}|timed out|unreachable|invalid model output))$/;
+
+test("M8: no excluded reason holds a path, a URL or a newline, whatever went wrong; the console keeps the details", async () => {
+  const secret = "/home/user/secret/file.ts at https://secret.example/token\nsecond line";
+  const ids = ["ca-ok", "ca-http", "ca-gone", "ca-net", "ca-thin", "ca-png", "ca-pdf", "ca-eplain", "ca-vplain", "ca-ident", "ca-summ", "ca-stat", "ca-lerr"];
+  const env = await makeEnv(candidatesMd(...ids.map((id) => row(id))));
+  const html = (id: string) => new Response(page(id), { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+  const fetchImpl = (async (input: string | URL | Request) => {
+    const id = String(input).split("/").pop()!;
+    if (id === "ca-http") return new Response("no", { status: 403 });
+    if (id === "ca-gone") return new Response("no", { status: 404 });
+    if (id === "ca-net") throw new TypeError(`fetch failed: getaddrinfo ENOTFOUND example.test ${secret}`);
+    if (id === "ca-thin") return new Response("<html><body><p>Please log in.</p></body></html>", { status: 200, headers: { "content-type": "text/html" } });
+    if (id === "ca-png") return new Response("PNG", { status: 200, headers: { "content-type": "image/png" } });
+    if (id === "ca-pdf") return new Response("%PDF-1.4 not really a pdf", { status: 200, headers: { "content-type": "application/pdf" } });
+    return html(id);
+  }) as typeof fetch;
+  const llms = fakeLlms({
+    enrichThrows: { "ca-eplain": new Error(`bad answer ${secret}`), "ca-lerr": new LlmError(`Groq API error 429: ${secret} org_secret`, 429) },
+    verifyThrows: { "ca-vplain": new Error(`bad verdict ${secret}`) },
+    unsupported: { "ca-ident": ["identity"], "ca-summ": ["summary"], "ca-stat": ["status"] },
+  });
+  const lines: string[] = [];
+  const { manifest } = await runBuild(env.opts({ llm: llms.llm, fetchImpl, log: (l) => void lines.push(l) }));
+
+  assert.deepEqual(
+    Object.fromEntries(manifest.excluded.map((e) => [e.id, e.reason])),
+    {
+      "ca-http": "HTTP 403",
+      "ca-gone": "HTTP 404",
+      "ca-net": "unreachable",
+      "ca-thin": "too little text",
+      "ca-png": "loading failed",
+      "ca-pdf": "pdf extraction failed",
+      "ca-eplain": "enrichment failed: invalid model output",
+      "ca-vplain": "verification failed: invalid model output",
+      "ca-ident": "source does not match the listed document",
+      "ca-summ": "summary unsupported",
+      "ca-stat": "status unsupported",
+      "ca-lerr": "enrichment failed: HTTP 429",
+    },
+  );
+  for (const { reason } of manifest.excluded) {
+    assert.match(reason, REASON_SET);
+    assert.ok(!/[\\/\n]|:\/\//.test(reason), `a path, URL or newline in "${reason}"`);
+  }
+  for (const name of OUTPUTS) assert.ok(!(await env.read(name)).includes("secret"), name);
+  const net = lines.find((l) => l.includes("ca-net"))!;
+  assert.ok(net.includes("ENOTFOUND") && net.includes("/home/user/secret/file.ts"), "the console has the raw details");
+  assert.ok(!net.includes("\n"));
 });
 
 // ---------------------------------------------------------------------------------------------------------------------
