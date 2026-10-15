@@ -238,6 +238,89 @@ test("a plain-text response is accepted", async () => {
   assert.ok(result.ok && result.via === "fetch");
 });
 
+/** A page of 200 words that begin "café0 café1 ...", encoded as windows-1252 (every character used is at most U+00FF). */
+const cafePage = (head: string) =>
+  Buffer.from(
+    `<!doctype html><html><head>${head}</head><body><h1>Café</h1><p>${Array.from({ length: 200 }, (_, i) => `café${i}`).join(" ")}</p></body></html>`,
+    "latin1",
+  );
+
+test("a windows-1252 page with the charset only in the HTTP header reads the same fresh and from the cache", async () => {
+  const dir = await nextDir();
+  const { impl, calls } = fakeFetch(() => respond(cafePage(""), { type: "text/html; charset=windows-1252" }));
+  const c = candidate("doc-cs1");
+  const fresh = await loadSource(c, { rawDir: dir, fetchImpl: impl });
+  const cached = await loadSource(c, { rawDir: dir, fetchImpl: impl });
+  assert.ok(fresh.ok && fresh.via === "fetch" && fresh.text.includes("café0 café1"), JSON.stringify(fresh).slice(0, 200));
+  assert.ok(cached.ok && cached.via === "cache");
+  assert.ok(fresh.ok && cached.ok && cached.text === fresh.text, "cache text differs from fetched text");
+  assert.ok(cached.ok && !cached.text.includes("\ufffd"));
+  assert.equal(calls.length, 1);
+});
+
+test("a windows-1252 page with the charset only in a <meta charset> tag reads the same fresh and from the cache", async () => {
+  const dir = await nextDir();
+  const { impl } = fakeFetch(() => respond(cafePage('<meta charset="windows-1252">'), { type: "text/html" }));
+  const c = candidate("doc-cs2");
+  const fresh = await loadSource(c, { rawDir: dir, fetchImpl: impl });
+  const cached = await loadSource(c, { rawDir: dir, fetchImpl: impl });
+  assert.ok(fresh.ok && fresh.text.includes("café0 café1") && fresh.text.includes("# Café"));
+  assert.ok(cached.ok && cached.via === "cache" && fresh.ok && cached.text === fresh.text);
+});
+
+test("an http-equiv content-type meta tag is read too", async () => {
+  const dir = await nextDir();
+  const head = '<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">';
+  const { impl } = fakeFetch(() => respond(cafePage(head)));
+  const c = candidate("doc-cs3");
+  const fresh = await loadSource(c, { rawDir: dir, fetchImpl: impl });
+  const cached = await loadSource(c, { rawDir: dir, fetchImpl: impl });
+  assert.ok(fresh.ok && fresh.text.includes("café0"));
+  assert.ok(cached.ok && fresh.ok && cached.text === fresh.text);
+});
+
+test("the HTTP header charset wins over a conflicting <meta>, and the cache still agrees with the fetch", async () => {
+  const dir = await nextDir();
+  // Valid UTF-8 bytes served as UTF-8 by the header while the page body claims windows-1252.
+  const utf8Page = Buffer.from(
+    `<html><head><meta charset="windows-1252"></head><body><p>${Array.from({ length: 200 }, (_, i) => `café${i}`).join(" ")}</p></body></html>`,
+    "utf8",
+  );
+  const { impl } = fakeFetch(() => respond(utf8Page, { type: "text/html; charset=utf-8" }));
+  const c = candidate("doc-cs4");
+  const fresh = await loadSource(c, { rawDir: dir, fetchImpl: impl });
+  const cached = await loadSource(c, { rawDir: dir, fetchImpl: impl });
+  assert.ok(fresh.ok && fresh.text.includes("café0 café1"), fresh.ok ? fresh.text.slice(0, 80) : fresh.reason);
+  assert.ok(cached.ok && cached.via === "cache" && fresh.ok && cached.text === fresh.text);
+});
+
+test("an unknown charset label in the header falls back to the page's own declaration, then UTF-8", async () => {
+  const dir = await nextDir();
+  const { impl } = fakeFetch(() => respond(cafePage('<meta charset="windows-1252">'), { type: "text/html; charset=x-no-such-charset" }));
+  const fresh = await loadSource(candidate("doc-cs5"), { rawDir: dir, fetchImpl: impl });
+  assert.ok(fresh.ok && fresh.text.includes("café0"));
+});
+
+test("a hand-placed windows-1252 .html in the cache is decoded from its <meta> tag", async () => {
+  const dir = await nextDir();
+  await writeFile(join(dir, "doc-cs6.html"), cafePage('<meta charset="windows-1252">'));
+  const { impl, calls } = fakeFetch(() => respond("no"));
+  const result = await loadSource(candidate("doc-cs6"), { rawDir: dir, fetchImpl: impl });
+  assert.ok(result.ok && result.via === "cache" && result.text.includes("café0 café1"));
+  assert.equal(calls.length, 0);
+});
+
+test("a UTF-8 page with a byte-order mark and no declared charset reads the same fresh and from the cache", async () => {
+  const dir = await nextDir();
+  const body = Buffer.from(`\ufeff<html><body><p>${Array.from({ length: 200 }, (_, i) => `café${i}`).join(" ")}</p></body></html>`, "utf8");
+  const { impl } = fakeFetch(() => respond(body, { type: "text/html" }));
+  const c = candidate("doc-cs7");
+  const fresh = await loadSource(c, { rawDir: dir, fetchImpl: impl });
+  const cached = await loadSource(c, { rawDir: dir, fetchImpl: impl });
+  assert.ok(fresh.ok && fresh.text.startsWith("café0 café1") && !fresh.text.includes("\ufeff"));
+  assert.ok(cached.ok && fresh.ok && cached.text === fresh.text);
+});
+
 test("403 with a browserbase key retries through the browser reader and caches its text as .txt", async () => {
   const dir = await nextDir();
   const { impl, calls } = fakeFetch(() => respond("Forbidden", { status: 403 }));

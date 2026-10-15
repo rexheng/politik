@@ -56,18 +56,50 @@ export const readWithBrowserbase: BrowserReader = async (url, apiKey) => {
 const errorMessage = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const isPdf = (bytes: Uint8Array) => bytes.length >= 5 && new TextDecoder("latin1").decode(bytes.subarray(0, 5)) === "%PDF-";
 
-function decodeText(bytes: Uint8Array, contentType: string): string {
-  const label = /charset=["']?([\w-]+)/i.exec(contentType)?.[1];
-  try {
-    return new TextDecoder(label ?? "utf-8").decode(bytes);
-  } catch {
-    return new TextDecoder("utf-8").decode(bytes);
-  }
+/** The `charset=` label of a Content-Type header, if any. */
+const headerCharset = (contentType: string) => /charset\s*=\s*["']?([\w.:-]+)/i.exec(contentType)?.[1];
+
+function bomCharset(bytes: Uint8Array): string | undefined {
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return "utf-8";
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return "utf-16le";
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return "utf-16be";
+  return undefined;
 }
 
-/** Extracts text from raw bytes of the given kind. */
+/** A `<meta charset=...>` or `<meta http-equiv="Content-Type" content="...; charset=...">` near the top of the page. */
+function metaCharset(bytes: Uint8Array): string | undefined {
+  const head = new TextDecoder("latin1").decode(bytes.subarray(0, 4096));
+  return /<meta\s[^>]*?charset\s*=\s*["']?\s*([\w.:-]+)/i.exec(head)?.[1];
+}
+
+/** Decodes an HTML page. The charset comes from the HTTP header, else a byte-order mark, else a <meta> tag, else UTF-8. */
+function decodeHtml(bytes: Uint8Array, header?: string): string {
+  for (const label of [header, bomCharset(bytes), metaCharset(bytes)]) {
+    if (!label) continue;
+    try {
+      return new TextDecoder(label).decode(bytes);
+    } catch {
+      /* not a charset this runtime knows: try the next source */
+    }
+  }
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
+/** Extracts text from raw bytes of the given kind. A cached file has no header, so only the bytes can decide its charset. */
 async function extract(kind: "html" | "pdf", bytes: Uint8Array, contentType = ""): Promise<string> {
-  return kind === "pdf" ? pdfToText(bytes) : htmlToText(decodeText(bytes, contentType));
+  return kind === "pdf" ? pdfToText(bytes) : htmlToText(decodeHtml(bytes, headerCharset(contentType)));
+}
+
+/**
+ * The bytes to cache for a fetched page, chosen so that reading the cache later decodes to exactly the text the fetch did.
+ * The raw bytes are kept when sniffing them alone gives the same text as the header-aware decode. When it would not
+ * (the charset came only from the HTTP header, or the header overrides a conflicting <meta>), the page is stored as UTF-8
+ * with a byte-order mark, which the sniffing reads first.
+ */
+function htmlCacheBytes(bytes: Uint8Array, contentType: string): Uint8Array {
+  const html = decodeHtml(bytes, headerCharset(contentType));
+  if (html === decodeHtml(bytes)) return bytes;
+  return Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(html, "utf8")]);
 }
 
 async function writeCache(path: string, data: Uint8Array | string): Promise<void> {
@@ -121,7 +153,8 @@ async function download(url: string, fetchImpl: typeof fetch): Promise<Download>
 
 /**
  * Returns the text of a candidate's source document.
- * The cache is read first (`${rawDir}/${id}.txt|.md|.html|.pdf`). Otherwise the URL is fetched, the raw bytes are cached,
+ * The cache is read first (`${rawDir}/${id}.txt|.md|.html|.pdf`). Otherwise the URL is fetched, the raw bytes are cached
+ * (an HTML page whose charset only the HTTP header states is cached as UTF-8, so a cache hit decodes like the fetch did),
  * and the text is extracted. On HTTP 403/429 or a network error, a Browserbase key (if given) retries in a browser session
  * and caches the resulting text as `${id}.txt`. A result under 150 words is a failure with reason "too little text" and
  * is not cached, so a transient error page is retried on the next run.
@@ -148,7 +181,7 @@ export async function loadSource(c: Candidate, opts: LoadSourceOptions): Promise
     }
     if (tooLittle(text)) return { ok: false, reason: "too little text" };
     await mkdir(opts.rawDir, { recursive: true });
-    await writeCache(join(opts.rawDir, `${c.id}.${type}`), got.bytes);
+    await writeCache(join(opts.rawDir, `${c.id}.${type}`), type === "html" ? htmlCacheBytes(got.bytes, got.contentType) : got.bytes);
     return { ok: true, text, via: "fetch" };
   }
 
