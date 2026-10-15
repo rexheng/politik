@@ -69,9 +69,22 @@ The implementer copies the reference shots they need into `.tmp-landing/referenc
   | #787878 | `#7a766f` | `--muted` |
 
   Colours are defined as CSS custom properties on `:root`.
-- **Imagery:** no third-party photos. Every tile is an original static asset (SVG or WebP) made by a script in the repo, `photon/scripts/landing/tiles.ts`, from:
-  - **Thermal maps:** public-domain Natural Earth outlines of California and Singapore, filled with a thermal palette noise field (SVG `feTurbulence` + colour mapping). These mirror ATMO's forecast renders.
-  - **Document heat tiles:** close-ups of real snapshot passages set in DM Mono, with a thermal highlight over key phrases. This is "policy as weather".
+- **Imagery:** real, high-quality raster images, never vector "art". This was revised 2026-10-15 at the owner's request: no SVG noise fills, clip-art, or gradients standing in for images. ATMO pairs real photos with real forecast renders of the same place, and we do the same with open-licensed sources.
+  - **Satellite photos:** Copernicus Sentinel-2 true colour at 10 m, from the public Sentinel-2 COGs on AWS (found via the Earth Search STAC API). Pick low-cloud scenes and crop to:
+    - the State Capitol and downtown Sacramento
+    - Silicon Valley / Santa Clara data-centre land
+    - Singapore's Civic District and Marina Bay
+    - Singapore's Jurong / Tuas data-centre parks
+    - Attribution: "Contains modified Copernicus Sentinel data 2026".
+  - **Data renders:** each pairs with a satellite tile as its crossfade partner, like ATMO's photo ↔ forecast. They are drawn from real data:
+    - shaded relief from AWS Terrain Tiles elevation (Terrarium)
+    - coloured with the thermal ramp (deep blue → violet → magenta → amber)
+    - overlaid with real points from our data: data-centre sites from `photon/src/datacentres.ts`, plus the capitals as policy pins
+  - **Globe:** NASA Blue Marble (public domain) on an orthographic projection showing California and Singapore, with a thermal glow at both.
+  - **Photography (optional, up to 2 tiles):** Wikimedia Commons images under CC0, public domain or CC BY / BY-SA (e.g. the California State Capitol, Parliament House Singapore), with attribution.
+  - **Document heat tiles:** real snapshot passages typeset in DM Mono with thermal highlight bands. They are rendered to raster through a headless-browser screenshot, so the text is crisp.
+  - **Format:** every image is WebP at 2× its largest display size, with `srcset` 1×/2×. Hero and section tiles ≤ 300 KB, full-bleed backgrounds ≤ 500 KB.
+  - **Source and credits:** a repo script `photon/scripts/landing/images/` produces all images reproducibly. Every source and licence goes in `photon/public/landing/CREDITS.md`, and the footer shows a short "Imagery:" credit line.
   - These replace ATMO's photo ↔ forecast crossfade with a document ↔ heat-map crossfade of the same subject.
 - **Voice:** ATMO's instrument/telemetry tone, applied to policy. For example: `38.5766° N / 121.4934° W / SACRAMENTO / SB 53 · ENACTED 2025`.
 - **No invented facts.** Every number, status and date on the page comes from `/api/landing`, which reads the D1 snapshot. If the API fails, the readouts show coordinates and place names only.
@@ -94,7 +107,11 @@ The implementer copies the reference shots they need into `.tmp-landing/referenc
      - → Verified: "Every claim is checked against the passage it cites; {reviewed} landmark records human-reviewed".
      - → Answers: "Brief me · Explain this · What it means".
    - Each tab has a 24px H2 and a 15px body.
-   - The visual on the right is a 640×640 dotted orthographic globe (static SVG) with California and Singapore glowing in thermal colours. A per-tab SVG overlay fades in: source dots for Sources, check marks with the "{reviewed} REVIEWED" stat for Verified, and a mini answer card with [1][2] chips for Answers.
+   - The visual on the right is a 640×640 display (1280×1280 WebP) Blue Marble orthographic globe with California and Singapore glowing in thermal colours.
+   - A per-tab overlay fades in on top. Overlays are crisp HTML/CSS elements, not images, so they stay sharp:
+     - Sources: source dots.
+     - Verified: check marks with the "{reviewed} REVIEWED" stat.
+     - Answers: a mini answer card with [1][2] chips.
    - Tabs switch with IntersectionObserver on three 100vh markers. No GSAP.
 4. **Ask section** (100vh, full-bleed).
    - The background is an animated thermal field (CSS or canvas, paused under reduced motion).
@@ -153,11 +170,17 @@ The implementer copies the reference shots they need into `.tmp-landing/referenc
   - A vision-capable reviewer compares our screenshots with ATMO's, section by section.
 - **Performance:**
   - No jQuery, GSAP or Lottie.
-  - `landing.js` is 12 KB or less unminified. Tiles are SVG or WebP, each 120 KB or less.
+  - `landing.js` is 12 KB or less unminified.
+  - Images are WebP at 2×, lazy-loaded below the fold. Hero/section tiles ≤ 300 KB; backgrounds ≤ 500 KB.
+- **Image quality gate:**
+  - A contact sheet of every generated image goes next to ATMO's hero tiles.
+  - A vision-capable reviewer on the most capable model rates each image "would pass on atmo.ai" or "redo".
+  - Every "redo" is regenerated before the landing page ships.
+  - Banned: vector noise fills, clip-art, flat gradient placeholders, upscaled low-resolution sources (source resolution must meet the 2× size), visible tile seams, and watermarks.
   - LCP under 2.5s on a throttled 4G Playwright run.
 - **Accessibility:**
   - One `h1`. Tiles are decorative (`alt=""`) unless they carry meaning.
   - Contrast is at least 4.5:1 for body text.
   - Visible focus styles. Every link and tab is reachable by keyboard.
   - `prefers-reduced-motion` disables the crossfades, the thermal animation and the nav hide.
-- **Tests (`pnpm test`):** `/api/landing` against the A fixture (counts, landmarks, latest ordering, empty-D1 case); the tile generator emits valid SVG; and `?q=` handling in `app.js` is pinned by a small DOM-free unit (`readInitialQuestion(url)`).
+- **Tests (`pnpm test`):** `/api/landing` against the A fixture (counts, landmarks, latest ordering, empty-D1 case); the image generator's pure helpers (colour ramp, projection, crop maths, credits list) are correct, and every expected output image exists at its required pixel size and byte budget; and `?q=` handling in `app.js` is pinned by a small DOM-free unit (`readInitialQuestion(url)`).
