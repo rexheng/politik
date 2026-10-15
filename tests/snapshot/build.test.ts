@@ -141,6 +141,8 @@ async function makeEnv(candidatesMd?: string) {
     snapshotDate: SNAPSHOT_DATE,
     models: { enrich: "enrich-model", verify: "verify-model" },
     now: () => clock.now,
+    // Many tests have a source that fails to load on purpose. The partial-build guard (I5) has its own tests, which turn this off.
+    allowPartial: true,
     ...over,
   });
   const read = async (name: string) => readFile(join(paths.outDir, name), "utf8");
@@ -150,8 +152,8 @@ async function makeEnv(candidatesMd?: string) {
 
 const candidatesMd = (...rows: string[]) =>
   `| include | id | title | type | topics | status (best known) | landmark | url | url_confidence | why |\n|---|---|---|---|---|---|---|---|---|---|\n${rows.join("\n")}\n`;
-const row = (id: string, o: { include?: string; landmark?: string; url?: string; type?: string; title?: string } = {}) =>
-  `| ${o.include ?? "yes"} | ${id} | ${o.title ?? `Title of ${id}`} | ${o.type ?? "bill"} | ai-governance | enacted | ${o.landmark ?? "no"} | ${o.url ?? `https://example.test/${id}`} | seen | why |`;
+const row = (id: string, o: { include?: string; landmark?: string; url?: string; type?: string; title?: string; confidence?: string } = {}) =>
+  `| ${o.include ?? "yes"} | ${id} | ${o.title ?? `Title of ${id}`} | ${o.type ?? "bill"} | ai-governance | enacted | ${o.landmark ?? "no"} | ${o.url ?? `https://example.test/${id}`} | ${o.confidence ?? "seen"} | why |`;
 const siteFor = (...ids: string[]) => Object.fromEntries(ids.map((id) => [`https://example.test/${id}`, page(id)]));
 
 const GOOD_ID = "ca-sb-900-2025";
@@ -1773,4 +1775,355 @@ test("main prints the summary and exits 0 after a successful build", async () =>
   assert.equal(code, 0);
   assert.match(io.logged.out.join("\n"), /ca-a-2025/);
   assert.match(io.logged.out.join("\n"), /words/);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// I5: a build that lost many documents to load failures does not overwrite the committed snapshot
+
+const four = () => candidatesMd(row("ca-a-2025"), row("ca-b-2025"), row("ca-c-2025"), row("ca-d-2025"));
+const webWithout = (missing: string[], ids = ["ca-a-2025", "ca-b-2025", "ca-c-2025", "ca-d-2025"]) =>
+  fakeWeb(Object.fromEntries(ids.filter((id) => !missing.includes(id)).map((id) => [`https://example.test/${id}`, page(id)])));
+const guarded = (env: Awaited<ReturnType<typeof makeEnv>>, over: Partial<BuildOptions> & Pick<BuildOptions, "llm">) =>
+  runBuild(env.opts({ allowPartial: false, ...over }));
+
+test("I5: more than 25% of the listed documents failing to load refuses to write, names the counts and keeps the old files", async () => {
+  const env = await makeEnv(four());
+  const seeded = await seedOutputs(env);
+  const llms = fakeLlms();
+  await assert.rejects(guarded(env, { llm: llms.llm, fetchImpl: webWithout(["ca-b-2025", "ca-c-2025"]).impl }), (e: unknown) => {
+    assert.ok(e instanceof SnapshotGuardError);
+    assert.equal(e.kind, "partial");
+    assert.match(e.message, /2 of the 4 listed documents/);
+    assert.match(e.message, /50%/);
+    assert.match(e.message, /25%/);
+    assert.match(e.message, /nothing was written/i);
+    assert.ok(e.message.includes(`--date ${SNAPSHOT_DATE}`), "how to run again");
+    assert.ok(e.message.includes("--allow-partial"), "how to go ahead anyway");
+    assert.doesNotMatch(e.message, /landmark/i, "no landmark failed");
+    return true;
+  });
+  assert.deepEqual(await snapshotOf(env), seeded);
+  assert.equal(llms.enrichCalls.length, 2, "the two that loaded were enriched, and are cached for the rerun");
+});
+
+test("I5: exactly 25% is not more than 25%", async () => {
+  const env = await makeEnv(four());
+  const { manifest } = await guarded(env, { llm: fakeLlms().llm, fetchImpl: webWithout(["ca-d-2025"]).impl });
+  assert.deepEqual(manifest.excluded.map((e) => e.id), ["ca-d-2025"]);
+  assert.equal(manifest.counts.total, 3);
+});
+
+test("I5: any landmark that fails to load refuses to write, even when it is far under 25%", async () => {
+  const ids = ["ca-a-2025", "ca-b-2025", "ca-c-2025", "ca-d-2025", "ca-e-2025", "ca-f-2025", "ca-g-2025", "ca-h-2025"];
+  const env = await makeEnv(candidatesMd(...ids.map((id) => row(id, { landmark: id === "ca-c-2025" || id === "ca-g-2025" ? "yes" : "no" }))));
+  const seeded = await seedOutputs(env);
+  await assert.rejects(guarded(env, { llm: fakeLlms().llm, fetchImpl: webWithout(["ca-c-2025", "ca-g-2025"], ids).impl }), (e: unknown) => {
+    assert.ok(e instanceof SnapshotGuardError);
+    assert.equal(e.kind, "partial");
+    assert.match(e.message, /2 of the 8 listed documents/);
+    assert.match(e.message, /landmark/i);
+    assert.ok(e.message.includes("ca-c-2025") && e.message.includes("ca-g-2025"), "the failed landmark ids are named");
+    assert.ok(!e.message.includes("ca-a-2025"), "a failed non-landmark is not");
+    return true;
+  });
+  assert.deepEqual(await snapshotOf(env), seeded);
+});
+
+test("I5: a landmark that loads but is excluded for its content (an unsupported summary) is not a load failure", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025", { landmark: "yes" }), row("ca-b-2025")));
+  const llms = fakeLlms({ unsupported: { "ca-a-2025": ["summary"] } });
+  const { manifest } = await guarded(env, { llm: llms.llm, fetchImpl: fakeWeb(siteFor("ca-a-2025", "ca-b-2025")).impl });
+  assert.deepEqual(manifest.excluded.map((e) => e.reason), ["summary unsupported"]);
+});
+
+test("I5: every kind of load failure counts: HTTP errors, too little text, a bad content type, an unreachable host", async () => {
+  const ids = ["ca-a-2025", "ca-b-2025", "ca-c-2025", "ca-d-2025", "ca-e-2025"];
+  const env = await makeEnv(candidatesMd(...ids.map((id) => row(id))));
+  const fetchImpl = (async (input: string | URL | Request) => {
+    const id = String(input).split("/").pop()!;
+    if (id === "ca-a-2025") return new Response("x", { status: 500 });
+    if (id === "ca-b-2025") return new Response("<p>Log in</p>", { status: 200, headers: { "content-type": "text/html" } });
+    if (id === "ca-c-2025") return new Response("PNG", { status: 200, headers: { "content-type": "image/png" } });
+    if (id === "ca-d-2025") throw new TypeError("fetch failed");
+    return new Response(page(id), { status: 200, headers: { "content-type": "text/html" } });
+  }) as typeof fetch;
+  await assert.rejects(guarded(env, { llm: fakeLlms().llm, fetchImpl }), (e: unknown) => e instanceof SnapshotGuardError && e.kind === "partial" && /4 of the 5/.test(e.message));
+});
+
+test("I5: GeBIZ tenders are not part of the 25%", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025"), row("ca-b-2025"), row("ca-c-2025")));
+  const web = gebizWeb(siteFor("ca-a-2025", "ca-b-2025")); // ca-c-2025 is missing: 1 of 3 listed documents (33%) although there are 6 documents in all
+  await assert.rejects(
+    guarded(env, { llm: fakeLlms().llm, fetchImpl: web.impl, gebiz: true, gebizRule: gebizRule() }),
+    (e: unknown) => e instanceof SnapshotGuardError && e.kind === "partial" && /1 of the 3 listed documents/.test(e.message),
+  );
+});
+
+test("I5: allowPartial writes the snapshot anyway", async () => {
+  const env = await makeEnv(four());
+  const { manifest } = await runBuild(env.opts({ llm: fakeLlms().llm, fetchImpl: webWithout(["ca-b-2025", "ca-c-2025"]).impl, allowPartial: true }));
+  assert.deepEqual(manifest.excluded.map((e) => e.id), ["ca-b-2025", "ca-c-2025"]);
+  assert.equal(manifest.counts.total, 2);
+  assert.ok(await exists(join(env.paths.outDir, "policies.json")));
+});
+
+test("I5: with no listed documents there is nothing to fail", async () => {
+  const env = await makeEnv(candidatesMd());
+  const { manifest } = await guarded(env, { llm: fakeLlms().llm, fetchImpl: fakeWeb({}).impl });
+  assert.equal(manifest.counts.total, 0);
+});
+
+test("I5: the partial guard comes after the Groq guard, so a dead key is still reported as one", async () => {
+  const env = await makeEnv(four());
+  const llms = fakeLlms({ enrichThrows: { "ca-a-2025": unauthorised() } });
+  await assert.rejects(guarded(env, { llm: llms.llm, fetchImpl: webWithout(["ca-b-2025", "ca-c-2025"]).impl }), (e: unknown) => e instanceof SnapshotGuardError && e.kind === "auth");
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// I6: a guarded run keeps its date, so the rerun reuses the cached model answers
+
+test("I6: the in-progress date is saved when a build starts, and removed after a successful write", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025")));
+  const file = join(env.paths.cacheDir, "in-progress.json");
+  const lines: string[] = [];
+  const web = fakeWeb(siteFor("ca-a-2025"));
+  const seen: boolean[] = [];
+  const llms = fakeLlms();
+  const spy: Llm = (async (req: Req) => {
+    seen.push(await exists(file)); // while the build is running
+    return llms.llm.enrich(req);
+  }) as Llm;
+  await runBuild(env.opts({ llm: { enrich: spy, verify: llms.llm.verify }, fetchImpl: web.impl, snapshotDate: "2026-03-04", log: (l) => void lines.push(l) }));
+  assert.deepEqual(seen, [true]);
+  assert.equal(await exists(file), false, "cleared after the write");
+});
+
+test("I6: a build that is stopped by a guard leaves the in-progress date behind", async () => {
+  const env = await makeEnv(three());
+  const file = join(env.paths.cacheDir, "in-progress.json");
+  await assert.rejects(runBuild(env.opts({ llm: fakeLlms({ enrichThrows: { "ca-a-2025": unauthorised() } }).llm, fetchImpl: threeWeb().impl, snapshotDate: "2026-03-04" })), SnapshotGuardError);
+  assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { snapshotDate: "2026-03-04" });
+});
+
+test("I6: every guard message tells how to run again with the same --date", async () => {
+  const date = "2026-03-04";
+  const run = async (llm: ReturnType<typeof fakeLlms>["llm"], web = threeWeb(), more: Partial<BuildOptions> = {}) => {
+    const env = await makeEnv(three());
+    return runBuild(env.opts({ llm, fetchImpl: web.impl, snapshotDate: date, allowPartial: false, ...more })).then(
+      () => assert.fail("the build should have been refused"),
+      (e: unknown) => e as SnapshotGuardError,
+    );
+  };
+  const auth = await run(fakeLlms({ enrichThrows: { "ca-a-2025": unauthorised() } }).llm);
+  const lost = await run(fakeLlms({ enrichThrows: { "ca-a-2025": exhausted(), "ca-b-2025": exhausted() } }).llm);
+  const partial = await run(fakeLlms().llm, fakeWeb(siteFor("ca-a-2025")));
+  assert.deepEqual([auth.kind, lost.kind, partial.kind], ["auth", "llm-failures", "partial"]);
+  for (const e of [auth, lost, partial]) assert.ok(e.message.includes(`run again with --date ${date}`), `${e.kind}: ${e.message}`);
+});
+
+test("I6: the summary's run-again line includes --date", async () => {
+  const env = await makeEnv(three());
+  const result = await runBuild(env.opts({ llm: fakeLlms({ enrichThrows: { "ca-c-2025": exhausted() } }).llm, fetchImpl: threeWeb().impl, snapshotDate: "2026-03-04" }));
+  assert.match(formatSummary(result), /Run again with --date 2026-03-04 to retry them/);
+});
+
+/** A project root with the three-candidate list, for the command. */
+async function cliRoot() {
+  const dir = await mkdtemp(join(root, "cli-"));
+  const dataDir = join(dir, "photon/data/snapshot");
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(join(dataDir, "candidates.md"), three());
+  return { dir, dataDir, inProgress: join(dir, ".tmp-snapshot/cache/in-progress.json") };
+}
+
+test("I6: after a guarded run, the command without --date reuses its date and does not repeat the cached model calls", async () => {
+  const { dir, dataDir, inProgress } = await cliRoot();
+  const web = threeWeb();
+  const broken = fakeLlms({ enrichThrows: { "ca-b-2025": unauthorised() } });
+  const first = sink();
+  const code1 = await main(["--date", "2026-03-04", "--no-gebiz"], {
+    env: { GROQ_API_KEY: "k" },
+    root: dir,
+    run: (options) => runBuild({ ...options, llm: broken.llm, fetchImpl: web.impl }),
+    ...first,
+  });
+  assert.equal(code1, 1);
+  assert.match(first.logged.err.join("\n"), /run again with --date 2026-03-04/);
+  assert.equal(broken.enrichCalls.length, 2, "ca-a was done; ca-b stopped the run");
+  assert.deepEqual(JSON.parse(await readFile(inProgress, "utf8")), { snapshotDate: "2026-03-04" });
+
+  const healthy = fakeLlms();
+  const second = sink();
+  let date: string | undefined;
+  const code2 = await main(["--no-gebiz"], {
+    env: { GROQ_API_KEY: "k" },
+    root: dir,
+    run: (options) => ((date = options.snapshotDate), runBuild({ ...options, llm: healthy.llm, fetchImpl: web.impl })),
+    ...second,
+  });
+  assert.equal(code2, 0, second.logged.err.join("\n"));
+  assert.equal(date, "2026-03-04", "the date of the unfinished build");
+  assert.equal(healthy.enrichCalls.length, 2, "ca-b and ca-c only: ca-a is not enriched again");
+  assert.equal(healthy.verifyCalls.length, 2);
+  assert.match(second.logged.out.join("\n"), /Resuming the unfinished build dated 2026-03-04/);
+  assert.equal(await exists(inProgress), false, "the success cleared it");
+  assert.equal(JSON.parse(await readFile(join(dataDir, "manifest.json"), "utf8")).snapshotDate, "2026-03-04");
+
+  // With nothing in progress, the date is today's again.
+  let third: string | undefined;
+  await main(["--no-gebiz"], { env: { GROQ_API_KEY: "k" }, root: dir, run: async (options) => ((third = options.snapshotDate), emptyResult()), ...sink() });
+  assert.notEqual(third, "2026-03-04");
+  assert.match(third!, /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test("I6: an explicit --date wins over the date in progress and replaces it", async () => {
+  const { dir, inProgress } = await cliRoot();
+  await mkdir(join(dir, ".tmp-snapshot/cache"), { recursive: true });
+  await writeFile(inProgress, JSON.stringify({ snapshotDate: "2026-03-04" }));
+  let date: string | undefined;
+  const run = async (options: BuildOptions) => ((date = options.snapshotDate), emptyResult());
+  await main(["--date", "2026-05-06", "--no-gebiz"], { env: { GROQ_API_KEY: "k" }, root: dir, run, ...sink() });
+  assert.equal(date, "2026-05-06");
+});
+
+test("I6: an in-progress file that is not a date is ignored", async () => {
+  const { dir, inProgress } = await cliRoot();
+  await mkdir(join(dir, ".tmp-snapshot/cache"), { recursive: true });
+  for (const content of ["{ not json", JSON.stringify({ snapshotDate: "soon" }), JSON.stringify([])]) {
+    await writeFile(inProgress, content);
+    let date: string | undefined;
+    await main(["--no-gebiz"], { env: { GROQ_API_KEY: "k" }, root: dir, run: async (options) => ((date = options.snapshotDate), emptyResult()), ...sink() });
+    assert.match(date!, /^\d{4}-\d{2}-\d{2}$/, content);
+    assert.notEqual(date, "soon");
+  }
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The new flags
+
+test("parseArgs reads --refresh, --refresh-all and --allow-partial", () => {
+  assert.deepEqual(parseArgs(["--refresh"]), { gebiz: true, refresh: "downloads" });
+  assert.deepEqual(parseArgs(["--refresh-all"]), { gebiz: true, refresh: "all" });
+  assert.deepEqual(parseArgs(["--refresh", "--refresh-all"]), { gebiz: true, refresh: "all" });
+  assert.deepEqual(parseArgs(["--allow-partial", "--no-gebiz", "--date", "2026-03-04"]), { gebiz: false, date: "2026-03-04", allowPartial: true });
+});
+
+test("the command passes --refresh and --allow-partial to the build, and defaults to neither", async () => {
+  let seen: BuildOptions | undefined;
+  const run = async (options: BuildOptions) => ((seen = options), emptyResult());
+  await main(["--refresh-all", "--allow-partial"], { env: { GROQ_API_KEY: "k" }, root, run, ...sink() });
+  assert.equal(seen!.refresh, "all");
+  assert.equal(seen!.allowPartial, true);
+  await main(["--refresh"], { env: { GROQ_API_KEY: "k" }, root, run, ...sink() });
+  assert.equal(seen!.refresh, "downloads");
+  assert.ok(!seen!.allowPartial);
+  await main([], { env: { GROQ_API_KEY: "k" }, root, run, ...sink() });
+  assert.equal(seen!.refresh, undefined);
+  assert.ok(!seen!.allowPartial);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// I2 (second half): constructed URLs are listed for a person to look at
+
+const openers = "https://example.test/";
+test("I2: each built record with a constructed URL is listed with its title and what its page opens with, in the summary and in review.md", async () => {
+  const env = await makeEnv(
+    candidatesMd(
+      row("ca-built-heading-2025", { confidence: "constructed", title: "SB 53 Frontier AI", landmark: "yes" }),
+      row("ca-built-plain-2025", { confidence: "constructed", title: "AB 2013 Training data", url: `${openers}plain` }),
+      row("ca-seen-2025", { confidence: "seen" }),
+      row("ca-unsure-2025", { confidence: "seen (match unverified)", title: "Counts as constructed" }),
+      row("ca-failed-2025", { confidence: "constructed", title: "Never loaded" }),
+    ),
+  );
+  const noHeading = `<p>${words("opening", 3)} ${"long text ".repeat(100)}</p>`;
+  const web = fakeWeb({
+    ...siteFor("ca-built-heading-2025", "ca-seen-2025", "ca-unsure-2025"),
+    [`${openers}plain`]: `<html><body>${noHeading}</body></html>`,
+  });
+  const result = await runBuild(env.opts({ llm: fakeLlms().llm, fetchImpl: web.impl }));
+  const text = formatSummary(result);
+  const start = text.indexOf("Constructed URLs");
+  assert.ok(start >= 0, text);
+  const section = text.slice(start).split("\n\n")[0]!; // up to the blank line before the word counts
+  assert.ok(section.includes('ca-built-heading-2025: "SB 53 Frontier AI" opens with "Heading of ca-built-heading-2025"'), section);
+  const plain = section.split("\n").find((l) => l.includes("ca-built-plain-2025"))!;
+  assert.match(plain, /"AB 2013 Training data" opens with "opening0 opening1 opening2 long text long text/);
+  const opens = /opens with "([^"]*)"/.exec(plain)![1]!;
+  assert.equal(opens.length, 80, "the first 80 characters of the text");
+  assert.ok(section.includes("ca-unsure-2025"), "'seen (match unverified)' counts as constructed");
+  assert.ok(!section.includes("ca-seen-2025"));
+  assert.ok(!section.includes("ca-failed-2025"), "a record that was not built has no page to look at");
+
+  const md = await env.read("review.md");
+  assert.ok(md.includes("Constructed URLs"));
+  const reviewSection = md.slice(md.indexOf("## Constructed URLs"));
+  for (const id of ["ca-built-heading-2025", "ca-built-plain-2025", "ca-unsure-2025"]) assert.ok(reviewSection.includes(id), id);
+  assert.ok(reviewSection.includes("SB 53 Frontier AI") && reviewSection.includes("Heading of ca-built-heading-2025"));
+  assert.ok(reviewSection.includes(`${openers}plain`), "a link to the page");
+  assert.ok(!reviewSection.includes("ca-seen-2025"));
+  assert.equal(md.split("- [ ] reviewed").length - 1, 1, "only the landmark has a review box");
+});
+
+test("I2: tenders are not listed as constructed URLs, and nothing is printed when no record has one", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025")));
+  const result = await runBuild(env.opts({ llm: fakeLlms().llm, fetchImpl: gebizWeb(siteFor("ca-a-2025")).impl, gebiz: true, gebizRule: gebizRule() }));
+  assert.doesNotMatch(formatSummary(result), /Constructed URLs/);
+  assert.doesNotMatch(await env.read("review.md"), /Constructed URLs/);
+});
+
+test("I2: renderReview lists the checks it is given even when there is no landmark", () => {
+  const record = sampleRecord({ landmark: false, title: "A bill" });
+  const md = renderReview([record], samplePassages, [{ id: record.id, opens: "Findings" }]);
+  assert.match(md, /no landmark/i);
+  assert.ok(md.includes("Constructed URLs"));
+  assert.ok(md.includes(`${record.id}: "A bill" opens with "Findings"`));
+  assert.ok(md.includes(record.url));
+  assert.doesNotMatch(renderReview([record], samplePassages), /Constructed URLs/);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The proxy note: an unreachable network gets a hint
+
+test("a build where every source is unreachable says to check NODE_USE_ENV_PROXY and the network", async () => {
+  const env = await makeEnv(three());
+  const offline = (async () => { throw new TypeError("fetch failed"); }) as typeof fetch;
+  await assert.rejects(guarded(env, { llm: fakeLlms().llm, fetchImpl: offline }), (e: unknown) => {
+    assert.ok(e instanceof SnapshotGuardError && e.kind === "partial");
+    assert.match(e.message, /3 of the 3 listed documents/);
+    assert.match(e.message, /NODE_USE_ENV_PROXY=1/);
+    assert.match(e.message, /network settings/i);
+    return true;
+  });
+});
+
+test("the hint is not given when the sources failed for other reasons", async () => {
+  const env = await makeEnv(three());
+  await assert.rejects(guarded(env, { llm: fakeLlms().llm, fetchImpl: fakeWeb({}).impl }), (e: unknown) => e instanceof SnapshotGuardError && !/PROXY/.test(e.message));
+  const ok = await makeEnv(three());
+  const result = await runBuild(ok.opts({ llm: fakeLlms().llm, fetchImpl: fakeWeb({}).impl }));
+  assert.doesNotMatch(formatSummary(result), /PROXY/);
+});
+
+test("with --allow-partial the summary still carries the hint when every source was unreachable", async () => {
+  const env = await makeEnv(three());
+  const offline = (async () => { throw new TypeError("fetch failed"); }) as typeof fetch;
+  const result = await runBuild(env.opts({ llm: fakeLlms().llm, fetchImpl: offline }));
+  assert.match(formatSummary(result), /NODE_USE_ENV_PROXY=1/);
+});
+
+test("a GeBIZ fetch that fails on the network says to check the proxy and network settings", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025")));
+  const cause = Object.assign(new Error("getaddrinfo ENOTFOUND data.gov.sg"), { code: "ENOTFOUND" });
+  const offline = (async () => { throw Object.assign(new TypeError("fetch failed"), { cause }); }) as typeof fetch;
+  await assert.rejects(buildSnapshot(env.opts({ llm: fakeLlms().llm, fetchImpl: offline, gebiz: true, gebizRule: gebizRule() })), /GeBIZ[^]*NODE_USE_ENV_PROXY=1/);
+  // An HTTP error from the API is not a network problem.
+  await assert.rejects(buildSnapshot(env.opts({ llm: fakeLlms().llm, fetchImpl: fakeWeb({}).impl, gebiz: true, gebizRule: gebizRule() })), (e: unknown) => /GeBIZ/.test(String(e)) && !/PROXY/.test(String(e)));
+});
+
+test("when Groq itself is unreachable for most records, the guard message gives the same hint", async () => {
+  const env = await makeEnv(three());
+  const unreachable = () => Object.assign(new LlmError("Groq request failed: getaddrinfo ENOTFOUND api.groq.com"), { kind: "network" as const });
+  const llms = fakeLlms({ enrichThrows: { "ca-a-2025": unreachable(), "ca-b-2025": unreachable() } });
+  await assert.rejects(guarded(env, { llm: llms.llm, fetchImpl: threeWeb().impl }), (e: unknown) => e instanceof SnapshotGuardError && e.kind === "llm-failures" && /NODE_USE_ENV_PROXY=1/.test(e.message));
 });

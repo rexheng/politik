@@ -19,13 +19,39 @@ The next build marks a record "human-reviewed" only while its sha256 still match
 "auto-checked". Nothing blocks on review.
 `;
 
+/** A record whose URL was constructed and not seen: what its page opens with, for a person to compare with the title. */
+export type ConstructedCheck = { id: string; opens: string };
+
+/**
+ * The section that lists the records with a constructed URL. The URL was built from a pattern and nobody has opened
+ * it, so a wrong one would show another document's claims under this title. The build also asks the checker model,
+ * but a person looking at one line per record catches what it does not.
+ */
+function renderConstructed(records: PolicyRecord[], checks: ConstructedCheck[]): string {
+  const byId = new Map(records.map((r) => [r.id, r]));
+  const lines = checks.flatMap((check) => {
+    const r = byId.get(check.id);
+    return r ? [`- ${r.id}: "${oneLine(r.title)}" opens with "${oneLine(check.opens)}" ([source](${r.url}))`] : [];
+  });
+  if (lines.length === 0) return "";
+  return `## Constructed URLs
+
+These records come from a URL that was built from a pattern and has not been seen. Check that each page opens with what
+its title says.
+
+${lines.join("\n")}
+`;
+}
+
 /**
  * The review page for the landmark records in `records` (others are skipped), in the order given.
  * Every claim is followed by the passages it cites, each linking to the record's source document.
+ * `constructed` adds the list of records with a constructed URL (see `renderConstructed`) at the end.
  */
-export function renderReview(records: PolicyRecord[], passages: Passage[]): string {
+export function renderReview(records: PolicyRecord[], passages: Passage[], constructed: ConstructedCheck[] = []): string {
   const landmarks = records.filter((r) => r.landmark);
-  if (landmarks.length === 0) return `${HEADER}\nNo landmark records in this snapshot.\n`;
+  const tail = renderConstructed(records, constructed);
+  if (landmarks.length === 0) return `${HEADER}\nNo landmark records in this snapshot.\n${tail ? `\n${tail}` : ""}`;
 
   const byId = new Map(passages.map((p) => [p.id, p]));
 
@@ -66,5 +92,5 @@ export function renderReview(records: PolicyRecord[], passages: Passage[]): stri
     ].join("\n");
   };
 
-  return `${HEADER}\n${landmarks.length} landmark record${landmarks.length === 1 ? "" : "s"}.\n\n${landmarks.map(section).join("\n")}`;
+  return `${HEADER}\n${landmarks.length} landmark record${landmarks.length === 1 ? "" : "s"}.\n\n${landmarks.map(section).join("\n")}${tail ? `\n${tail}` : ""}`;
 }

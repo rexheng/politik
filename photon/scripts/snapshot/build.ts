@@ -1,12 +1,12 @@
 // The snapshot build (spec section 5): candidates -> source text -> passages -> enrich -> verify -> the committed JSON files.
-// Run it with `pnpm snapshot:build [--date YYYY-MM-DD] [--no-gebiz]`.
+// Run it with `pnpm snapshot:build [--date YYYY-MM-DD] [--no-gebiz] [--refresh | --refresh-all] [--allow-partial]`.
 //
 // Re-runs are cheap and repeatable. Downloads are cached in `rawDir`, and the model answers are cached by the sha256 of
 // the document text in `cacheDir`, so a second run over unchanged sources makes no model calls and writes byte-identical
 // files. Every candidate ends in exactly one place: policies.json, or manifest.excluded with a reason.
 // Node-only build code: never import this from photon/src.
 import { readFileSync, realpathSync } from "node:fs";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -33,7 +33,7 @@ import { DEFAULT_GEBIZ_MAX, fetchGebizTenders, GEBIZ_RULE, selectTenders, type G
 import { loadSource } from "./fetch.ts";
 import { sha256Hex, splitPassages, wordCount } from "./passages.ts";
 import { publisherFor } from "./publishers.ts";
-import { renderReview } from "./review.ts";
+import { renderReview, type ConstructedCheck } from "./review.ts";
 import { verifyRecord } from "./verify.ts";
 
 /** Enrichment is sent the first passages up to this many words. Groq's free tier rejects larger requests (HTTP 413). */
@@ -48,6 +48,10 @@ export const PIPELINE_VERSION = 2;
 /** A built document with fewer words than this (tenders aside) is flagged in the summary: it may be a contents page. */
 const SHORT_WORDS = 300;
 const MAX_REASON = 300;
+/** A page with no heading at the top is shown by its first characters, this many. */
+const OPENS_CHARS = 80;
+/** The partial-build guard (I5) refuses when more than this share of the listed documents failed to load. */
+const MAX_LOAD_FAILURE_SHARE = 0.25;
 
 export interface BuildOptions {
   candidatesPath: string;
@@ -67,6 +71,8 @@ export interface BuildOptions {
    * also the files placed in rawDir by hand. See fetch.ts.
    */
   refresh?: "downloads" | "all";
+  /** Write the snapshot even if many documents failed to load or a landmark did (see SnapshotGuardError). Default false. */
+  allowPartial?: boolean;
   /** Adds the GeBIZ tenders chosen by the selection rule. Default false. */
   gebiz?: boolean;
   /** The GeBIZ selection rule. Default: GEBIZ_RULE. */
@@ -99,6 +105,13 @@ export interface RecordStat {
   failed?: boolean;
   /** The HTTP status Groq answered with, when the step failed on a Groq error. */
   llmStatus?: number;
+  /**
+   * Set on a built record whose candidate URL was constructed rather than seen (tenders aside): what its page opens with
+   * (its first heading, else its first 80 characters), for a person to compare with the title.
+   */
+  opens?: string;
+  /** The candidate's title, set together with `opens`. */
+  title?: string;
 }
 
 export interface RunResult {
@@ -107,14 +120,15 @@ export interface RunResult {
 }
 
 /**
- * The build refuses to write because Groq is failing wholesale (R14), not because of anything in the documents:
- * writing would replace a good committed snapshot with a mostly empty one.
+ * The build refuses to write, because writing would replace a good committed snapshot with a mostly empty one.
  * `auth`: Groq answered HTTP 401 or 403 to some record. `llm-failures`: more than half of the records that reached
- * enrichment were lost to Groq errors (a thrown LlmError: timeout, exhausted rate limit, 5xx, an unusable reply).
+ * enrichment were lost to Groq errors (a thrown LlmError: timeout, exhausted rate limit, 5xx, an unusable reply) (R14).
+ * `partial`: more than 25% of the listed documents (GeBIZ tenders aside) failed to load, or any landmark did; pass
+ * `allowPartial` (`--allow-partial`) to write anyway.
  */
 export class SnapshotGuardError extends Error {
   constructor(
-    readonly kind: "auth" | "llm-failures",
+    readonly kind: "auth" | "llm-failures" | "partial",
     message: string,
   ) {
     super(message);
@@ -130,6 +144,17 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const byId = <T extends { id: string }>(a: T, b: T) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 const errorMessage = (e: unknown) => (e instanceof Error && e.message ? e.message : String(e) || "unknown error");
+
+/** Said when nothing could be reached: the usual causes are a proxy Node ignores, and the network itself. */
+const NETWORK_HINT =
+  "If this machine reaches the internet through a proxy, run with NODE_USE_ENV_PROXY=1 (Node's fetch ignores HTTP_PROXY and HTTPS_PROXY without it); otherwise check the network settings.";
+
+/** True for the errors of a request that never got an answer: Node's "fetch failed" and the codes of the cause behind it. */
+function isNetworkFailure(e: unknown): boolean {
+  const cause = e instanceof Error ? (e.cause as { code?: unknown; message?: unknown } | undefined) : undefined;
+  const text = `${errorMessage(e)} ${String(cause?.code ?? "")} ${String(cause?.message ?? "")}`;
+  return /fetch failed|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR_CONNECT/i.test(text);
+}
 
 /** Writes through a temporary file, so an interrupted run never leaves a truncated file for the next run to trust. */
 async function writeAtomic(path: string, data: string): Promise<void> {
@@ -267,10 +292,29 @@ async function loadTenders(opts: BuildOptions): Promise<Tender[]> {
   try {
     tenders = await fetchGebizTenders(rule, opts.fetchImpl ?? fetch);
   } catch (e) {
-    throw new Error(`GeBIZ tenders could not be fetched: ${errorMessage(e)}. Run with --no-gebiz to build without them.`);
+    throw new Error(
+      `GeBIZ tenders could not be fetched: ${errorMessage(e)}. Run with --no-gebiz to build without them.${isNetworkFailure(e) ? ` ${NETWORK_HINT}` : ""}`,
+    );
   }
   await writeAtomic(cachePath, jsonText({ fingerprint, tenders }));
   return selectTenders(rule, tenders);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The date of a build that has not finished
+
+const IN_PROGRESS = "in-progress.json";
+
+/**
+ * The snapshot date of an unfinished build, from `cacheDir/in-progress.json`, or undefined. A build saves its date there
+ * when it starts and removes the file after it writes the snapshot. The date is part of every model cache key, so a
+ * build that was stopped (by a guard, say) can only reuse the answers it already paid for under the same date: the
+ * command defaults to this date when `--date` is not given.
+ */
+export async function readInProgressDate(cacheDir: string): Promise<string | undefined> {
+  const file = await readJsonOrUndefined(join(cacheDir, IN_PROGRESS));
+  const date = isRecord(file) ? file.snapshotDate : undefined;
+  return typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date) && IsoDate.safeParse(date).success ? date : undefined;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -341,6 +385,8 @@ type Done =
       llmError?: LlmError;
       /** What really went wrong, for the console log only: the manifest gets the fixed `reason`. */
       detail?: string;
+      /** True when the source document could not be loaded (a fetch, extraction or too-little-text failure). */
+      loadFailed?: boolean;
     };
 
 /**
@@ -366,6 +412,9 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
   if (!Number.isInteger(maxWords) || maxWords < 1) throw new Error(`enrichMaxWords must be a whole number of at least 1, got ${maxWords}`);
 
   const listed = parseCandidates(await readFile(opts.candidatesPath, "utf8")).filter((c) => c.include);
+  // From here on the date is the build's: a rerun after a guard (or a crash) must use the same one to find its cached answers.
+  await writeAtomic(join(opts.cacheDir, IN_PROGRESS), jsonText({ snapshotDate: opts.snapshotDate }));
+  const again = `run again with --date ${opts.snapshotDate}`;
   const tenders = opts.gebiz ? await loadTenders(opts) : [];
   const textFor = new Map(tenders.map((t) => [t.candidate.id, t.text]));
   const work = [...listed, ...tenders.map((t) => t.candidate)].sort(byId);
@@ -410,7 +459,7 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       dropped: [],
     };
     let reachedEnrichment = false;
-    const exclude = (reason: string, o: { failed?: boolean; llmError?: LlmError; detail?: string } = {}): Done => ({
+    const exclude = (reason: string, o: { failed?: boolean; llmError?: LlmError; detail?: string; load?: boolean } = {}): Done => ({
       kind: "excluded",
       reason,
       stat: {
@@ -423,6 +472,7 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       reachedEnrichment,
       ...(o.llmError ? { llmError: o.llmError } : {}),
       ...(o.detail ? { detail: o.detail } : {}),
+      ...(o.load ? { loadFailed: true } : {}),
     });
 
     let stage = "loading";
@@ -433,14 +483,14 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
         tenderText !== undefined
           ? ({ ok: true, text: tenderText } as const)
           : await loadSource(c, { rawDir: opts.rawDir, fetchImpl: opts.fetchImpl, browserbaseKey: opts.browserbaseKey, refresh: opts.refresh, now });
-      if (!loaded.ok) return exclude(loaded.reason, { detail: loaded.detail });
+      if (!loaded.ok) return exclude(loaded.reason, { detail: loaded.detail, load: true });
 
       const text = loaded.text;
       const sha = sha256Hex(text);
       const passages = splitPassages(c.id, text);
       stat.words = wordCount(text);
       stat.passages = passages.length;
-      if (passages.length === 0) return exclude("too little text", { detail: "no text to split into passages" });
+      if (passages.length === 0) return exclude("too little text", { detail: "no text to split into passages", load: true });
       const fetched = await fetchedFor(c.id, sha);
 
       stage = "enrichment";
@@ -529,6 +579,11 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
         const why = checked.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
         return exclude(NOT_VALID_REASON.enrichment, { failed: true, detail: clip(`the assembled record is not valid: ${why}`) });
       }
+      // A constructed URL has never been opened by a person: show what the page begins with, to compare with the title.
+      if (c.urlConfidence === "constructed" && tenderText === undefined) {
+        stat.title = c.title;
+        stat.opens = passages[0]!.heading ?? oneLine(passages[0]!.text).slice(0, OPENS_CHARS);
+      }
       return { kind: "built", record: checked.data, passages, stat: { ...stat, outcome: "built" }, reachedEnrichment: true };
     } catch (e) {
       // A thrown error (a model error such as HTTP 413, a failed repair) costs this record, not the build,
@@ -537,7 +592,7 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
         return exclude(`${stage} failed: ${llmReason(e)}`, { failed: true, llmError: e });
       }
       // Anything else is a bad answer from the model or a bug. The manifest gets a fixed phrase; the console gets the message.
-      return exclude(failureReason(stage), { failed: true, detail: clip(`${stage} failed: ${oneLine(errorMessage(e))}`) });
+      return exclude(failureReason(stage), { failed: true, detail: clip(`${stage} failed: ${oneLine(errorMessage(e))}`), load: stage === "loading" });
     }
   }
 
@@ -557,7 +612,7 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       throw new SnapshotGuardError(
         "auth",
         `Refusing to write the snapshot: Groq rejected the request with HTTP ${result.llmError.status} on ${c.id}, after ${i + 1} of ${work.length} records (${clip(oneLine(errorMessage(result.llmError)))}). ` +
-          "Check GROQ_API_KEY and the key's access to the models. Nothing was written; results already cached are kept, so run again once it is fixed.",
+          `Check GROQ_API_KEY and the key's access to the models. Nothing was written; results already cached are kept, so ${again} once it is fixed.`,
       );
     }
   }
@@ -572,8 +627,30 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       `Refusing to write the snapshot: ${lost.length} of the ${reachedCount} records that reached enrichment were lost to Groq errors (more than half), so the run is not usable. ` +
         `First error, on ${lost[0]!.id}: ${clip(oneLine(errorMessage(lost[0]!.error)))}. ` +
         (lost.some((l) => l.error.status === 413) ? `${TOO_LARGE_HINT} ` : "") +
-        "Nothing was written; results already cached are kept, so run again once Groq is reachable.",
+        (lost.every((l) => l.error.kind === "network") ? `${NETWORK_HINT} ` : "") +
+        `Nothing was written; results already cached are kept, so ${again} once Groq is reachable.`,
     );
+  }
+
+  // I5: documents that could not be loaded are missing from the snapshot. A few are normal (a site that is down today);
+  // many, or any landmark, mean the committed snapshot should not be replaced without someone deciding so.
+  if (!opts.allowPartial) {
+    const listedDone = work.flatMap((c, i) => (textFor.has(c.id) ? [] : [{ c, d: done[i]! }]));
+    const failed = listedDone.filter(({ d }) => d.kind === "excluded" && d.loadFailed);
+    const landmarks = failed.filter(({ c }) => c.landmark);
+    const tooMany = failed.length > listedDone.length * MAX_LOAD_FAILURE_SHARE;
+    if (tooMany || landmarks.length > 0) {
+      const share = Math.round((failed.length / listedDone.length) * 100);
+      const unreachable = failed.every(({ d }) => d.kind === "excluded" && d.reason === "unreachable");
+      throw new SnapshotGuardError(
+        "partial",
+        `Refusing to write the snapshot: ${failed.length} of the ${listedDone.length} listed documents (${share}%) failed to load` +
+          (tooMany ? `, more than the ${MAX_LOAD_FAILURE_SHARE * 100}% allowed` : "") +
+          (landmarks.length > 0 ? `; ${landmarks.length === 1 ? "this landmark" : "these landmarks"} failed to load: ${landmarks.map(({ c }) => c.id).join(", ")}` : "") +
+          `. ${unreachable ? `${NETWORK_HINT} ` : ""}` +
+          `Nothing was written; downloads and results already cached are kept, so fix the sources and ${again}, or add --allow-partial to write the snapshot without them.`,
+      );
+    }
   }
 
   // A related link may only point at a record that made it into the snapshot.
@@ -591,6 +668,10 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       ? [{ id: c.id, jurisdiction: c.jurisdiction, url: c.url, title: c.title, reason: d.reason }]
       : [];
   });
+
+  const constructedChecks: ConstructedCheck[] = done.flatMap((d) =>
+    d.kind === "built" && d.stat.opens !== undefined ? [{ id: d.record.id, opens: d.stat.opens }] : [],
+  );
 
   const counts = {
     total: records.length,
@@ -610,7 +691,7 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
     "policies.json": jsonText(records),
     "passages.json": jsonText(passages),
     "manifest.json": jsonText(manifest),
-    "review.md": renderReview(records, passages),
+    "review.md": renderReview(records, passages, constructedChecks),
   };
   // Check exactly what would be written, before writing it: a bad build must not replace a good committed snapshot.
   const problems = checkSnapshot({
@@ -622,6 +703,7 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
 
   for (const [name, content] of Object.entries(files)) await writeAtomic(join(opts.outDir, name), content);
   await writeAtomic(builtPath, jsonText({ contentHash, builtAt }));
+  await rm(join(opts.cacheDir, IN_PROGRESS), { force: true }); // the build is finished: the next one may use a new date
 
   return { manifest, stats: done.map((d) => d.stat) };
 }
@@ -629,15 +711,20 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
 // ---------------------------------------------------------------------------------------------------------------------
 // The command
 
-const USAGE = "Usage: pnpm snapshot:build [--date YYYY-MM-DD] [--no-gebiz]";
+const USAGE = "Usage: pnpm snapshot:build [--date YYYY-MM-DD] [--no-gebiz] [--refresh | --refresh-all] [--allow-partial]";
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
-export function parseArgs(argv: string[]): { date?: string; gebiz: boolean } {
+export function parseArgs(argv: string[]): { date?: string; gebiz: boolean; refresh?: "downloads" | "all"; allowPartial?: boolean } {
   let date: string | undefined;
   let gebiz = true;
+  let refresh: "downloads" | "all" | undefined;
+  let allowPartial = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === "--no-gebiz") gebiz = false;
+    else if (arg === "--refresh") refresh ??= "downloads";
+    else if (arg === "--refresh-all") refresh = "all";
+    else if (arg === "--allow-partial") allowPartial = true;
     else if (arg === "--date" || arg.startsWith("--date=")) {
       const value = arg === "--date" ? argv[++i] : arg.slice("--date=".length);
       if (value === undefined) throw new Error("--date needs a value such as --date 2026-10-15");
@@ -647,7 +734,7 @@ export function parseArgs(argv: string[]): { date?: string; gebiz: boolean } {
       date = value;
     } else throw new Error(`Unknown argument "${arg}"`);
   }
-  return { ...(date ? { date } : {}), gebiz };
+  return { ...(date ? { date } : {}), gebiz, ...(refresh ? { refresh } : {}), ...(allowPartial ? { allowPartial } : {}) };
 }
 
 const localDate = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -658,6 +745,8 @@ export function formatSummary({ manifest: m, stats }: RunResult): string {
   const built = stats.filter((s) => s.outcome === "built");
   const landmarks = built.filter((s) => s.landmark);
   const failed = stats.filter((s) => s.failed);
+  const listedExcluded = stats.filter((s) => s.outcome === "excluded" && s.type !== "tender");
+  const constructed = built.filter((s) => s.opens !== undefined);
   const byType = Object.entries(m.counts.byType).filter(([, n]) => n > 0).map(([type, n]) => `${type} ${n}`);
   const lines = [
     `Snapshot as of ${m.snapshotDate} (built ${m.builtAt}).`,
@@ -667,9 +756,17 @@ export function formatSummary({ manifest: m, stats }: RunResult): string {
     `Excluded: ${m.excluded.length}`,
     ...m.excluded.map((e) => `  ${e.id} (${e.jurisdiction}): ${e.reason}`),
     ...(failed.length > 0
-      ? [`${plural(failed.length, "record")} failed in a step rather than on content. Run again to retry them: finished work is cached.`]
+      ? [`${plural(failed.length, "record")} failed in a step rather than on content. Run again with --date ${m.snapshotDate} to retry them: finished work is cached.`]
       : []),
     ...(stats.some((s) => s.llmStatus === 413) ? [TOO_LARGE_HINT] : []),
+    ...(listedExcluded.length > 0 && listedExcluded.every((s) => s.reason === "unreachable") ? [NETWORK_HINT] : []),
+    ...(constructed.length > 0
+      ? [
+          "",
+          "Constructed URLs (built from a pattern, never opened): check that each page opens with what its title says:",
+          ...constructed.map((s) => `  ${s.id}: "${oneLine(s.title ?? "")}" opens with "${oneLine(s.opens!)}"`),
+        ]
+      : []),
     ...(built.length > 0
       ? [
           "",
@@ -739,17 +836,27 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
 
   const models = resolveModels(env);
   const dataDir = join(root, "photon/data/snapshot");
+  const cacheDir = join(root, ".tmp-snapshot/cache");
+
+  // Without --date, an unfinished build keeps its date, so a rerun after a guard finds the answers it already paid for.
+  const resumed = args.date ? undefined : await readInProgressDate(cacheDir);
+  if (resumed) {
+    log(`Resuming the unfinished build dated ${resumed} (saved in ${join(cacheDir, IN_PROGRESS)}). Pass --date to start one with another date.`);
+  }
+
   const options: BuildOptions = {
     candidatesPath: join(dataDir, "candidates.md"),
     outDir: dataDir,
     reviewedPath: join(dataDir, "reviewed.json"),
     rawDir: join(root, ".tmp-snapshot/raw"),
-    cacheDir: join(root, ".tmp-snapshot/cache"),
-    snapshotDate: args.date ?? localDate(new Date()),
+    cacheDir,
+    snapshotDate: args.date ?? resumed ?? localDate(new Date()),
     llm: { enrich: groqLlm({ apiKey, model: models.enrich }), verify: groqLlm({ apiKey, model: models.verify }) },
     models,
     browserbaseKey: env.BROWSERBASE_API_KEY?.trim() || undefined,
     gebiz: args.gebiz,
+    ...(args.refresh ? { refresh: args.refresh } : {}),
+    ...(args.allowPartial ? { allowPartial: true } : {}),
     ...(enrichMaxWords !== undefined ? { enrichMaxWords } : {}),
     log,
   };
