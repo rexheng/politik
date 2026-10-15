@@ -18,6 +18,8 @@ import type {
 
 const DEFAULT_SEARCH_LIMIT = 12;
 const DEFAULT_RECENT_LIMIT = 20;
+/** D1 allows at most 100 bound values in one query, so ids are looked up in chunks of this size. */
+const PASSAGE_ID_CHUNK = 90;
 
 /** Columns that build a RecordSummary from a `records r` row. The long text stays inside data_json. */
 const SUMMARY_COLUMNS = `r.id AS id, r.jurisdiction AS jurisdiction, r.type AS type, r.title AS title,
@@ -59,6 +61,27 @@ function toSummary(row: SummaryRow): RecordSummary {
     publisher: row.publisher,
     landmark: row.landmark === 1,
     reviewState: row.review_state,
+  };
+}
+
+/** The `p_*` columns of a `passages p` row. */
+interface PassageRow {
+  p_id: string;
+  p_record_id: string;
+  p_seq: number;
+  p_heading: string | null;
+  p_text: string;
+}
+
+const PASSAGE_COLUMNS = "p.id AS p_id, p.record_id AS p_record_id, p.seq AS p_seq, p.heading AS p_heading, p.text AS p_text";
+
+function toPassage(row: PassageRow): Passage {
+  return {
+    id: row.p_id,
+    recordId: row.p_record_id,
+    seq: row.p_seq,
+    ...(row.p_heading !== null && { heading: row.p_heading }),
+    text: row.p_text,
   };
 }
 
@@ -116,15 +139,17 @@ function rowLimit(limit: number | undefined, fallback: number): number {
 
 /**
  * Best matches first. Raw text is turned into a safe query, so odd input gives `[]` or hits, never an error.
- * An unmigrated database gives `[]`.
+ * By default every term must be in the passage (`match: "all"`); `match: "any"` accepts a passage with any of them,
+ * ranked by how many it has and how rare they are. An unmigrated database gives `[]`.
  */
 export async function searchPassages(
   db: D1Like,
   query: string,
   filters: Filters = {},
   limit?: number,
+  opts: { match?: "all" | "any" } = {},
 ): Promise<PassageHit[]> {
-  const match = toFtsQuery(query);
+  const match = toFtsQuery(query, opts.match ?? "all");
   const max = rowLimit(limit, DEFAULT_SEARCH_LIMIT);
   if (match === null || max === 0) return [];
   return emptyIfUnmigrated(() => runSearch(db, match, filters, max), []);
@@ -135,7 +160,7 @@ async function runSearch(db: D1Like, match: string, filters: Filters, max: numbe
   const where = ["passages_fts MATCH ?", ...clauses].join(" AND ");
   const { results } = await db
     .prepare(
-      `SELECT p.id AS p_id, p.record_id AS p_record_id, p.seq AS p_seq, p.heading AS p_heading, p.text AS p_text,
+      `SELECT ${PASSAGE_COLUMNS},
         bm25(passages_fts) AS bm, ${SUMMARY_COLUMNS}
        FROM passages_fts
        JOIN passages p ON p.id = passages_fts.passage_id
@@ -145,20 +170,30 @@ async function runSearch(db: D1Like, match: string, filters: Filters, max: numbe
        LIMIT ?`,
     )
     .bind(match, ...params, max)
-    .all<
-      SummaryRow & { p_id: string; p_record_id: string; p_seq: number; p_heading: string | null; p_text: string; bm: number }
-    >();
+    .all<SummaryRow & PassageRow & { bm: number }>();
 
-  return results.map((row) => {
-    const passage: Passage = {
-      id: row.p_id,
-      recordId: row.p_record_id,
-      seq: row.p_seq,
-      ...(row.p_heading !== null && { heading: row.p_heading }),
-      text: row.p_text,
-    };
-    return { passage, record: toSummary(row), score: -row.bm };
-  });
+  return results.map((row) => ({ passage: toPassage(row), record: toSummary(row), score: -row.bm }));
+}
+
+/**
+ * The passages with these ids, in the order of `ids`. An unknown id is skipped, a repeated id is returned once (at its
+ * first place), and no ids give `[]`. An unmigrated database gives `[]`.
+ */
+export async function getPassages(db: D1Like, ids: string[]): Promise<Passage[]> {
+  const wanted = [...new Set(ids)];
+  if (wanted.length === 0) return [];
+  return emptyIfUnmigrated(async () => {
+    const byId = new Map<string, Passage>();
+    for (let i = 0; i < wanted.length; i += PASSAGE_ID_CHUNK) {
+      const chunk = wanted.slice(i, i + PASSAGE_ID_CHUNK);
+      const { results } = await db
+        .prepare(`SELECT ${PASSAGE_COLUMNS} FROM passages p WHERE p.id IN (${placeholders(chunk.length)})`)
+        .bind(...chunk)
+        .all<PassageRow>();
+      for (const row of results) byId.set(row.p_id, toPassage(row));
+    }
+    return wanted.flatMap((id) => byId.get(id) ?? []);
+  }, []);
 }
 
 /** The full record, or null when there is no record with this id (or the database is unmigrated). */

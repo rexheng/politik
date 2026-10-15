@@ -94,3 +94,24 @@ test("random input never produces anything but quoted plain terms or null", () =
     if (q !== null) assert.match(q, PLAIN_TERMS, JSON.stringify(s));
   }
 });
+
+test("match: any joins the quoted terms with OR", () => {
+  assert.equal(toFtsQuery("frontier consent", "any"), '"frontier" OR "consent"');
+  assert.equal(toFtsQuery("the rules of the frontier", "any"), '"rules" OR "frontier"');
+  assert.equal(toFtsQuery("AI frontier ai", "any"), '"ai" OR "frontier"');
+});
+
+test("match defaults to all, and one term has no OR either way", () => {
+  assert.equal(toFtsQuery("frontier consent"), '"frontier" "consent"');
+  assert.equal(toFtsQuery("frontier consent", "all"), '"frontier" "consent"');
+  assert.equal(toFtsQuery("frontier", "any"), '"frontier"');
+  assert.equal(toFtsQuery("the of", "any"), null);
+});
+
+test("match: any never lets an operator from the input through", () => {
+  const q = toFtsQuery("NEAR(a b) * AND OR NOT title:secret ^start frontier*", "any");
+  assert.ok(q !== null);
+  // The only bare OR is the joiner we add: every other term is a quoted plain term.
+  assert.match(q, /^"[\p{L}\p{N}][\p{L}\p{N}\p{M}]*"(?: OR "[\p{L}\p{N}][\p{L}\p{N}\p{M}]*")*$/u);
+  assert.ok(!/[*:^(){}-]/.test(q));
+});

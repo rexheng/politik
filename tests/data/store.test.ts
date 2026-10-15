@@ -9,6 +9,7 @@ import type { Manifest, Passage, PolicyRecord, RecordSummary } from "../../photo
 import { snapshotStatements } from "../../photon/src/data/seed.ts";
 import {
   getManifest,
+  getPassages,
   getRecord,
   listRecords,
   recentChanges,
@@ -208,6 +209,76 @@ describe("seeded database", () => {
       // "not" is a stop-word and "consent" is just another required term, and no passage has both
       assert.deepEqual(withNot, []);
       assert.ok(plain.length > 0);
+    });
+
+    test("terms are ANDed by default, so two words from different records match nothing", async () => {
+      assert.deepEqual(await searchPassages(db, "frontier consent"), []);
+      assert.deepEqual(await searchPassages(db, "frontier consent", {}, undefined, { match: "all" }), []);
+      assert.deepEqual(await searchPassages(db, "frontier consent", {}, undefined, {}), []);
+    });
+
+    test("match: any ORs the terms, so hits come from every record that has one of them", async () => {
+      const hits = await searchPassages(db, "frontier consent", {}, undefined, { match: "any" });
+      assert.deepEqual(recordIds(hits), ["ca-sb-1047-2024", "ca-sb-53-2025", "sg-pdpa-2012"]);
+      for (let i = 1; i < hits.length; i++) assert.ok(hits[i - 1].score >= hits[i].score);
+    });
+
+    test("match: any still applies the filters and the limit, and one term behaves the same either way", async () => {
+      const sg = await searchPassages(db, "frontier consent", { jurisdiction: "SG" }, undefined, { match: "any" });
+      assert.deepEqual(recordIds(sg), ["sg-pdpa-2012"]);
+      assert.equal((await searchPassages(db, "frontier consent", {}, 2, { match: "any" })).length, 2);
+      assert.deepEqual(
+        await searchPassages(db, "frontier", {}, undefined, { match: "any" }),
+        await searchPassages(db, "frontier"),
+      );
+    });
+
+    test("match: any is as safe as all against hostile input", async () => {
+      for (const text of ['"; DROP TABLE records; --', "NEAR(a b) OR * AND NOT", "title:secret ^start frontier* -consent {text}"]) {
+        const hits = await searchPassages(db, text, {}, undefined, { match: "any" });
+        assert.ok(Array.isArray(hits), text);
+      }
+      assert.equal((await listRecords(db)).length, 6);
+    });
+  });
+
+  describe("getPassages", () => {
+    test("returns the passages in the order of the ids", async () => {
+      const got = await getPassages(db, ["ca-sb-53-2025#2", "ca-sb-53-2025#1"]);
+      assert.deepEqual(got, [passages.find((p) => p.id === "ca-sb-53-2025#2"), passages.find((p) => p.id === "ca-sb-53-2025#1")]);
+      assert.deepEqual(ids(await getPassages(db, ["ca-sb-53-2025#1", "ca-sb-53-2025#2"])), ["ca-sb-53-2025#1", "ca-sb-53-2025#2"]);
+    });
+
+    test("ids from different records keep the given order, and each passage is exactly what was seeded", async () => {
+      const wanted = ["sg-pdpa-2012#2", "ca-sb-53-2025#1", "sg-gebiz-dc-2025#1"];
+      assert.deepEqual(await getPassages(db, wanted), wanted.map((id) => passages.find((p) => p.id === id)));
+    });
+
+    test("an unknown id is skipped", async () => {
+      assert.deepEqual(ids(await getPassages(db, ["ca-sb-53-2025#2", "nope#1", "ca-sb-53-2025#1"])), ["ca-sb-53-2025#2", "ca-sb-53-2025#1"]);
+      assert.deepEqual(await getPassages(db, ["nope#1"]), []);
+      assert.deepEqual(await getPassages(db, ["ca-sb-53-2025#9"]), []);
+    });
+
+    test("an empty list gives an empty list", async () => {
+      assert.deepEqual(await getPassages(db, []), []);
+    });
+
+    test("a repeated id comes back once, at its first position", async () => {
+      assert.deepEqual(ids(await getPassages(db, ["sg-pdpa-2012#1", "ca-sb-53-2025#1", "sg-pdpa-2012#1"])), ["sg-pdpa-2012#1", "ca-sb-53-2025#1"]);
+    });
+
+    test("more ids than one D1 query can bind still work, in order", async () => {
+      const filler = Array.from({ length: 250 }, (_, i) => `ghost-${i}#1`);
+      const wanted = ["sg-pdpa-2012#2", "ca-sb-53-2025#1", "sg-gebiz-dc-2025#1", "ca-cppa-admt-2025#2"];
+      // real ids at the start, in the middle and at the end of a long list
+      const mixed = [wanted[0]!, ...filler.slice(0, 120), wanted[1]!, wanted[2]!, ...filler.slice(120), wanted[3]!];
+      assert.deepEqual(ids(await getPassages(db, mixed)), wanted);
+    });
+
+    test("an id is a bound value, never SQL", async () => {
+      assert.deepEqual(await getPassages(db, ["x' OR '1'='1", "x\"; DROP TABLE passages; --"]), []);
+      assert.equal((await getPassages(db, ["ca-sb-53-2025#1"])).length, 1);
     });
   });
 
@@ -414,6 +485,8 @@ describe("unseeded database", () => {
     assert.deepEqual(await searchPassages(db, "x"), []);
     assert.deepEqual(await searchPassages(db, "frontier AI", { jurisdiction: "US-CA" }), []);
     assert.deepEqual(await recentChanges(db, { since: "2024-01-01" }), []);
+    assert.deepEqual(await searchPassages(db, "frontier consent", {}, undefined, { match: "any" }), []);
+    assert.deepEqual(await getPassages(db, ["ca-sb-53-2025#1", "ca-sb-53-2025#2"]), []);
     assert.equal(await getRecord(db, "ca-sb-53-2025"), null);
   });
 });
@@ -435,6 +508,8 @@ describe("M3: a database that has not been migrated", () => {
     assert.deepEqual(await searchPassages(db, "frontier AI", { jurisdiction: "US-CA", since: "2024-01-01" }), []);
     assert.deepEqual(await recentChanges(db, { since: "2024-01-01" }), []);
     assert.deepEqual(await recentChanges(db, { since: "2024-01-01", types: ["bill"] }), []);
+    assert.deepEqual(await searchPassages(db, "frontier consent", {}, undefined, { match: "any" }), []);
+    assert.deepEqual(await getPassages(db, ["ca-sb-53-2025#1", "ca-sb-53-2025#2"]), []);
     assert.equal(await getRecord(db, "ca-sb-53-2025"), null);
   });
 });
@@ -456,6 +531,7 @@ describe("M3: only a missing table is treated as empty", () => {
     () => searchPassages(db, "frontier"),
     () => recentChanges(db, { since: "2024-01-01" }),
     () => getRecord(db, "x"),
+    () => getPassages(db, ["x#1"]),
   ];
 
   test("'no such table' is empty data, whichever table and however D1 words it", async () => {
@@ -465,12 +541,13 @@ describe("M3: only a missing table is treated as empty", () => {
       Object.assign(new Error("D1_ERROR: internal"), { cause: new Error("no such table: meta: SQLITE_ERROR") }),
     ];
     for (const error of missing) {
-      const [list, manifestRead, search, changes, record] = reads(failing(error));
+      const [list, manifestRead, search, changes, record, passageRead] = reads(failing(error));
       assert.deepEqual(await list!(), []);
       assert.equal(await manifestRead!(), null);
       assert.deepEqual(await search!(), []);
       assert.deepEqual(await changes!(), []);
       assert.equal(await record!(), null);
+      assert.deepEqual(await passageRead!(), []);
     }
   });
 
