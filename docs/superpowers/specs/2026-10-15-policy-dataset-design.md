@@ -110,7 +110,7 @@ interface Manifest {
   builtAt: string;
   models: { enrich: string; verify: string };
   counts: { total: number; byJurisdiction: Record<Jurisdiction, number>; byType: Record<RecordType, number> };
-  excluded: { url: string; title: string; reason: string }[];
+  excluded: { id: string; jurisdiction: Jurisdiction; url: string; title: string; reason: string }[];
 }
 ```
 
@@ -173,11 +173,13 @@ Failures never produce half-built records. Every candidate ends up either in `po
 `photon/src/data/store.ts`. The chatbot and pages import only this module. They never query D1 directly.
 
 ```ts
+// `since` compares against a record's lastActivity = max(published, statusDate, latest timeline date)
 interface Filters { jurisdiction?: Jurisdiction; types?: RecordType[]; topics?: Topic[]; since?: string }
 
 interface RecordSummary {
   id: string; jurisdiction: Jurisdiction; type: RecordType; title: string; shortTitle?: string;
-  status: Status; statusDate?: string; summary: string; url: string; landmark: boolean;
+  status: Status; statusDate?: string; published?: string; lastActivity: string;
+  summary: string; url: string; publisher: string; landmark: boolean;
   reviewState: "auto-checked" | "human-reviewed";
 }
 
@@ -188,8 +190,10 @@ getRecord(db: D1Database, id: string): Promise<PolicyRecord | null>
 recentChanges(db: D1Database, filters: Filters & { since: string }, limit?: number):
   Promise<{ date: string; event: string; record: RecordSummary }[]>   // newest first
 listRecords(db: D1Database, filters?: Filters): Promise<RecordSummary[]>
-getManifest(db: D1Database): Promise<Manifest>
+getManifest(db: D1Database): Promise<Manifest | null>     // null when D1 has not been seeded
 ```
+
+- An unseeded D1 must not crash the app. `listRecords` returns `[]`, `getManifest` returns `null`, and the pages show an empty state.
 
 - `searchPassages` turns user text into a safe FTS5 query: it quotes terms and drops FTS operators, so raw input can never cause a syntax error. An empty or all-stop-word query returns `[]` without throwing.
 - `getManifest` is a fifth, read-only helper. The pages and the bot use it for the "as of" date and the counts.
