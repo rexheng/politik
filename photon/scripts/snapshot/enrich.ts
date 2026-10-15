@@ -51,7 +51,8 @@ const Reply = z.object({
   related: z.array(z.object({ id: z.string(), relation: z.string() })),
 });
 
-const STATUS_HELP: Record<(typeof StatusSchema.options)[number], string> = {
+/** What each status means. Shared with the verify step, so a checker judges "in-force" by the same definition the enricher used. */
+export const STATUS_HELP: Record<(typeof StatusSchema.options)[number], string> = {
   proposed: "introduced or drafted, not yet passed or adopted",
   "in-progress": "moving through the legislature or a consultation",
   passed: "passed by the legislature but not yet signed or in force",

@@ -13,6 +13,8 @@ export interface GebizRule {
   since: string;
   /** Smallest award to keep, in Singapore dollars. */
   minAwardSgd: number;
+  /** Most tenders the build keeps, largest award first. The build keeps 40 when this is not set. */
+  max?: number;
 }
 
 // provisional — set from owner-approved candidates.md in Task 7

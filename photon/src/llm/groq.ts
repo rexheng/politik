@@ -45,6 +45,7 @@ const KEYWORDS_NOT_FOR_STRICT = new Set([
 
 const ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
 const MAX_WAIT_MS = 60_000; // a longer rate-limit wait (e.g. a daily quota) is reported instead of stalling the build
+const DEFAULT_TIMEOUT_MS = 60_000;
 
 export class LlmError extends Error {
   status?: number;
@@ -67,6 +68,8 @@ export type GroqOptions = {
   maxRetries?: number;
   /** The first backoff wait; it doubles each retry. Default 2000. */
   baseDelayMs?: number;
+  /** How long one HTTP exchange (request sent to body read) may take before it is aborted. A timeout is retried like any network error. Default 60000. */
+  timeoutMs?: number;
   /** For tests: replaces the real wait. */
   sleep?: (ms: number) => Promise<void>;
 };
@@ -112,6 +115,8 @@ export function groqLlm(opts: GroqOptions): Llm {
   const { apiKey, model } = opts;
   const maxRetries = opts.maxRetries ?? 4;
   const baseDelay = opts.baseDelayMs ?? 2000;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (!(timeoutMs > 0) || !Number.isFinite(timeoutMs)) throw new RangeError(`timeoutMs must be a positive number, got ${timeoutMs}`);
   const doFetch: typeof fetch = opts.fetchImpl ?? ((input, init) => fetch(input, init));
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   /** `${schema name}:${mode}` pairs Groq has refused for this model, so later calls skip them. */
@@ -137,31 +142,40 @@ export function groqLlm(opts: GroqOptions): Llm {
     return error;
   };
 
-  /** One HTTP exchange, retrying 429, 5xx and network errors with exponential backoff. */
+  /** One HTTP exchange, retrying 429, 5xx, timeouts and network errors with exponential backoff. */
   async function post(body: object): Promise<{ content: string; finish?: string }> {
     for (let attempt = 0; ; attempt++) {
       const backoff = Math.min(baseDelay * 2 ** attempt, MAX_WAIT_MS);
+      const signal = AbortSignal.timeout(timeoutMs); // covers the response body too, so a stalled stream cannot hang the build
       let res: Response;
+      let text: string;
       try {
         res = await doFetch(ENDPOINT, {
           method: "POST",
           headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
           body: JSON.stringify(body),
+          signal,
         });
+        text = await res.text();
       } catch (cause) {
         if (attempt >= maxRetries) {
-          throw new LlmError(redact(`Groq request failed: ${cause instanceof Error ? cause.message : String(cause)}`));
+          const why = signal.aborted ? `timed out after ${timeoutMs}ms` : cause instanceof Error ? cause.message : String(cause);
+          throw new LlmError(redact(`Groq request failed: ${why}`));
         }
         await sleep(backoff);
         continue;
       }
       if (res.ok) {
-        const json: any = await res.json().catch(() => null);
+        let json: any = null;
+        try {
+          json = JSON.parse(text);
+        } catch {
+          // not JSON: treated below as an empty reply
+        }
         const choice = json?.choices?.[0];
         const content = choice?.message?.content;
         return { content: typeof content === "string" ? content : "", finish: choice?.finish_reason };
       }
-      const text = await res.text().catch(() => "");
       if ((res.status === 429 || res.status >= 500) && attempt < maxRetries) {
         const wait = retryAfterMs(res.headers.get("retry-after")) ?? backoff;
         if (wait > MAX_WAIT_MS) throw apiError(res.status, text, ` (retry-after ${Math.ceil(wait / 1000)}s is too long to wait)`);

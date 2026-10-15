@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { groqLlm, type Llm } from "../../photon/src/llm/groq.ts";
-import type { Passage } from "../../photon/src/data/schema.ts";
-import type { Enriched } from "../../photon/scripts/snapshot/enrich.ts";
+import { StatusSchema, type Passage } from "../../photon/src/data/schema.ts";
+import { STATUS_HELP, type Enriched } from "../../photon/scripts/snapshot/enrich.ts";
 import { verifyRecord } from "../../photon/scripts/snapshot/verify.ts";
 
 const passages: Passage[] = [
@@ -213,4 +213,43 @@ test("the schema sent to Groq qualifies for strict mode", async () => {
   const format = await sentFormat((llm) => verifyRecord(enriched(), passages, llm));
   assert.equal(format.type, "json_schema");
   assert.equal(format.json_schema.strict, true);
+});
+
+// --- status definitions and the snapshot date (R13b) ---
+
+test("the system prompt defines every status the way the enrich prompt does, so a correct status is not marked unsupported", async () => {
+  assert.deepEqual(Object.keys(STATUS_HELP).sort(), [...StatusSchema.options].sort());
+  const { llm, calls } = verifier();
+  await verifyRecord(enriched(), passages, llm, { today: "2026-10-15" });
+  const { system } = calls[0]!;
+  for (const [status, help] of Object.entries(STATUS_HELP)) {
+    assert.ok(system.includes(`${status}: ${help}`), `the definition of ${status}`);
+  }
+});
+
+test("the system prompt states the snapshot date and how it settles in-force versus enacted", async () => {
+  const { llm, calls } = verifier();
+  await verifyRecord(enriched(), passages, llm, { today: "2026-10-15" });
+  const { system } = calls[0]!;
+  assert.ok(system.includes("2026-10-15"));
+  assert.match(system, /in-force/);
+  assert.match(system, /effective date/i);
+});
+
+test("without a date the prompt still carries the definitions but names no date", async () => {
+  const { llm, calls } = verifier();
+  await verifyRecord(enriched(), passages, llm);
+  const { system } = calls[0]!;
+  assert.ok(system.includes(`in-force: ${STATUS_HELP["in-force"]}`));
+  assert.doesNotMatch(system, /\b\d{4}-\d{2}-\d{2}\b/);
+  const withEmptyCtx = verifier();
+  await verifyRecord(enriched(), passages, withEmptyCtx.llm, {});
+  assert.equal(withEmptyCtx.calls[0]!.system, system);
+});
+
+test("passing the context does not change which claims are checked or how verdicts are applied", async () => {
+  const { llm } = verifier({ unsupported: ["provisions[2]"] });
+  const out = await verifyRecord(enriched(), passages, llm, { today: "2026-10-15" });
+  assert.deepEqual(out.dropped, ["provisions[2]"]);
+  assert.equal(out.fatal, undefined);
 });

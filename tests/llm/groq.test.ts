@@ -299,3 +299,108 @@ test("the client is Worker-safe: no node: imports, process, dotenv or env reads"
   assert.doesNotMatch(code, /dotenv/);
   assert.doesNotMatch(code, /\brequire\(/);
 });
+
+// --- request timeout (R13a) ---
+
+/**
+ * AbortSignal.timeout timers are unref'd, and a real stalled socket keeps the event loop alive. A fake has no socket,
+ * so this holds a ref'd timer until the signal fires.
+ */
+function holdLoopUntilAborted(signal: AbortSignal) {
+  const keepAlive = setInterval(() => undefined, 1000);
+  signal.addEventListener("abort", () => clearInterval(keepAlive), { once: true });
+}
+
+/** A fetch that never answers until its AbortSignal fires, like a stalled connection. */
+const hangs = (calls: Array<{ signal?: AbortSignal | null }>) =>
+  (async (_input: string | URL | Request, init?: RequestInit) => {
+    calls.push({ signal: init?.signal });
+    return await new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) return; // would hang for ever: the test fails by timing out
+      holdLoopUntilAborted(signal);
+      const abort = () => reject(signal.reason ?? new Error("aborted"));
+      if (signal.aborted) abort();
+      else signal.addEventListener("abort", abort, { once: true });
+    });
+  }) as typeof fetch;
+
+test("every request carries an abort signal that times out after 60 seconds, or after timeoutMs when given", async () => {
+  const original = AbortSignal.timeout;
+  const asked: number[] = [];
+  AbortSignal.timeout = (ms: number) => {
+    asked.push(ms);
+    return original.call(AbortSignal, ms);
+  };
+  try {
+    const fake = fakeFetch(ok(goodReply));
+    await client(fake).ask();
+    assert.ok(fake.calls[0]!.init.signal instanceof AbortSignal, "an AbortSignal is passed to fetch");
+    assert.deepEqual(asked, [60_000]);
+
+    asked.length = 0;
+    const custom = fakeFetch(ok(goodReply));
+    await groqLlm({ apiKey: "k", model: "m", fetchImpl: custom.impl, timeoutMs: 1234 })({ system: "s", user: "u", schema: Answer, name: "answer" });
+    assert.deepEqual(asked, [1234]);
+  } finally {
+    AbortSignal.timeout = original;
+  }
+});
+
+test("a request that stalls past timeoutMs is aborted and retried like a network error", async () => {
+  const stalled: Array<{ signal?: AbortSignal | null }> = [];
+  const answers = [ok(goodReply)];
+  const sleeps: number[] = [];
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    if (stalled.length === 0) return hangs(stalled)(input, init); // the first attempt stalls
+    stalled.push({ signal: init?.signal });
+    return answers[0]!.clone();
+  }) as typeof fetch;
+  const llm = groqLlm({ apiKey: "k", model: "m", fetchImpl, timeoutMs: 25, maxRetries: 2, sleep: async (ms) => void sleeps.push(ms) });
+  assert.deepEqual(await llm({ system: "s", user: "u", schema: Answer, name: "answer" }), goodReply);
+  assert.equal(stalled.length, 2, "one stalled attempt and one retry");
+  assert.equal(stalled[0]!.signal?.aborted, true);
+  assert.deepEqual(sleeps, [2000], "the timeout backs off like any other network error");
+});
+
+test("when every attempt times out it gives up after maxRetries with a timeout message", async () => {
+  const calls: Array<{ signal?: AbortSignal | null }> = [];
+  const sleeps: number[] = [];
+  const llm = groqLlm({
+    apiKey: "gsk_test_key",
+    model: "m",
+    fetchImpl: hangs(calls),
+    timeoutMs: 10,
+    maxRetries: 2,
+    sleep: async (ms) => void sleeps.push(ms),
+  });
+  await assert.rejects(llm({ system: "s", user: "u", schema: Answer, name: "answer" }), (e: Error) => {
+    assert.match(e.message, /timed out|timeout/i);
+    assert.match(e.message, /10\s?ms/);
+    assert.doesNotMatch(e.message, /gsk_test_key/);
+    return true;
+  });
+  assert.equal(calls.length, 3);
+  assert.deepEqual(sleeps, [2000, 4000]);
+});
+
+test("a body that stalls after the headers arrive also counts as a timeout, not as an empty reply", async () => {
+  let attempt = 0;
+  const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+    attempt++;
+    if (attempt > 1) return ok(goodReply);
+    const signal = init!.signal!;
+    holdLoopUntilAborted(signal);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        signal.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+      },
+    });
+    return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  const sleeps: number[] = [];
+  const llm = groqLlm({ apiKey: "k", model: "m", fetchImpl, timeoutMs: 25, sleep: async (ms) => void sleeps.push(ms) });
+  assert.deepEqual(await llm({ system: "s", user: "u", schema: Answer, name: "answer" }), goodReply);
+  assert.equal(attempt, 2);
+  assert.deepEqual(sleeps, [2000], "retried after a backoff as a network error, not repaired as an empty reply");
+});
