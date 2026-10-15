@@ -24,10 +24,15 @@ function failResponse(): Response {
 /**
  * A 403 for a browser request that comes from a page on another site, or null. A browser says which page a request comes
  * from in `Origin`; one whose host is not this Worker's own is some other site using our endpoints (and the owner's
- * Groq and Deepgram keys) from its visitors' browsers. No `Origin` is allowed: a browser sends none for its own page's
- * simple requests, and a script that is not a browser is limited by the rate limit, not by this.
+ * Groq and Deepgram keys) from its visitors' browsers. A request that has no `Origin`, such as a `<script>`, `<img>` or
+ * no-cors fetch from another site, is still told apart by `Sec-Fetch-Site`, which a browser sets on every request itself and a
+ * page cannot change: `cross-site` is refused; `same-origin`, `same-site`, `none` (the person typed the address) and no header
+ * at all are not. A script that is not a browser can send whatever headers it likes, so this is no defence against scripts:
+ * the rate limits are.
  */
 function crossOrigin(request: Request): Response | null {
+  const refuse = () => json({ error: "Requests from other sites are not allowed." }, 403);
+  if (request.headers.get("Sec-Fetch-Site")?.trim().toLowerCase() === "cross-site") return refuse();
   const origin = request.headers.get("Origin");
   if (origin === null) return null;
   try {
@@ -35,7 +40,7 @@ function crossOrigin(request: Request): Response | null {
   } catch {
     // an Origin that is not a URL ("null" from a sandboxed page, or nonsense) is not this site
   }
-  return json({ error: "Requests from other sites are not allowed." }, 403);
+  return refuse();
 }
 
 /**
@@ -47,18 +52,50 @@ async function busyError(request: Request, env: Env, limiter: "ask" | "voice" = 
   return over ? json({ error: BUSY_REPLY }, 429) : null;
 }
 
-/** The most a spoken-reply request may say, and the most body it is read for. */
+/** The most a spoken-reply request may say (characters), and the most body it is read for (bytes). */
 const MAX_SPEAK_CHARS = 2000;
-const MAX_SPEAK_BODY_CHARS = 10_000;
+const MAX_SPEAK_BODY_BYTES = 10_000;
 
-/** The text of a `POST /api/voice/speak` body (a JSON object with a non-empty string `text` of at most 2,000 characters), or null. */
+/**
+ * The text of a request body, or null when it is over `maxBytes` or is not valid UTF-8. A `Content-Length` over the limit is
+ * refused unread, and otherwise the body is read as a stream that is cancelled the moment it passes the limit, so a body
+ * that says nothing about its length (chunked) cannot make the Worker hold megabytes.
+ */
+async function readCapped(request: Request, maxBytes: number): Promise<string | null> {
+  if (Number(request.headers.get("content-length")) > maxBytes) return null;
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(value);
+    }
+    const joined = new Uint8Array(total);
+    let at = 0;
+    for (const chunk of chunks) {
+      joined.set(chunk, at);
+      at += chunk.byteLength;
+    }
+    return new TextDecoder("utf-8", { fatal: true }).decode(joined);
+  } catch {
+    return null;
+  }
+}
+
+/** The text of a `POST /api/voice/speak` body (a JSON object with a non-empty string `text` of at most 2,000 characters, in at most 10,000 bytes), or null. */
 async function speakText(request: Request): Promise<string | null> {
-  const declared = Number(request.headers.get("content-length"));
-  if (declared > MAX_SPEAK_BODY_CHARS) return null;
+  const raw = await readCapped(request, MAX_SPEAK_BODY_BYTES);
+  if (raw === null) return null;
   let body: unknown;
   try {
-    const raw = await request.text();
-    if (raw.length > MAX_SPEAK_BODY_CHARS) return null;
     body = JSON.parse(raw);
   } catch {
     return null;
@@ -205,7 +242,7 @@ export default {
         return await handleTelegram(request, env);
       }
 
-      return env.ASSETS.fetch(request);
+      return await env.ASSETS.fetch(request);
     } catch {
       if (new URL(request.url).pathname.startsWith("/api/")) return failResponse();
       return new Response("Politik is unavailable.", {

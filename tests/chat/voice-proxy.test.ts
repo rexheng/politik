@@ -284,9 +284,45 @@ describe("tuneSettings: URLs are taken out of the whole Settings message, not on
       { type: "InjectUserMessage", content: "https://example.com/a" },
       { type: "InjectAgentMessage", message: "see https://example.com" },
       { type: "FunctionCallResponse", id: "f1", name: "politik", content: "//example.com" },
-      { type: "injectusermessage", content: "https://example.com/b", url: "kept" },
+      { type: "injectusermessage", content: "https://example.com/b" },
     ]) {
       assert.deepEqual(tune(JSON.stringify(message)).msg, message);
+    }
+  });
+
+  test("a key that names a URL is dropped from free-text messages too; only their string values are spared", () => {
+    const { msg, text } = tune(JSON.stringify({ type: "InjectUserMessage", content: "https://example.com/a", url: "kept?", nested: { endpoint: EVIL, href: EVIL, note: "https://example.com/n" }, list: [{ api_url: EVIL, ok: "//example.com" }] }));
+    assert.doesNotMatch(text, /evil/);
+    assert.deepEqual(msg, { type: "InjectUserMessage", content: "https://example.com/a", nested: { note: "https://example.com/n" }, list: [{ ok: "//example.com" }] });
+  });
+
+  test("the type is found in any letter case, and a message is free text only if every type key says so", () => {
+    const evilAudio = { input: { url: EVIL, encoding: "linear16" } };
+    for (const message of [
+      { type: "InjectUserMessage", TYPE: "Settings", audio: evilAudio },
+      { Type: "Settings", type: "InjectUserMessage", audio: evilAudio },
+      { type: "InjectUserMessage", " type": "Settings", audio: evilAudio },
+      { TYPE: "InjectUserMessage", type: "Settings", audio: { input: { sample_rate: 16000, x: "https://evil.example/v" } } },
+    ]) {
+      const { text } = tune(JSON.stringify(message));
+      assert.doesNotMatch(text, /evil/, JSON.stringify(message));
+    }
+  });
+
+  test("a message whose type keys all say free text, in any letter case, keeps its URL values", () => {
+    for (const message of [
+      { TYPE: "InjectUserMessage", content: "https://example.com/a" },
+      { Type: " injectagentmessage ", message: "//example.com/b" },
+      { type: "InjectUserMessage", TYPE: "injectusermessage", content: "https://example.com/c" },
+    ]) {
+      assert.deepEqual(tune(JSON.stringify(message)).msg, message);
+    }
+  });
+
+  test("a message with no type, a type that is not a string, or an unknown type is not free text", () => {
+    for (const type of [undefined, 5, null, ["InjectUserMessage"], { a: 1 }, "Nonsense", ""]) {
+      const { text } = tune(JSON.stringify({ type, content: "https://evil.example/c" }));
+      assert.doesNotMatch(text, /evil/, JSON.stringify(type));
     }
   });
 
@@ -707,12 +743,38 @@ describe("bridgeSockets", () => {
     }
   });
 
-  test("frames dropped for not parsing still count as the page being there", () => {
+  test("a frame that is dropped is not a sign of life: garbage, an oversize frame or non-JSON do not start the 60 seconds again", () => {
+    for (const dropped of ["garbage", '{"type":"KeepAlive"} trailing', `{"type":"KeepAlive","pad":"${"x".repeat(MAX_FRAME_BYTES)}"}`, "5", ""]) {
+      const { server, clock } = bridge();
+      clock.advance(59_000);
+      server.message(dropped);
+      clock.advance(999);
+      assert.deepEqual(server.closes, [], "not yet");
+      clock.advance(1);
+      assert.deepEqual(server.closes, [{ code: 1000, reason: "idle" }], dropped.slice(0, 20));
+    }
+  });
+
+  test("a stream of dropped frames cannot keep a session open to the 10-minute cap", () => {
     const { server, clock } = bridge();
-    clock.advance(59_000);
-    server.message("garbage");
-    clock.advance(59_000);
-    assert.deepEqual(server.closes, []);
+    for (let i = 0; i < 59; i++) {
+      clock.advance(1_000);
+      server.message("garbage");
+    }
+    clock.advance(1_000);
+    assert.deepEqual(server.closes, [{ code: 1000, reason: "idle" }]);
+  });
+
+  test("a frame that is passed on does start the 60 seconds again: audio, a keep-alive, a settings message", () => {
+    for (const accepted of [new Uint8Array([1]), '{"type":"KeepAlive"}', settings({ think: { prompt: "p" } })]) {
+      const { server, clock } = bridge();
+      clock.advance(59_000);
+      server.message(accepted);
+      clock.advance(59_999);
+      assert.deepEqual(server.closes, [], typeof accepted === "string" ? accepted.slice(0, 20) : "audio");
+      clock.advance(1);
+      assert.equal(server.closes.length, 1);
+    }
   });
 
   test("the default limits are used when none are given", () => {

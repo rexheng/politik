@@ -227,11 +227,11 @@ function tuneSections(value: unknown, kind: SectionKind, tuning: Tuning): unknow
 const STRUCTURAL_KEYS = new Set(["agent", "audio", "context"]);
 
 /**
- * `node` with every think, speak and listen section in it, wherever it sits, replaced by its safe form. With `whole` (the
- * message is not free text) the rest of the tree is cleaned too: a key that names a URL is dropped with its value, and a
- * string that is a URL is dropped from its object or list. Text that people write is only ever dropped when the whole of it
- * is a URL, and a JSON string is read through only where a setting object belongs (`STRUCTURAL_KEYS`), not in text such as
- * a history message's function-call arguments.
+ * `node` with every think, speak and listen section in it, wherever it sits, replaced by its safe form, and a key that
+ * names a URL dropped with its value, in any message. With `whole` (the message is not free text) a string that is a URL is
+ * dropped from its object or list too; in free text (`FREE_TEXT_TYPES`) only the keys are cleaned, and what people wrote
+ * is left as it is. A JSON string is read through only where a setting object belongs (`STRUCTURAL_KEYS`), not in text such
+ * as a history message's function-call arguments.
  */
 function tuneNode(node: unknown, tuning: Tuning, depth: number, whole: boolean): unknown {
   if (depth > MAX_DEPTH) return DROP;
@@ -243,7 +243,7 @@ function tuneNode(node: unknown, tuning: Tuning, depth: number, whole: boolean):
     if (key === "__proto__") continue;
     const lower = key.toLowerCase();
     const section = lower === "think" || lower === "speak" || lower === "listen";
-    if (!section && whole && isUrlKey(key)) continue;
+    if (!section && isUrlKey(key)) continue; // in free text too: a key is never what people write
     const tuned = section ? tuneSections(value, lower as SectionKind, tuning) : tuneNode(STRUCTURAL_KEYS.has(lower) ? unwrapJson(value) : value, tuning, depth + 1, whole);
     if (tuned !== DROP) out[section ? lower : key] = tuned;
   }
@@ -252,6 +252,16 @@ function tuneNode(node: unknown, tuning: Tuning, depth: number, whole: boolean):
 
 /** Message types that carry what people say, not settings: a URL as their whole text is text. */
 const FREE_TEXT_TYPES = new Set(["injectusermessage", "injectagentmessage", "functioncallresponse", "functioncallrequest"]);
+
+/**
+ * True when the message is free text: it has a `type` key, and every key that reads as `type` (in any letter case, with or
+ * without spaces around it, because a parser may read the key that way) holds a string that is one of `FREE_TEXT_TYPES`
+ * (also in any letter case). A message that says it is something else under another spelling of the key is not free text.
+ */
+function isFreeText(message: Record<string, unknown>): boolean {
+  const types = Object.entries(message).filter(([key]) => key.trim().toLowerCase() === "type");
+  return types.length > 0 && types.every(([, value]) => typeof value === "string" && FREE_TEXT_TYPES.has(value.trim().toLowerCase()));
+}
 
 /**
  * The text to send Deepgram for a text frame from the page, with the session notes found in the think prompt; null when
@@ -267,9 +277,8 @@ export function tuneSettings(raw: string, origin: string): { text: string; knowl
   try {
     const parsed = unwrapJson(JSON.parse(raw));
     if (!isRecord(parsed)) return null;
-    const type = typeof parsed.type === "string" ? parsed.type.trim().toLowerCase() : "";
     const tuning: Tuning = { origin, notes: [] };
-    const tuned = tuneNode(parsed, tuning, 0, !FREE_TEXT_TYPES.has(type));
+    const tuned = tuneNode(parsed, tuning, 0, !isFreeText(parsed));
     if (!isRecord(tuned)) return null;
     return { text: JSON.stringify(tuned), knowledge: tuning.notes.find((found) => found !== undefined) };
   } catch {
@@ -429,7 +438,7 @@ export function sessionGuard(opts: {
  * from the page goes through `tuneSettings`, so Deepgram only ever gets a rewritten copy, and a frame that does not parse
  * is dropped. A text frame from Deepgram is checked for the agent's `politik` function call (`answerFunctionCall`), and
  * otherwise goes on to the page. Both sockets are closed after `MAX_SESSION_MS`, and after `IDLE_MS` with no frame from
- * the page (any frame, even one that is dropped, shows the page is there).
+ * the page that was passed on (a frame that is dropped is not a sign of life, so garbage cannot keep a session open).
  */
 export function bridgeSockets(opts: {
   server: BridgeSocket;
@@ -483,21 +492,23 @@ export function bridgeSockets(opts: {
   let sessionKnowledge: unknown;
   const session: FunctionCallSession = { client: server as unknown as WebSocket, ip: opts.ip, history: [] };
   server.addEventListener("message", (event) => {
-    guard.touch();
     try {
       if (typeof event.data === "string") {
         const tuned = tuneSettings(event.data, origin);
-        if (!tuned) return; // not JSON the Worker can read: not passed on
+        if (!tuned) return; // not JSON the Worker can read, or too big: not passed on, and not a sign of life either
+        guard.touch();
         if (tuned.knowledge !== undefined) sessionKnowledge = tuned.knowledge;
         remote.send(tuned.text);
         return;
       }
       const bytes = asBytes(event.data);
       if (bytes) {
+        guard.touch();
         remote.send(bytes);
         return;
       }
       if (event.data instanceof Blob) {
+        guard.touch();
         void event.data.arrayBuffer().then(
           (buffer) => {
             try {

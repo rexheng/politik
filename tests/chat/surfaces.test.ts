@@ -736,6 +736,59 @@ describe("surfaces", () => {
           assert.equal((await run(bodyRequest("{}"), e)).result.status, 400);
         });
 
+        /** A request whose body is made as it is read, with no Content-Length, and a record of how much of it was ever asked for. */
+        function streamed(chunkBytes: number, chunks: number, ip = "203.0.113.7") {
+          const state = { pulled: 0, cancelled: false };
+          const body = new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (state.pulled >= chunks) return controller.close();
+              state.pulled++;
+              controller.enqueue(new Uint8Array(chunkBytes).fill(0x20));
+            },
+            cancel() {
+              state.cancelled = true;
+            },
+          });
+          const request = new Request(SPEAK, { method: "POST", headers: { "content-type": "application/json", "CF-Connecting-IP": ip }, body, duplex: "half" } as RequestInit);
+          return { request, state };
+        }
+
+        test("a streamed body of 30 MB with no Content-Length is cut off after the limit, not read in full", async () => {
+          const { binding, keys } = limiter(true);
+          const { request, state } = streamed(10_000, 3_000);
+          assert.equal(request.headers.get("content-length"), null);
+          const { result, urls } = await run(request, env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
+          assert.equal(result.status, 400);
+          assert.deepEqual(keys, [], "no token");
+          assert.deepEqual(urls, []);
+          assert.ok(state.pulled <= 5, `${state.pulled} chunks of 10 KB were asked for, not 3,000`);
+          assert.equal(state.cancelled, true, "the rest of the body was cancelled");
+        });
+
+        test("one small chunk at a time is cut off at the same place", async () => {
+          const { request, state } = streamed(100, 100_000);
+          const { result } = await run(request, env({ ASK_LIMITER: limiter(true).binding, DEEPGRAM_API_KEY: "dg-test" }));
+          assert.equal(result.status, 400);
+          assert.ok(state.pulled <= 110, `${state.pulled} chunks of 100 bytes`);
+        });
+
+        test("a body of exactly 10,000 bytes is read, and one byte more is not", async () => {
+          const pad = (bytes: number) => `{"text":"Hello there"${" ".repeat(bytes - Buffer.byteLength('{"text":"Hello there"}'))}}`;
+          assert.equal(Buffer.byteLength(pad(10_000)), 10_000);
+          const ok = await run(bodyRequest(pad(10_000)), env({ ASK_LIMITER: limiter(true).binding, DEEPGRAM_API_KEY: "dg-test" }));
+          assert.equal(ok.result.status, 200);
+          const over = await run(bodyRequest(pad(10_001)), env({ ASK_LIMITER: limiter(true).binding, DEEPGRAM_API_KEY: "dg-test" }));
+          assert.equal(over.result.status, 400);
+        });
+
+        test("a body that is not valid UTF-8 is a 400", async () => {
+          const request = new Request(SPEAK, { method: "POST", headers: { "CF-Connecting-IP": "203.0.113.7" }, body: new Uint8Array([0x7b, 0x22, 0x74, 0x65, 0x78, 0x74, 0x22, 0x3a, 0x22, 0xff, 0xfe, 0x22, 0x7d]) });
+          const { binding, keys } = limiter(true);
+          const { result } = await run(request, env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
+          assert.equal(result.status, 400);
+          assert.deepEqual(keys, []);
+        });
+
         test("no Deepgram key is still a 503 before the body is looked at", async () => {
           assert.equal((await run(bodyRequest("{}"), env())).result.status, 503);
         });
@@ -1134,6 +1187,59 @@ describe("surfaces", () => {
       }
     });
 
+    describe("a cross-site request with no Origin is refused by its fetch metadata", () => {
+      // A <script>, <img> or no-cors fetch from another site sends no Origin, but the browser still says Sec-Fetch-Site: cross-site.
+      const routes: [string, (site: string | undefined) => Request][] = [
+        ["GET /api/saying", (site) => at("/api/saying", { headers: site === undefined ? {} : { "Sec-Fetch-Site": site } })],
+        ["POST /api/ask", (site) => at("/api/ask", { method: "POST", headers: { "content-type": "text/plain", ...(site === undefined ? {} : { "Sec-Fetch-Site": site }) }, body: JSON.stringify({ message: "hi" }) })],
+        ["POST /api/saying", (site) => at("/api/saying", { method: "POST", headers: site === undefined ? {} : { "Sec-Fetch-Site": site }, body: "{}" })],
+        ["POST /api/voice/think", (site) => at("/api/voice/think", { method: "POST", headers: site === undefined ? {} : { "Sec-Fetch-Site": site }, body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }) })],
+        ["POST /api/voice/speak", (site) => at("/api/voice/speak", { method: "POST", headers: site === undefined ? {} : { "Sec-Fetch-Site": site }, body: JSON.stringify({ text: "Hello" }) })],
+        ["agent upgrade", (site) => at("/api/voice/v1/agent/converse", { headers: { Upgrade: "websocket", Connection: "Upgrade", ...(site === undefined ? {} : { "Sec-Fetch-Site": site }) } })],
+        ["listen upgrade", (site) => at("/api/voice/listen", { headers: { Upgrade: "websocket", Connection: "Upgrade", ...(site === undefined ? {} : { "Sec-Fetch-Site": site }) } })],
+      ];
+
+      test("Sec-Fetch-Site: cross-site (in any letter case) is a 403 on every route, before anything is spent or fetched", async () => {
+        for (const [name, build] of routes) {
+          for (const site of ["cross-site", "Cross-Site", " CROSS-SITE "]) {
+            const ask = keysOf();
+            const voice = keysOf();
+            const e = env({ ASK_LIMITER: ask.binding, VOICE_LIMITER: voice.binding, DEEPGRAM_API_KEY: "dg-test", GROQ_API_KEY: "gsk-test" });
+            const { result, urls } = await run(build(site), e);
+            assert.equal(result.status, 403, `${name} ${site}`);
+            assert.match(result.headers.get("content-type") ?? "", /^application\/json/);
+            assert.deepEqual(urls, [], `${name}: nothing fetched`);
+            assert.deepEqual([ask.keys, voice.keys], [[], []], `${name}: no limiter token`);
+          }
+        }
+      });
+
+      test("same-origin, same-site, none and no header at all are allowed", async () => {
+        for (const site of ["same-origin", "same-site", "none", undefined]) {
+          for (const [name, path] of [["GET /api/saying", () => at("/api/saying", { headers: site === undefined ? {} : { "Sec-Fetch-Site": site } })] as const]) {
+            const res = await run(path(), env());
+            assert.equal(res.result.status, 200, `${name} ${site}`);
+          }
+          const ask = await worker.fetch(routes[1]![1](site), env());
+          assert.equal(ask.status, 200, `POST /api/ask ${site}`);
+          const speak = await withFetch(() => new Response("audio", { headers: { "content-type": "audio/mpeg" } }), () => worker.fetch(routes[4]![1](site), env({ DEEPGRAM_API_KEY: "dg-test" })));
+          assert.equal(speak.result.status, 200, `speak ${site}`);
+          const agent = await run(routes[5]![1](site), env({ DEEPGRAM_API_KEY: "dg-test" }));
+          assert.equal(agent.result.status, 502, `agent ${site}: through to Deepgram, which is unreachable here`);
+        }
+      });
+
+      test("a value this check does not know is allowed (a browser sends only the four)", async () => {
+        const res = await run(at("/api/saying", { headers: { "Sec-Fetch-Site": "garbage" } }), env());
+        assert.equal(res.result.status, 200);
+      });
+
+      test("an Origin of this site does not excuse a cross-site fetch-metadata header", async () => {
+        const res = await run(at("/api/saying", { origin: "https://politik.test", headers: { "Sec-Fetch-Site": "cross-site" } }), env());
+        assert.equal(res.result.status, 403);
+      });
+    });
+
     test("a route that is not on the list has no origin check: the map token and the assets", async () => {
       const res = await run(at("/api/map-token", { origin: "https://evil.example" }), env());
       assert.equal(res.result.status, 404, "reached the route (no token is set), not refused as 403");
@@ -1155,6 +1261,24 @@ describe("surfaces", () => {
       const result = await worker.fetch(request, exploding);
       assert.equal(result.constructor.name, "Response");
       assert.equal(result.status, 500);
+    });
+  });
+
+  describe("a page or asset request that fails is an answer, not an unhandled rejection", () => {
+    test("when the assets binding throws, worker.fetch resolves with a 500 response", async () => {
+      const broken = { DB: undefined, ASSETS: { fetch: async () => Promise.reject(new Error("assets down")) } } as unknown as Env;
+      for (const path of ["/", "/app.js", "/index.html"]) {
+        const result = await worker.fetch(new Request(`https://politik.test${path}`), broken);
+        assert.equal(result.status, 500, path);
+        assert.equal(await result.text(), "Politik is unavailable.", path);
+      }
+    });
+
+    test("and when it works its response is passed on", async () => {
+      const assets = { DB: undefined, ASSETS: { fetch: async () => new Response("<html></html>", { headers: { "content-type": "text/html" } }) } } as unknown as Env;
+      const result = await worker.fetch(new Request("https://politik.test/"), assets);
+      assert.equal(result.status, 200);
+      assert.equal(await result.text(), "<html></html>");
     });
   });
 
