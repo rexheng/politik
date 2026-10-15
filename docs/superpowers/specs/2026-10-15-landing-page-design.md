@@ -69,23 +69,24 @@ The implementer copies the reference shots they need into `.tmp-landing/referenc
   | #787878 | `#7a766f` | `--muted` |
 
   Colours are defined as CSS custom properties on `:root`.
-- **Imagery:** real, high-quality raster images, never vector "art". This was revised 2026-10-15 at the owner's request: no SVG noise fills, clip-art, or gradients standing in for images. ATMO pairs real photos with real forecast renders of the same place, and we do the same with open-licensed sources.
-  - **Satellite photos:** Copernicus Sentinel-2 true colour at 10 m, from the public Sentinel-2 COGs on AWS (found via the Earth Search STAC API). Pick low-cloud scenes and crop to:
-    - the State Capitol and downtown Sacramento
-    - Silicon Valley / Santa Clara data-centre land
-    - Singapore's Civic District and Marina Bay
-    - Singapore's Jurong / Tuas data-centre parks
-    - Attribution: "Contains modified Copernicus Sentinel data 2026".
-  - **Data renders:** each pairs with a satellite tile as its crossfade partner, like ATMO's photo ↔ forecast. They are drawn from real data:
-    - shaded relief from AWS Terrain Tiles elevation (Terrarium)
-    - coloured with the thermal ramp (deep blue → violet → magenta → amber)
-    - overlaid with real points from our data: data-centre sites from `photon/src/datacentres.ts`, plus the capitals as policy pins
-  - **Globe:** NASA Blue Marble (public domain) on an orthographic projection showing California and Singapore, with a thermal glow at both.
-  - **Photography (optional, up to 2 tiles):** Wikimedia Commons images under CC0, public domain or CC BY / BY-SA (e.g. the California State Capitol, Parliament House Singapore), with attribution.
-  - **Document heat tiles:** real snapshot passages typeset in DM Mono with thermal highlight bands. They are rendered to raster through a headless-browser screenshot, so the text is crisp.
-  - **Format:** every image is WebP at 2× its largest display size, with `srcset` 1×/2×. Hero and section tiles ≤ 300 KB, full-bleed backgrounds ≤ 500 KB.
-  - **Source and credits:** a repo script `photon/scripts/landing/images/` produces all images reproducibly. Every source and licence goes in `photon/public/landing/CREDITS.md`, and the footer shows a short "Imagery:" credit line.
-  - These replace ATMO's photo ↔ forecast crossfade with a document ↔ heat-map crossfade of the same subject.
+- **Imagery:** real photographs first. This was revised twice on 2026-10-15 at the owner's request: no vector "art", and real photos rather than satellite views.
+  - **Photographs (primary).** About 6–8 curated, high-resolution, cinematic real photos that fit ATMO's tone: moody, high-contrast and natural, never stock-cheesy. Subjects tie to tech policy in California and Singapore, for example:
+    - the California State Capitol dome; Parliament House or the Supreme Court area in Singapore
+    - the Marina Bay or CBD skyline at dusk; San Francisco or Silicon Valley
+    - data-centre aisles and servers; fibre optics; a semiconductor wafer
+    - power infrastructure and cooling (data-centre energy and water)
+    - a legislative chamber
+  - **Photo sources:**
+    - Unsplash, under the Unsplash License (free for commercial use). Find photos via web search and download the original resolution from images.unsplash.com.
+    - Wikimedia Commons, for specific landmarks. Accept only CC0, public domain or CC BY / BY-SA, with attribution. Requests must carry a descriptive User-Agent.
+    - A vision-capable curator gathers several candidates per slot and picks the best. Apply at most a light, consistent grade for cohesion, with no heavy filters.
+  - **Data renders (secondary).** These are the crossfade partner for some hero photos, mirroring ATMO's photo ↔ forecast pairing.
+    - Shaded relief from real elevation data (AWS Terrain Tiles), coloured with the thermal ramp.
+    - Overlaid with real points: data-centre sites from `photon/src/datacentres.ts`, and the capitals as policy pins.
+  - **Globe:** NASA Blue Marble (public domain) in orthographic projection, showing California and Singapore with a thermal glow.
+  - **Document heat tiles:** real snapshot passages typeset in DM Mono with thermal highlights, rendered to raster with a headless-browser screenshot.
+  - **Format:** every image is WebP at 2× its largest display size, with a 1×/2× `srcset`. Hero and section tiles ≤ 300 KB; full-bleed backgrounds ≤ 500 KB.
+  - **Reproducible:** the repo script `photon/scripts/landing/images/` records every source URL and licence in `photon/public/landing/CREDITS.md`. The footer shows a short "Imagery:" credit line.
 - **Voice:** ATMO's instrument/telemetry tone, applied to policy. For example: `38.5766° N / 121.4934° W / SACRAMENTO / SB 53 · ENACTED 2025`.
 - **No invented facts.** Every number, status and date on the page comes from `/api/landing`, which reads the D1 snapshot. If the API fails, the readouts show coordinates and place names only.
 
