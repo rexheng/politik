@@ -8,6 +8,8 @@
   },
   "type": "module",
   "scripts": {
+    "test": "tsx --test \"tests/**/*.test.ts\"",
+    "check:data": "tsx scripts/check-data.ts",
     "check:jev": "tsx scripts/check-jev.ts",
     "check:select": "tsx scripts/check-select.ts",
     "check:stagehand": "tsx scripts/check-stagehand.ts"

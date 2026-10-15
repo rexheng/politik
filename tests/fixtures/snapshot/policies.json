@@ -1,0 +1,497 @@
+[
+  {
+    "id": "ca-sb-53-2025",
+    "jurisdiction": "US-CA",
+    "type": "bill",
+    "title": "Transparency in Frontier Artificial Intelligence Act",
+    "shortTitle": "SB 53",
+    "issuer": "California State Legislature",
+    "status": {
+      "value": "enacted",
+      "support": [
+        "ca-sb-53-2025#1"
+      ]
+    },
+    "statusDate": "2025-09-29",
+    "timeline": [
+      {
+        "date": "2025-09-13",
+        "event": "Passed the Legislature and sent to the Governor",
+        "support": [
+          "ca-sb-53-2025#1"
+        ]
+      },
+      {
+        "date": "2025-09-29",
+        "event": "Approved by the Governor and filed with the Secretary of State",
+        "support": [
+          "ca-sb-53-2025#1"
+        ]
+      }
+    ],
+    "summary": {
+      "value": "SB 53 requires the largest developers of advanced AI models to publish how they manage catastrophic risk, to publish a transparency report when they release a new model, and to report serious safety incidents to the state. It also protects employees who raise safety concerns and sets up a consortium to plan a public computing cluster. The Governor signed it on 29 September 2025.",
+      "support": [
+        "ca-sb-53-2025#1",
+        "ca-sb-53-2025#2"
+      ]
+    },
+    "provisions": [
+      {
+        "value": "Large frontier developers must publish a framework describing how they identify and mitigate catastrophic risk.",
+        "support": [
+          "ca-sb-53-2025#2"
+        ]
+      },
+      {
+        "value": "Developers must report a critical safety incident to the Office of Emergency Services within 15 days.",
+        "support": [
+          "ca-sb-53-2025#2"
+        ]
+      },
+      {
+        "value": "Violations carry a civil penalty of up to $1 million each, enforced by the Attorney General.",
+        "support": [
+          "ca-sb-53-2025#2"
+        ]
+      }
+    ],
+    "affected": [
+      {
+        "value": "Developers of AI models trained at very large scale.",
+        "support": [
+          "ca-sb-53-2025#1",
+          "ca-sb-53-2025#2"
+        ]
+      },
+      {
+        "value": "Employees of AI developers who report a danger to public safety.",
+        "support": [
+          "ca-sb-53-2025#2"
+        ]
+      }
+    ],
+    "topics": [
+      "ai-governance"
+    ],
+    "related": [],
+    "url": "https://leginfo.legislature.ca.gov/faces/billNavClient.xhtml?bill_id=202520260SB53",
+    "publisher": "California Legislative Information",
+    "published": "2025-09-29",
+    "fetched": "2026-09-30T08:12:44Z",
+    "sha256": "653666e5911da72ebd161a3bb219ac16435bc1a78d8849b6ff9e9875fab4ebf2",
+    "attribution": "California Legislative Information (leginfo.legislature.ca.gov)",
+    "redistributionOk": true,
+    "landmark": true,
+    "review": {
+      "state": "human-reviewed",
+      "reviewedAt": "2026-10-02",
+      "reviewer": "fixture-reviewer"
+    }
+  },
+  {
+    "id": "ca-sb-1047-2024",
+    "jurisdiction": "US-CA",
+    "type": "bill",
+    "title": "Safe and Secure Innovation for Frontier Artificial Intelligence Models Act",
+    "shortTitle": "SB 1047",
+    "issuer": "California State Legislature",
+    "status": {
+      "value": "vetoed",
+      "support": [
+        "ca-sb-1047-2024#1"
+      ]
+    },
+    "statusDate": "2024-09-29",
+    "timeline": [
+      {
+        "date": "2024-08-29",
+        "event": "Senate concurred in Assembly amendments and sent the bill to the Governor",
+        "support": [
+          "ca-sb-1047-2024#1"
+        ]
+      },
+      {
+        "date": "2024-09-29",
+        "event": "Vetoed by the Governor",
+        "support": [
+          "ca-sb-1047-2024#1"
+        ]
+      }
+    ],
+    "summary": {
+      "value": "SB 1047 would have required developers of the largest AI models to test for severe risks, keep the ability to shut a model down, and obtain annual audits. The Legislature passed it, but the Governor vetoed it in September 2024, saying its focus on model size was too narrow.",
+      "support": [
+        "ca-sb-1047-2024#1",
+        "ca-sb-1047-2024#2"
+      ]
+    },
+    "provisions": [
+      {
+        "value": "Developers of covered models must be able to promptly shut down all copies under their control.",
+        "support": [
+          "ca-sb-1047-2024#2"
+        ]
+      },
+      {
+        "value": "Developers must follow a written safety and security protocol and obtain annual third-party audits.",
+        "support": [
+          "ca-sb-1047-2024#2"
+        ]
+      }
+    ],
+    "affected": [
+      {
+        "value": "Developers of AI models trained above the compute threshold.",
+        "support": [
+          "ca-sb-1047-2024#2"
+        ]
+      }
+    ],
+    "topics": [
+      "ai-governance"
+    ],
+    "related": [
+      {
+        "id": "ca-sb-53-2025",
+        "relation": "related"
+      }
+    ],
+    "url": "https://leginfo.legislature.ca.gov/faces/billNavClient.xhtml?bill_id=202320240SB1047",
+    "publisher": "California Legislative Information",
+    "published": "2024-09-29",
+    "fetched": "2026-09-30T08:12:44Z",
+    "sha256": "36b2a54a7e2d299451f22ae9b3e177d7d3bc546094c34a91e7810e7e33a24d70",
+    "attribution": "California Legislative Information (leginfo.legislature.ca.gov)",
+    "redistributionOk": true,
+    "landmark": false,
+    "review": {
+      "state": "auto-checked"
+    }
+  },
+  {
+    "id": "ca-cppa-admt-2025",
+    "jurisdiction": "US-CA",
+    "type": "regulation",
+    "title": "California Consumer Privacy Act Regulations on Automated Decisionmaking Technology, Risk Assessments and Cybersecurity Audits",
+    "shortTitle": "CPPA ADMT rules",
+    "issuer": "California Privacy Protection Agency",
+    "status": {
+      "value": "in-force",
+      "support": [
+        "ca-cppa-admt-2025#1"
+      ]
+    },
+    "statusDate": "2026-01-01",
+    "timeline": [
+      {
+        "date": "2025-09-23",
+        "event": "Office of Administrative Law approved the regulations",
+        "support": [
+          "ca-cppa-admt-2025#1"
+        ]
+      }
+    ],
+    "summary": {
+      "value": "These rules require businesses that use automated decision tools for significant decisions about people to give notice and an opt-out. They also require risk assessments for high-risk processing of personal information and independent cybersecurity audits for some businesses.",
+      "support": [
+        "ca-cppa-admt-2025#1",
+        "ca-cppa-admt-2025#2"
+      ]
+    },
+    "provisions": [
+      {
+        "value": "Businesses using automated decisionmaking technology for significant decisions must give a pre-use notice and an opt-out.",
+        "support": [
+          "ca-cppa-admt-2025#1"
+        ]
+      },
+      {
+        "value": "Businesses must complete a risk assessment before high-risk processing of personal information.",
+        "support": [
+          "ca-cppa-admt-2025#2"
+        ]
+      },
+      {
+        "value": "Certain businesses must complete an annual independent cybersecurity audit.",
+        "support": [
+          "ca-cppa-admt-2025#2"
+        ]
+      }
+    ],
+    "affected": [
+      {
+        "value": "Businesses that use automated tools for decisions about finance, housing, education, employment or healthcare.",
+        "support": [
+          "ca-cppa-admt-2025#1"
+        ]
+      },
+      {
+        "value": "Consumers who are subject to automated decisions.",
+        "support": [
+          "ca-cppa-admt-2025#1"
+        ]
+      }
+    ],
+    "topics": [
+      "privacy-data"
+    ],
+    "related": [],
+    "url": "https://cppa.ca.gov/regulations/",
+    "publisher": "California Privacy Protection Agency",
+    "published": "2025-09-23",
+    "fetched": "2026-09-30T08:12:44Z",
+    "sha256": "c4bfc98b641c9381231669b7191d087035023484782ad4bf098899d9a1a57766",
+    "attribution": "California Privacy Protection Agency (cppa.ca.gov)",
+    "redistributionOk": true,
+    "landmark": false,
+    "review": {
+      "state": "auto-checked"
+    }
+  },
+  {
+    "id": "sg-pdpa-2012",
+    "jurisdiction": "SG",
+    "type": "statute",
+    "title": "Personal Data Protection Act 2012",
+    "shortTitle": "PDPA",
+    "issuer": "Parliament of Singapore",
+    "status": {
+      "value": "in-force",
+      "support": [
+        "sg-pdpa-2012#1",
+        "sg-pdpa-2012#2"
+      ]
+    },
+    "statusDate": "2021-02-01",
+    "timeline": [
+      {
+        "date": "2014-07-02",
+        "event": "Main data protection provisions came into force",
+        "support": [
+          "sg-pdpa-2012#1"
+        ]
+      },
+      {
+        "date": "2021-02-01",
+        "event": "Amendments passed in 2020, including mandatory breach notification, came into force",
+        "support": [
+          "sg-pdpa-2012#2"
+        ]
+      }
+    ],
+    "summary": {
+      "value": "The PDPA sets Singapore's baseline rules for how private-sector organisations collect, use and disclose personal data. Organisations need an individual's agreement for most uses, must protect the data, and must report serious data breaches. The Personal Data Protection Commission oversees the Act.",
+      "support": [
+        "sg-pdpa-2012#1",
+        "sg-pdpa-2012#2"
+      ]
+    },
+    "provisions": [
+      {
+        "value": "Organisations must obtain consent before collecting, using or disclosing personal data, and must state their purposes.",
+        "support": [
+          "sg-pdpa-2012#1"
+        ]
+      },
+      {
+        "value": "Organisations must appoint a data protection officer and make reasonable security arrangements.",
+        "support": [
+          "sg-pdpa-2012#2"
+        ]
+      },
+      {
+        "value": "Data breaches likely to cause significant harm must be notified to the Commission and affected individuals.",
+        "support": [
+          "sg-pdpa-2012#2"
+        ]
+      }
+    ],
+    "affected": [
+      {
+        "value": "Private-sector organisations that handle personal data in Singapore.",
+        "support": [
+          "sg-pdpa-2012#1",
+          "sg-pdpa-2012#2"
+        ]
+      },
+      {
+        "value": "Individuals whose personal data is held by organisations.",
+        "support": [
+          "sg-pdpa-2012#1"
+        ]
+      }
+    ],
+    "topics": [
+      "privacy-data"
+    ],
+    "related": [],
+    "url": "https://www.pdpc.gov.sg/overview-of-pdpa/the-legislation/personal-data-protection-act",
+    "publisher": "Personal Data Protection Commission",
+    "published": "2012-10-15",
+    "fetched": "2026-09-30T08:12:44Z",
+    "sha256": "1d82fd56fbc1588f49341b5d8a3efef40bcbc670840633ddeee4ab3453c66785",
+    "attribution": "Personal Data Protection Commission Singapore (pdpc.gov.sg)",
+    "redistributionOk": true,
+    "landmark": false,
+    "review": {
+      "state": "auto-checked"
+    }
+  },
+  {
+    "id": "sg-mgf-genai-2024",
+    "jurisdiction": "SG",
+    "type": "guidance",
+    "title": "Model AI Governance Framework for Generative AI",
+    "shortTitle": "MGF for GenAI",
+    "issuer": "Infocomm Media Development Authority",
+    "status": {
+      "value": "published",
+      "support": [
+        "sg-mgf-genai-2024#1"
+      ]
+    },
+    "statusDate": "2024-05-30",
+    "timeline": [
+      {
+        "date": "2024-01-16",
+        "event": "Draft framework released for public consultation",
+        "support": [
+          "sg-mgf-genai-2024#1"
+        ]
+      },
+      {
+        "date": "2024-05-30",
+        "event": "Final framework released",
+        "support": [
+          "sg-mgf-genai-2024#1"
+        ]
+      }
+    ],
+    "summary": {
+      "value": "The framework sets out nine areas that organisations should address together to make generative AI trustworthy, from accountability and data to testing, security and incident reporting. It is voluntary guidance that builds on Singapore's earlier AI governance framework.",
+      "support": [
+        "sg-mgf-genai-2024#1",
+        "sg-mgf-genai-2024#2"
+      ]
+    },
+    "provisions": [
+      {
+        "value": "Consider nine dimensions together, including accountability, testing and assurance, security and content provenance.",
+        "support": [
+          "sg-mgf-genai-2024#1"
+        ]
+      },
+      {
+        "value": "Allocate accountability across model developers, application deployers and hosting providers.",
+        "support": [
+          "sg-mgf-genai-2024#2"
+        ]
+      },
+      {
+        "value": "Report incidents to the relevant authorities and put remediation processes in place.",
+        "support": [
+          "sg-mgf-genai-2024#2"
+        ]
+      }
+    ],
+    "affected": [
+      {
+        "value": "AI model developers and application deployers operating in Singapore.",
+        "support": [
+          "sg-mgf-genai-2024#1",
+          "sg-mgf-genai-2024#2"
+        ]
+      }
+    ],
+    "topics": [
+      "ai-governance"
+    ],
+    "related": [],
+    "url": "https://aiverifyfoundation.sg/resources/mgf-gen-ai/",
+    "publisher": "AI Verify Foundation",
+    "published": "2024-05-30",
+    "fetched": "2026-09-30T08:12:44Z",
+    "sha256": "1e1d450401eb1fd482be70b7159b14ba72d89403d599372da83dac6780f1a7e9",
+    "attribution": "AI Verify Foundation and Infocomm Media Development Authority (aiverifyfoundation.sg)",
+    "redistributionOk": true,
+    "landmark": false,
+    "review": {
+      "state": "auto-checked"
+    }
+  },
+  {
+    "id": "sg-gebiz-dc-2025",
+    "jurisdiction": "SG",
+    "type": "tender",
+    "title": "Provision of Colocation Data Centre Services for Government Agencies",
+    "issuer": "Government Technology Agency of Singapore",
+    "status": {
+      "value": "awarded",
+      "support": [
+        "sg-gebiz-dc-2025#2"
+      ]
+    },
+    "statusDate": "2025-07-15",
+    "timeline": [
+      {
+        "date": "2025-07-15",
+        "event": "Tender awarded",
+        "support": [
+          "sg-gebiz-dc-2025#2"
+        ]
+      }
+    ],
+    "summary": {
+      "value": "The Government Technology Agency tendered for colocation services covering rack space, power and cooling for government systems, on an initial three-year term. The contract was awarded in July 2025 and requires quarterly reporting of power usage effectiveness.",
+      "support": [
+        "sg-gebiz-dc-2025#1",
+        "sg-gebiz-dc-2025#2"
+      ]
+    },
+    "provisions": [
+      {
+        "value": "Colocation of rack space, power and cooling for government agencies over an initial term of three years.",
+        "support": [
+          "sg-gebiz-dc-2025#1"
+        ]
+      },
+      {
+        "value": "The supplier must report power usage effectiveness quarterly.",
+        "support": [
+          "sg-gebiz-dc-2025#2"
+        ]
+      }
+    ],
+    "affected": [
+      {
+        "value": "Government agencies that host systems with the supplier.",
+        "support": [
+          "sg-gebiz-dc-2025#1"
+        ]
+      },
+      {
+        "value": "Suppliers bidding for public colocation contracts.",
+        "support": [
+          "sg-gebiz-dc-2025#1"
+        ]
+      }
+    ],
+    "topics": [
+      "gov-tech-procurement",
+      "data-centres"
+    ],
+    "related": [],
+    "url": "https://data.gov.sg/datasets/d_acde1106003906a75c3fa052592f2fcb/view",
+    "publisher": "GeBIZ via data.gov.sg",
+    "published": "2025-03-10",
+    "fetched": "2026-09-30T08:12:44Z",
+    "sha256": "400d27cf3d50e4ff78e92416c8453a3d4174924569dac0c42f8adf2679d6a8fd",
+    "attribution": "Government of Singapore, GeBIZ via data.gov.sg (Singapore Open Data Licence)",
+    "redistributionOk": true,
+    "landmark": false,
+    "review": {
+      "state": "auto-checked"
+    }
+  }
+]

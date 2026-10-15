@@ -1,0 +1,34 @@
+{
+  "snapshotDate": "2026-10-01",
+  "builtAt": "2026-10-01T09:30:00Z",
+  "models": {
+    "enrich": "fixture-enrich-model",
+    "verify": "fixture-verify-model"
+  },
+  "counts": {
+    "total": 6,
+    "byJurisdiction": {
+      "US-CA": 3,
+      "SG": 3
+    },
+    "byType": {
+      "bill": 2,
+      "statute": 1,
+      "regulation": 1,
+      "executive-order": 0,
+      "guidance": 1,
+      "tender": 1,
+      "press-release": 0,
+      "hansard": 0
+    }
+  },
+  "excluded": [
+    {
+      "id": "sg-sso-osa-2022",
+      "jurisdiction": "SG",
+      "url": "https://sso.agc.gov.sg/",
+      "title": "Online Safety (Miscellaneous Amendments) Act 2022",
+      "reason": "HTTP 403"
+    }
+  ]
+}

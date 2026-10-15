@@ -1,0 +1,86 @@
+[
+  {
+    "id": "ca-sb-53-2025#1",
+    "recordId": "ca-sb-53-2025",
+    "seq": 1,
+    "heading": "Chaptered text and findings",
+    "text": "Senate Bill No. 53. Approved by Governor September 29, 2025. Filed with Secretary of State September 29, 2025. An act relating to artificial intelligence, the Transparency in Frontier Artificial Intelligence Act. The Legislature finds that artificial intelligence, including frontier models trained at very large scale, has the potential to bring significant benefits to California while also posing risks of catastrophic harm. Because the most capable systems are built by a small number of companies, the public has limited visibility into how those developers assess and manage such risks. This act establishes transparency requirements for the developers of frontier models and creates a consortium to design a public computing cluster, so that safe and ethical research is not limited to the largest firms."
+  },
+  {
+    "id": "ca-sb-53-2025#2",
+    "recordId": "ca-sb-53-2025",
+    "seq": 2,
+    "heading": "Large frontier developer requirements",
+    "text": "A large frontier developer shall write, implement and publish a frontier AI framework describing how it identifies, assesses and mitigates catastrophic risk. Before or when deploying a new or substantially modified frontier model, the developer shall publish a transparency report. A developer shall report a critical safety incident to the Office of Emergency Services within 15 days of discovering it. A large frontier developer that fails to comply is subject to a civil penalty of up to one million dollars per violation, enforced by the Attorney General. Employees who report a specific and substantial danger to public health or safety are protected from retaliation."
+  },
+  {
+    "id": "ca-sb-1047-2024#1",
+    "recordId": "ca-sb-1047-2024",
+    "seq": 1,
+    "heading": "Governor's veto message",
+    "text": "To the Members of the California State Senate: I am returning Senate Bill 1047 without my signature. The bill would require developers of the largest frontier models to test them for severe risks and to be able to shut them down fully. By focusing only on the most expensive and large-scale models, the bill could give the public a false sense of security about controlling a fast-moving technology, while smaller specialised models may be equally dangerous."
+  },
+  {
+    "id": "ca-sb-1047-2024#2",
+    "recordId": "ca-sb-1047-2024",
+    "seq": 2,
+    "heading": "Covered models and developer duties",
+    "text": "A developer of a covered model, meaning a frontier model trained with more than 10^26 integer or floating-point operations, shall implement the capability to promptly enact a full shutdown, write and follow a written safety and security protocol, and retain a third-party auditor to perform an annual audit beginning January 1, 2026. The Attorney General may bring a civil action for violations that cause death or bodily harm or that create an imminent risk to public safety."
+  },
+  {
+    "id": "ca-cppa-admt-2025#1",
+    "recordId": "ca-cppa-admt-2025",
+    "seq": 1,
+    "heading": "Automated decisionmaking technology",
+    "text": "A business that uses automated decisionmaking technology to make a significant decision about a consumer shall provide a pre-use notice, offer the consumer a way to opt out, and respond to requests for information about how the technology was used. Significant decisions include those affecting financial or lending services, housing, education, employment and healthcare."
+  },
+  {
+    "id": "ca-cppa-admt-2025#2",
+    "recordId": "ca-cppa-admt-2025",
+    "seq": 2,
+    "heading": "Risk assessments and cybersecurity audits",
+    "text": "A business whose processing of personal information presents significant risk to consumers' privacy shall conduct a risk assessment before starting that processing and submit information about it to the Agency. Certain businesses shall also complete an annual independent cybersecurity audit, with the first due dates phased in according to annual revenue."
+  },
+  {
+    "id": "sg-pdpa-2012#1",
+    "recordId": "sg-pdpa-2012",
+    "seq": 1,
+    "heading": "Consent obligation",
+    "text": "An organisation must not collect, use or disclose personal data about an individual unless the individual gives, or is deemed to have given, consent. The organisation must first inform the individual of the purposes for which the data is collected, and may collect data only for purposes that a reasonable person would consider appropriate. An individual may withdraw consent by giving reasonable notice."
+  },
+  {
+    "id": "sg-pdpa-2012#2",
+    "recordId": "sg-pdpa-2012",
+    "seq": 2,
+    "heading": "Accountability, protection and breach notification",
+    "text": "An organisation is responsible for personal data in its possession and must appoint a data protection officer. It must make reasonable security arrangements to protect the data. Since the 2020 amendments, an organisation must notify the Commission and affected individuals of a data breach that is likely to result in significant harm."
+  },
+  {
+    "id": "sg-mgf-genai-2024#1",
+    "recordId": "sg-mgf-genai-2024",
+    "seq": 1,
+    "heading": "Nine dimensions of trusted generative AI",
+    "text": "The framework proposes nine dimensions to be considered together: accountability, data, trusted development and deployment, incident reporting, testing and assurance, security, content provenance, safety and alignment research and development, and AI for public good. It builds on the 2020 Model AI Governance Framework and addresses risks specific to generative AI such as hallucination and copyright."
+  },
+  {
+    "id": "sg-mgf-genai-2024#2",
+    "recordId": "sg-mgf-genai-2024",
+    "seq": 2,
+    "heading": "Accountability and incident reporting",
+    "text": "Responsibility should be allocated along the AI development chain, in the way cloud providers share responsibility with application owners. Developers should report incidents to the relevant authorities when they occur, and put in place processes for remediation so that harms are contained and similar incidents are avoided."
+  },
+  {
+    "id": "sg-gebiz-dc-2025#1",
+    "recordId": "sg-gebiz-dc-2025",
+    "seq": 1,
+    "heading": "Tender notice",
+    "text": "Tender reference GBT-FIXTURE-0001. The Government Technology Agency invites tenders for the provision of colocation data centre services, including rack space, power and cooling, for government agencies. The contract is for an initial term of three years with options to extend."
+  },
+  {
+    "id": "sg-gebiz-dc-2025#2",
+    "recordId": "sg-gebiz-dc-2025",
+    "seq": 2,
+    "heading": "Award details",
+    "text": "Awarded to Example Colocation Pte Ltd for a contract value of 12,500,000 Singapore dollars. Award date 15 July 2025. The supplier shall meet the energy efficiency requirements set for new data centre capacity and report power usage effectiveness quarterly."
+  }
+]
