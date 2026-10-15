@@ -379,6 +379,18 @@ describe("surfaces", () => {
       assert.deepEqual(keys, []);
     });
 
+    test("a request to localhost (wrangler dev, which simulates the binding) is never limited, so a local eval can run", async () => {
+      const { binding, keys } = limiter(false);
+      for (const host of ["http://localhost:8787", "http://127.0.0.1:8787", "http://[::1]:8787"]) {
+        const res = await worker.fetch(
+          new Request(`${host}/api/ask`, { method: "POST", headers: { "content-type": "application/json", "CF-Connecting-IP": "127.0.0.1" }, body: JSON.stringify({ message: "hi" }) }),
+          env({ ASK_LIMITER: binding }),
+        );
+        assert.equal(((await res.json()) as ChatResponse).mode, "greeting", host);
+      }
+      assert.deepEqual(keys, []);
+    });
+
     test("a limiter that fails does not stop questions", async () => {
       const broken: RateLimiter = {
         limit: async () => {
@@ -439,10 +451,10 @@ describe("surfaces", () => {
 
   describe("I2: the Telegram webhook secret", () => {
     const update = { message: { chat: { id: 5 }, text: "hi" } };
-    const send = (headers: Record<string, string>, e: Env) =>
+    const send = (headers: Record<string, string | undefined>, e: Env) =>
       withFetch(
         () => new Response("{}"),
-        () => worker.fetch(new Request("https://politik.test/telegram", { method: "POST", headers, body: JSON.stringify(update) }), e),
+        () => worker.fetch(new Request("https://politik.test/telegram", { method: "POST", headers: headers as Record<string, string>, body: JSON.stringify(update) }), e),
       );
 
     test("a wrong or missing secret is a 401 and nothing is sent or run", async () => {

@@ -9,3 +9,7 @@ GROQ_API_KEY=
 # Optional: leave blank to use the defaults (openai/gpt-oss-120b writes answers, openai/gpt-oss-20b routes questions).
 GROQ_CHAT_MODEL=
 GROQ_ROUTER_MODEL=
+# Optional: the model that judges faithfulness in `pnpm eval:chat` (default openai/gpt-oss-20b).
+GROQ_JUDGE_MODEL=
+# Optional: when set, /telegram only accepts requests that carry it (register the webhook with the same secret_token).
+TELEGRAM_WEBHOOK_SECRET=

@@ -1,7 +1,7 @@
 import { ask, type Env } from "./ask.ts";
 import { GENERAL_LABEL } from "./chat/index.ts";
 import type { ChatResponse } from "./chat/types.ts";
-import { BUSY_REPLY, clientIp, overLimit } from "./limit.ts";
+import { BUSY_REPLY, limitKey, overLimit } from "./limit.ts";
 
 type TelegramUpdate = {
   message?: {
@@ -55,7 +55,7 @@ export async function handleTelegram(request: Request, env: Env): Promise<Respon
     return new Response("ok");
   }
 
-  if (await overLimit(env, clientIp(request))) {
+  if (await overLimit(env, limitKey(request))) {
     await sendMessage(token, chatId, BUSY_REPLY);
     return new Response("ok");
   }

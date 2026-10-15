@@ -2,7 +2,7 @@ import { askShared, type Env } from "./ask.ts";
 import { GREETING, MAX_HISTORY_TURNS } from "./chat/index.ts";
 import { toSpokenResponse } from "./chat/spoken.ts";
 import type { ChatResponse, ChatTurn } from "./chat/types.ts";
-import { busyResponse, clientIp, overLimit } from "./limit.ts";
+import { busyResponse, limitKey, overLimit } from "./limit.ts";
 
 const SPEAK_URL = "https://api.deepgram.com/v1/speak?model=aura-2-thalia-en";
 const LISTEN_URL =
@@ -248,7 +248,7 @@ async function proxySocket(
   };
 
   let sessionKnowledge: unknown;
-  const session: FunctionCallSession = { client: server, ip: clientIp(request), history: [] };
+  const session: FunctionCallSession = { client: server, ip: limitKey(request), history: [] };
   server.addEventListener("message", (event) => {
     try {
       if (typeof event.data === "string") {
@@ -477,7 +477,7 @@ export async function think(request: Request, env: Env): Promise<Response> {
     const messages = Array.isArray(body.messages) ? body.messages : [];
     const message = latestUserText(messages);
     if (!message) return completion(GREETING, stream);
-    const result = (await overLimit(env, clientIp(request)))
+    const result = (await overLimit(env, limitKey(request)))
       ? busyResponse()
       : await askShared(message, env, knowledgeFromMessages(messages), historyFromMessages(messages));
     return completion(toSpokenResponse(result) || GREETING, stream);

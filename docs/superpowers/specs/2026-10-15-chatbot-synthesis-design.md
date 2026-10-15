@@ -95,7 +95,8 @@ retrieve(route: Route, db: D1Like, deps: { bluesky?: (q: string) => Promise<Sour
 | `out-of-scope` | `searchPassages(search)` top 3. If anything scores well, the intent is promoted to `explain`. Otherwise no sources. |
 
 - `store.ts` gains `getPassages(db, ids: string[]): Promise<Passage[]>`. This is the only change B makes to A's contract.
-- Hard cap: 12 sources and about 6,000 tokens of passage text. Each passage is truncated to 1,200 characters.
+- Hard cap: retrieval and ranking hold up to 12 sources, and the compose model is shown the best 8 (a 12-source prompt is about 4.7K tokens, too much for Groq's free tier of 8,000 tokens a minute). Each passage is truncated to 900 characters (`MAX_PASSAGE_CHARS`). A passage found by a search is shown as the window around the first matched terms, not its start; a passage a record itself cites keeps its start. The router and compose models run at `reasoning_effort: "low"`.
+- An out-of-scope question is promoted to `explain` only when every term of its search is in a hit record's title or short title, or when at least two distinct records match every term; one passing mention in one record does not count.
 
 ### 3.3 Rank (`rank.ts`)
 
@@ -122,6 +123,7 @@ retrieve(route: Route, db: D1Like, deps: { bluesky?: (q: string) => Promise<Sour
   { answer: string; general: string | null; followUps: string[] /* ≤ 3 */ }
   ```
   `answer` uses a markdown subset: `**bold**`, `- ` bullets, `### ` headings, `[n]`.
+- An in-scope question with no sources is answered with exactly "Nothing in Politik's data (as of D Mon YYYY) matches this yet."; only `explain` and `implications` may add labelled general knowledge (a `brief` or `sentiment` answer never has any). A sentiment answer with no relevant posts leads with "Politik only tracks public posts about data centres right now."
 - `greeting` skips the LLM. It returns one fixed line ("Hi — ask me what's going on in California or Singapore tech policy.") with suggested questions as `followUps`.
 - `clarify` uses the router's question text and does not call compose.
 
@@ -135,7 +137,7 @@ interface Citation {
   title: string; shortTitle?: string; url: string;
   jurisdiction?: Jurisdiction; type?: RecordType; status?: Status;
   fetched?: string; reviewState?: "auto-checked" | "human-reviewed";
-  quote: string;                   // ≤ 280 chars from the passage or post
+  quote: string;                   // ≤ 280 chars from the passage or post: the stretch sharing the most words with the citing sentence(s)
 }
 finalize(raw: ComposeOut, sources: Source[]): { reply: string; citations: Citation[] }
 ```
@@ -229,6 +231,6 @@ The report is written to `.tmp-eval/report.md`.
 |---|---|
 | Hallucinated facts | Facts only from numbered sources, marker validation, the faithfulness eval, and the "unverified" label on general knowledge |
 | Prompt injection through sources or posts | Source text is framed as data, the output is rendered as text only, and the eval includes an injection case |
-| Abuse or cost on the public URL | Input caps (§4). Owner action: add a Cloudflare rate-limiting rule on `/api/ask` |
+| Abuse or cost on the public URL | Input caps (§4). A Workers Rate Limiting binding (`ASK_LIMITER`, 10 questions a minute per IP) on `/api/ask`, `/api/voice/think`, the voice agent's questions and `/telegram`; an over-limit caller gets a fallback response with "Politik is busy — please try again in a minute." The Telegram webhook checks `TELEGRAM_WEBHOOK_SECRET` when set |
 | Groq rate limits | The fallback mode still returns useful cited records |
 | Latency | A fast router, a single compose call, and capped timeouts |
