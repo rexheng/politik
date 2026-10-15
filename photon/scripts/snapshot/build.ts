@@ -26,7 +26,7 @@ import {
   type PolicyRecord,
   type RecordType,
 } from "../../src/data/schema.ts";
-import { groqLlm, resolveModels, type Llm } from "../../src/llm/groq.ts";
+import { groqLlm, LlmError, resolveModels, type Llm } from "../../src/llm/groq.ts";
 import { parseCandidates, type Candidate } from "./candidates.ts";
 import { enrichRecord, EnrichedSchema, type Enriched } from "./enrich.ts";
 import { fetchGebizTenders, GEBIZ_RULE, type GebizRule } from "./gebiz.ts";
@@ -92,6 +92,22 @@ export interface RecordStat {
 export interface RunResult {
   manifest: Manifest;
   stats: RecordStat[];
+}
+
+/**
+ * The build refuses to write because Groq is failing wholesale (R14), not because of anything in the documents:
+ * writing would replace a good committed snapshot with a mostly empty one.
+ * `auth`: Groq answered HTTP 401 or 403 to some record. `llm-failures`: more than half of the records that reached
+ * enrichment were lost to Groq errors (a thrown LlmError: timeout, exhausted rate limit, 5xx, an unusable reply).
+ */
+export class SnapshotGuardError extends Error {
+  constructor(
+    readonly kind: "auth" | "llm-failures",
+    message: string,
+  ) {
+    super(message);
+    this.name = "SnapshotGuardError";
+  }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -254,13 +270,15 @@ const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
 const clip = (text: string) => (text.length > MAX_REASON ? `${text.slice(0, MAX_REASON - 1).trimEnd()}…` : text);
 
 type Done =
-  | { kind: "built"; record: PolicyRecord; passages: Passage[]; stat: RecordStat }
-  | { kind: "excluded"; reason: string; stat: RecordStat };
+  | { kind: "built"; record: PolicyRecord; passages: Passage[]; stat: RecordStat; reachedEnrichment: true }
+  | { kind: "excluded"; reason: string; stat: RecordStat; reachedEnrichment: boolean; llmError?: LlmError };
 
 /**
  * Builds the snapshot and writes policies.json, passages.json, manifest.json and review.md to `outDir`, and returns
- * the manifest. Throws if the inputs are unusable (a bad candidates.md or reviewed.json, a failed GeBIZ fetch), or if
- * the result fails `checkSnapshot`; in that case nothing in `outDir` is touched.
+ * the manifest. Throws, leaving `outDir` untouched, if the inputs are unusable (a bad candidates.md or reviewed.json, a
+ * failed GeBIZ fetch), if the result fails `checkSnapshot`, or with a SnapshotGuardError if Groq is failing wholesale
+ * (an auth error, or more than half of the records that reached enrichment lost to Groq errors). Work already cached
+ * is kept, so a rerun after the cause is fixed resumes where it stopped.
  */
 export async function buildSnapshot(opts: BuildOptions): Promise<Manifest> {
   return (await runBuild(opts)).manifest;
@@ -321,10 +339,13 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       humanReviewed: false,
       dropped: [],
     };
-    const exclude = (reason: string, failed = false): Done => ({
+    let reachedEnrichment = false;
+    const exclude = (reason: string, failed = false, llmError?: LlmError): Done => ({
       kind: "excluded",
       reason,
       stat: { ...stat, outcome: "excluded", reason, ...(failed ? { failed: true } : {}) },
+      reachedEnrichment,
+      ...(llmError ? { llmError } : {}),
     });
 
     let stage = "loading";
@@ -346,6 +367,7 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       const fetched = await fetchedFor(c.id, sha);
 
       stage = "enrichment";
+      reachedEnrichment = true;
       const enrichPath = join(enrichDir, `${sha}.json`);
       let enriched: Enriched;
       const cachedEnrich = await readEntry(enrichPath, c.id, EnrichEntrySchema);
@@ -414,10 +436,12 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
         const why = checked.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
         return exclude(clip(`the assembled record is not valid: ${why}`), true);
       }
-      return { kind: "built", record: checked.data, passages, stat: { ...stat, outcome: "built" } };
+      return { kind: "built", record: checked.data, passages, stat: { ...stat, outcome: "built" }, reachedEnrichment: true };
     } catch (e) {
-      // A thrown error (a model error such as HTTP 413, a failed repair) costs this record, not the build.
-      return exclude(clip(`${stage} failed: ${oneLine(errorMessage(e))}`), true);
+      // A thrown error (a model error such as HTTP 413, a failed repair) costs this record, not the build,
+      // unless they are so many that the run as a whole is not usable (see the guard below).
+      const llmError = e instanceof LlmError && (stage === "enrichment" || stage === "verification") ? e : undefined;
+      return exclude(clip(`${stage} failed: ${oneLine(errorMessage(e))}`), true, llmError);
     }
   }
 
@@ -428,6 +452,28 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
     const s = result.stat;
     const how = result.kind === "built" ? `built (${s.words} words, ${s.passages} passages; enrich ${s.enrich}, verify ${s.verify})` : `excluded: ${result.reason}`;
     log(`[${i + 1}/${work.length}] ${c.id}: ${how}`);
+
+    // R14 (a): a rejected key fails every remaining record the same way, so stop at once.
+    if (result.kind === "excluded" && (result.llmError?.status === 401 || result.llmError?.status === 403)) {
+      throw new SnapshotGuardError(
+        "auth",
+        `Refusing to write the snapshot: Groq rejected the request with HTTP ${result.llmError.status} on ${c.id}, after ${i + 1} of ${work.length} records (${clip(oneLine(errorMessage(result.llmError)))}). ` +
+          "Check GROQ_API_KEY and the key's access to the models. Nothing was written; results already cached are kept, so run again once it is fixed.",
+      );
+    }
+  }
+
+  // R14 (b): too many records lost to Groq errors means the run says nothing about the documents. Fetch failures,
+  // too little text and verification fatals are about the documents, so they are not counted.
+  const reachedCount = done.filter((d) => d.reachedEnrichment).length;
+  const lost = done.flatMap((d, i) => (d.kind === "excluded" && d.llmError ? [{ id: work[i]!.id, error: d.llmError }] : []));
+  if (lost.length * 2 > reachedCount) {
+    throw new SnapshotGuardError(
+      "llm-failures",
+      `Refusing to write the snapshot: ${lost.length} of the ${reachedCount} records that reached enrichment were lost to Groq errors (more than half), so the run is not usable. ` +
+        `First error, on ${lost[0]!.id}: ${clip(oneLine(errorMessage(lost[0]!.error)))}. ` +
+        "Nothing was written; results already cached are kept, so run again once Groq is reachable.",
+    );
   }
 
   // A related link may only point at a record that made it into the snapshot.

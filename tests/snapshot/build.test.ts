@@ -6,13 +6,14 @@ import { after, before, test } from "node:test";
 
 import { checkSnapshot } from "../../scripts/check-data.ts";
 import { ManifestSchema, type Manifest, type Passage, type PolicyRecord } from "../../photon/src/data/schema.ts";
-import type { Llm } from "../../photon/src/llm/groq.ts";
+import { LlmError, type Llm } from "../../photon/src/llm/groq.ts";
 import {
   buildSnapshot,
   formatSummary,
   main,
   parseArgs,
   runBuild,
+  SnapshotGuardError,
   type BuildOptions,
   type RunResult,
 } from "../../photon/scripts/snapshot/build.ts";
@@ -544,6 +545,182 @@ test("verification is sent only the passages that the claims cite", async () => 
   const user = llms.verifyCalls[0]!.user;
   assert.ok(user.includes("[ca-long-2025#1]"), "the passage the claims cite is sent");
   assert.ok(!user.includes("[ca-long-2025#2]") && !user.includes("[ca-long-2025#3]"), "an uncited passage is not");
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// R14: refuse to overwrite the snapshot when Groq calls fail wholesale
+
+const SEEDED = {
+  "policies.json": '[\n  "old policies"\n]\n',
+  "passages.json": '[\n  "old passages"\n]\n',
+  "manifest.json": '{\n  "old": "manifest"\n}\n',
+  "review.md": "# old review\n",
+};
+/** Puts recognisable files in outDir, standing in for a good committed snapshot. */
+async function seedOutputs(env: Awaited<ReturnType<typeof makeEnv>>) {
+  await mkdir(env.paths.outDir, { recursive: true });
+  for (const [name, content] of Object.entries(SEEDED)) await writeFile(join(env.paths.outDir, name), content);
+  return { ...SEEDED };
+}
+const exists = (path: string) => stat(path).then(() => true, () => false);
+
+const three = () => candidatesMd(row("ca-a-2025"), row("ca-b-2025"), row("ca-c-2025"));
+const threeWeb = () => fakeWeb(siteFor("ca-a-2025", "ca-b-2025", "ca-c-2025"));
+const unauthorised = (status = 401) => new LlmError(`Groq API error ${status}: Invalid API Key`, status);
+const exhausted = () => new LlmError("Groq API error 429: Rate limit reached for model (retries exhausted)", 429);
+
+test("R14: a 401 from Groq stops the build at once, names the cause and counts, and leaves the outputs untouched", async () => {
+  const env = await makeEnv(three());
+  const seeded = await seedOutputs(env);
+  const llms = fakeLlms({ enrichThrows: { "ca-a-2025": unauthorised() } });
+  await assert.rejects(buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: threeWeb().impl })), (e: unknown) => {
+    assert.ok(e instanceof SnapshotGuardError);
+    assert.equal(e.kind, "auth");
+    assert.match(e.message, /HTTP 401/);
+    assert.match(e.message, /ca-a-2025/);
+    assert.match(e.message, /GROQ_API_KEY/);
+    assert.match(e.message, /1 of 3 records/);
+    assert.match(e.message, /nothing was written/i);
+    return true;
+  });
+  assert.deepEqual(await snapshotOf(env), seeded, "the existing files are byte-for-byte what they were");
+  assert.equal(llms.enrichCalls.length, 1, "no more calls are wasted once the key is known to be bad");
+  assert.equal(await exists(join(env.paths.cacheDir, "built.json")), false);
+});
+
+test("R14: a 403 from Groq, or a 401 while verifying, is an auth failure too", async () => {
+  for (const llmOpts of [
+    { enrichThrows: { "ca-a-2025": unauthorised(403) } },
+    { verifyThrows: { "ca-a-2025": unauthorised(401) } },
+  ]) {
+    const env = await makeEnv(three());
+    const seeded = await seedOutputs(env);
+    await assert.rejects(
+      buildSnapshot(env.opts({ llm: fakeLlms(llmOpts).llm, fetchImpl: threeWeb().impl })),
+      (e: unknown) => e instanceof SnapshotGuardError && e.kind === "auth" && /HTTP 40[13]/.test(e.message),
+    );
+    assert.deepEqual(await snapshotOf(env), seeded);
+  }
+});
+
+test("R14: work finished before the failure stays cached, so a rerun after fixing the key resumes cheaply", async () => {
+  const env = await makeEnv(three());
+  const web = threeWeb();
+  const broken = fakeLlms({ enrichThrows: { "ca-b-2025": unauthorised() } });
+  await assert.rejects(buildSnapshot(env.opts({ llm: broken.llm, fetchImpl: web.impl })), SnapshotGuardError);
+  const shaA = sha256Hex(htmlToText(page("ca-a-2025")));
+  assert.ok(await exists(join(env.paths.cacheDir, "enrich", `${shaA}.json`)), "the first record's enrichment was kept");
+  assert.ok(await exists(join(env.paths.cacheDir, "verify", `${shaA}.json`)), "and its verdict");
+  assert.equal(await exists(env.paths.outDir), false, "nothing was written to outDir");
+
+  const healthy = fakeLlms();
+  const manifest = await buildSnapshot(env.opts({ llm: healthy.llm, fetchImpl: web.impl }));
+  assert.equal(manifest.counts.total, 3);
+  assert.equal(healthy.enrichCalls.length, 2, "only the two records that were not finished");
+  assert.equal(healthy.verifyCalls.length, 2);
+});
+
+test("R14: when most records fail with a 429 that outlasted its retries, the build refuses to write", async () => {
+  const env = await makeEnv(three());
+  const seeded = await seedOutputs(env);
+  const llms = fakeLlms({ enrichThrows: { "ca-a-2025": exhausted(), "ca-b-2025": exhausted() } });
+  await assert.rejects(buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: threeWeb().impl })), (e: unknown) => {
+    assert.ok(e instanceof SnapshotGuardError);
+    assert.equal(e.kind, "llm-failures");
+    assert.match(e.message, /2 of the 3 records/);
+    assert.match(e.message, /more than half/i);
+    assert.match(e.message, /429/, "the first error is quoted");
+    assert.match(e.message, /nothing was written/i);
+    return true;
+  });
+  assert.deepEqual(await snapshotOf(env), seeded);
+  assert.ok(await exists(join(env.paths.cacheDir, "enrich", `${sha256Hex(htmlToText(page("ca-c-2025")))}.json`)), "the record that did finish is cached");
+});
+
+test("R14: one LLM error in three is just an excluded record", async () => {
+  const env = await makeEnv(three());
+  const llms = fakeLlms({ enrichThrows: { "ca-b-2025": exhausted() } });
+  const manifest = await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: threeWeb().impl }));
+  assert.deepEqual((await env.readJson<PolicyRecord[]>("policies.json")).map((p) => p.id), ["ca-a-2025", "ca-c-2025"]);
+  assert.deepEqual(manifest.excluded.map((e) => e.id), ["ca-b-2025"]);
+  assert.match(manifest.excluded[0]!.reason, /429/);
+});
+
+test("R14: exactly half is not more than half", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025"), row("ca-b-2025"), row("ca-c-2025"), row("ca-d-2025")));
+  const llms = fakeLlms({ enrichThrows: { "ca-a-2025": exhausted() }, verifyThrows: { "ca-b-2025": new LlmError("Groq API error 503: overloaded", 503) } });
+  const web = fakeWeb(siteFor("ca-a-2025", "ca-b-2025", "ca-c-2025", "ca-d-2025"));
+  const manifest = await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
+  assert.deepEqual(manifest.excluded.map((e) => e.id), ["ca-a-2025", "ca-b-2025"]);
+});
+
+test("R14: records that fail to fetch do not count toward the threshold", async () => {
+  const env = await makeEnv(three());
+  const web = fakeWeb({ ...siteFor("ca-c-2025"), "https://example.test/ca-a-2025": 403, "https://example.test/ca-b-2025": 403 });
+  const manifest = await buildSnapshot(env.opts({ llm: fakeLlms().llm, fetchImpl: web.impl }));
+  assert.deepEqual(manifest.excluded.map((e) => [e.id, e.reason]), [["ca-a-2025", "HTTP 403"], ["ca-b-2025", "HTTP 403"]]);
+  assert.equal(manifest.counts.total, 1);
+});
+
+test("R14: records with too little text, and verification fatals, do not count either", async () => {
+  const thin = "<html><body><p>Please log in.</p></body></html>";
+  const env = await makeEnv(three());
+  const web = fakeWeb({ ...siteFor("ca-b-2025", "ca-c-2025"), "https://example.test/ca-a-2025": thin });
+  const llms = fakeLlms({ unsupported: { "ca-b-2025": ["summary"], "ca-c-2025": ["status"] } });
+  const manifest = await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
+  assert.deepEqual(manifest.excluded.map((e) => e.reason), ["too little text", "summary unsupported", "status unsupported"]);
+  assert.equal(manifest.counts.total, 0, "an empty but legitimate snapshot is still written");
+});
+
+test("R14: a plain Error from the enrichment step (a bad answer, not a failed call) is not an LLM error", async () => {
+  const env = await makeEnv(three());
+  const llms = fakeLlms({ enrichThrows: { "ca-a-2025": new Error("the status has no valid citation"), "ca-b-2025": new Error("the summary is empty or has no valid citation") } });
+  const manifest = await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: threeWeb().impl }));
+  assert.deepEqual(manifest.excluded.map((e) => e.id), ["ca-a-2025", "ca-b-2025"]);
+});
+
+test("R14: records served from the cache count as having reached enrichment", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025"), row("ca-b-2025")));
+  const web = threeWeb();
+  await buildSnapshot(env.opts({ llm: fakeLlms().llm, fetchImpl: web.impl }));
+  // A third record is added and its call fails: 1 failure among 3 records that reached enrichment, not 1 of 1.
+  await writeFile(env.paths.candidatesPath, three());
+  const llms = fakeLlms({ enrichThrows: { "ca-c-2025": exhausted() } });
+  const manifest = await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
+  assert.equal(manifest.counts.total, 2);
+  assert.deepEqual(manifest.excluded.map((e) => e.id), ["ca-c-2025"]);
+});
+
+test("R14: a failed rerun leaves the files of the last good run exactly as they were", async () => {
+  const env = await makeEnv();
+  await buildSnapshot(env.opts({ llm: fixtureLlms().llm, fetchImpl: fixtureWeb().impl }));
+  const good = await snapshotOf(env);
+  const failing = fakeLlms({ enrichThrows: { [GOOD_ID]: exhausted(), "ca-ab-100-2024": exhausted() } });
+  await assert.rejects(
+    buildSnapshot(env.opts({ llm: failing.llm, fetchImpl: fixtureWeb().impl, models: { enrich: "new-model", verify: "verify-model" } })),
+    SnapshotGuardError,
+  );
+  assert.deepEqual(await snapshotOf(env), good);
+});
+
+test("R14: the command exits non-zero with the reason when the guard trips, and the outputs stay as they were", async () => {
+  const dir = await mkdtemp(join(root, "cli-"));
+  const dataDir = join(dir, "photon/data/snapshot");
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(join(dataDir, "candidates.md"), three());
+  for (const [name, content] of Object.entries(SEEDED)) await writeFile(join(dataDir, name), content);
+  const llms = fakeLlms({ enrichThrows: { "ca-a-2025": unauthorised() } });
+  const io = sink();
+  const code = await main([], {
+    env: { GROQ_API_KEY: "k" },
+    root: dir,
+    run: (options) => runBuild({ ...options, llm: llms.llm, fetchImpl: threeWeb().impl, gebiz: false }),
+    ...io,
+  });
+  assert.equal(code, 1);
+  assert.match(io.logged.err.join("\n"), /HTTP 401/);
+  assert.match(io.logged.err.join("\n"), /nothing was written/i);
+  for (const [name, content] of Object.entries(SEEDED)) assert.equal(await readFile(join(dataDir, name), "utf8"), content, name);
 });
 
 // ---------------------------------------------------------------------------------------------------------------------
