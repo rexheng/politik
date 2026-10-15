@@ -11,6 +11,7 @@
     "test": "tsx --test \"tests/**/*.test.ts\"",
     "check:data": "tsx scripts/check-data.ts",
     "check:stagehand": "tsx scripts/check-stagehand.ts",
+    "eval:chat": "tsx scripts/eval-chat.ts",
     "snapshot:build": "tsx photon/scripts/snapshot/build.ts",
     "seed:d1": "tsx photon/scripts/snapshot/seed-d1.ts"
   },
