@@ -1,0 +1,77 @@
+{
+  "success": true,
+  "result": {
+    "resource_id": "d_acde1106003906a75c3fa052592f2fcb",
+    "fields": [
+      {
+        "type": "text",
+        "id": "tender_no"
+      },
+      {
+        "type": "text",
+        "id": "tender_description"
+      },
+      {
+        "type": "text",
+        "id": "agency"
+      },
+      {
+        "type": "text",
+        "id": "award_date"
+      },
+      {
+        "type": "text",
+        "id": "tender_detail_status"
+      },
+      {
+        "type": "text",
+        "id": "supplier_name"
+      },
+      {
+        "type": "numeric",
+        "id": "awarded_amt"
+      },
+      {
+        "type": "int4",
+        "id": "_id"
+      }
+    ],
+    "records": [
+      {
+        "_id": 1,
+        "tender_no": "ACR000ETT21000001",
+        "tender_description": "DESIGN, DEVELOPMENT, CUSTOMIZATION, DELIVERY, INSTALLATION, TESTING  AND COMMISSIONING A NEW FULLY OPERATIONAL UNIFIED DATA ANALYTICS PLATFORM (UDAP) SYSTEM WITH AN OPTION FOR MAINTENANCE AND ENHANCEMENT SERVICES FOR ACCOUNTING AND CORPORATE REGULARTORY AUTHORITY",
+        "agency": "Accounting And Corporate Regulatory Authority",
+        "award_date": "6/9/2021",
+        "tender_detail_status": "Awarded to Suppliers",
+        "supplier_name": "ALPHA ZETTA PTE. LTD.",
+        "awarded_amt": "2321600"
+      },
+      {
+        "_id": 2,
+        "tender_no": "ACR000ETT21000003",
+        "tender_description": "SUPPLY, DELIVERY, INSTALLATION, TESTING, COMMISSIONING OF A FULLY OPERATIONAL BUSINESS REGISTRY & REGULATORY SYSTEM WITH AN OPTION FOR MAINTENANCE",
+        "agency": "Accounting And Corporate Regulatory Authority",
+        "award_date": "14/4/2022",
+        "tender_detail_status": "Awarded to Suppliers",
+        "supplier_name": "ACCENTURE SG SERVICES PTE. LTD.",
+        "awarded_amt": "108555723"
+      },
+      {
+        "_id": 3,
+        "tender_no": "ACR000ETT21000004",
+        "tender_description": "INVITATION TO TENDER FOR THE APPLICATION SOFTWARE MAINTENANCE AND SUPPORT FOR BIZFINX SYSTEM HOSTED IN THE GOVERNMENT COMMERCIAL CLOUD FOR ACCOUNTING AND CORPORATE REGULARTORY AUTHORITY",
+        "agency": "Accounting And Corporate Regulatory Authority",
+        "award_date": "13/4/2022",
+        "tender_detail_status": "Awarded to Suppliers",
+        "supplier_name": "CRIMSONLOGIC PTE LTD",
+        "awarded_amt": "4503450"
+      }
+    ],
+    "_links": {
+      "start": "/api/action/datastore_search?resource_id=d_acde1106003906a75c3fa052592f2fcb&limit=5000"
+    },
+    "total": 3,
+    "limit": 5000
+  }
+}
