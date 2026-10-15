@@ -47,7 +47,7 @@ About 50 of these are flagged `landmark`. These are the policies a pilot user is
 
 ## 4. Record shape
 
-The types live in `photon/src/data/types.ts`. A zod schema in the same folder validates every record at build time and in `check:data`.
+The types and their zod schemas live in `photon/src/data/schema.ts`. The schemas validate every record at build time and in `check:data`.
 
 ```ts
 type Jurisdiction = "US-CA" | "SG";
