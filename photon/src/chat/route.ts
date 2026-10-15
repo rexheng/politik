@@ -70,7 +70,7 @@ Read the latest message. Use the earlier conversation only to work out what "it"
 intent (pick exactly one):
 - greeting: a greeting or thanks, with nothing to look up.
 - brief: asks what is going on, what changed or what the latest is, optionally narrowed to a place and/or topic ("what's going on?", "what's going on in California AI policy?", "what changed in Singapore data centre rules?"). Put the place in jurisdiction and the topic in topics.
-- explain: asks about a specific named bill, law, regulation, framework or tender, or what the rules on a topic say, with no "what's new" angle ("what does SB 53 require?", "explain the PDPA in detail").
+- explain: asks about a specific named bill, law, regulation, framework or tender, or, with no "what's new" angle, what the rules on a topic say ("what does SB 53 require?", "explain the PDPA in detail", "what's new on SB 53?").
 - implications: asks what something means for a role or organisation, or what to do about it ("what does this mean for a state agency?").
 - sentiment: asks what people, the public or industry are saying about something.
 - out-of-scope: not about California or Singapore technology policy (other places, other fields, general chat).

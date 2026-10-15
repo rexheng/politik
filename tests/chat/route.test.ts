@@ -458,7 +458,8 @@ describe("route", () => {
     assert.ok(!/no particular subject/.test(calls[0]!.system));
     const explain = line("- explain:");
     assert.match(explain, /specific named bill, law, regulation, framework or tender/);
-    assert.match(explain, /no "what's new" angle/);
+    assert.match(explain, /or, with no "what's new" angle, what the rules on a topic say/);
+    assert.match(explain, /what's new on SB 53\?/);
     const search = line("- search:");
     assert.match(search, /brief/);
     assert.match(search, /place or topic/);
