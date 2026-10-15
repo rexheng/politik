@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 
 // Static checks on the chat screen's files. What the screen does in a browser is covered by the smoke test
 // (Playwright against `wrangler dev`); these pin the things a diff could quietly undo.
@@ -59,6 +60,44 @@ describe("the chat page loads the new front end", () => {
     assert.ok(js.includes("Hi — ask me what's going on in California or Singapore tech policy."));
     assert.ok(js.includes("Public post · Bluesky"));
     assert.ok(js.includes("✓ Reviewed") && js.includes("Auto-checked"));
+  });
+});
+
+describe("after a service worker update", () => {
+  /** Runs sw.js against a stub worker scope, fires `activate` with open windows at `urls`, and returns the urls that were navigated. */
+  async function navigatedOnActivate(urls: string[]): Promise<string[]> {
+    const handlers: Record<string, (event: { waitUntil(work: Promise<unknown>): void }) => void> = {};
+    const navigated: string[] = [];
+    const windows = urls.map((url) => ({ url, navigate: async (to: string) => void navigated.push(to) }));
+    const sandbox = {
+      URL,
+      Promise,
+      self: {
+        addEventListener: (type: string, handler: (event: { waitUntil(work: Promise<unknown>): void }) => void) => void (handlers[type] = handler),
+        skipWaiting() {},
+        clients: { claim: async () => {}, matchAll: async () => windows },
+      },
+      caches: { keys: async () => ["politik-shell-v24"], delete: async () => true, open: async () => ({ addAll: async () => {} }) },
+    };
+    vm.runInNewContext(read("sw.js"), sandbox);
+    let work: Promise<unknown> = Promise.resolve();
+    handlers.activate!({ waitUntil: (p) => void (work = p) });
+    await work;
+    return navigated;
+  }
+
+  test("open chat and map windows are reloaded onto the new page, and other pages are left alone", async () => {
+    const navigated = await navigatedOnActivate([
+      "https://politik.example/",
+      "https://politik.example/map",
+      "https://politik.example/sources",
+      "https://politik.example/saying",
+    ]);
+    assert.deepEqual(navigated.sort(), ["https://politik.example/", "https://politik.example/map"]);
+  });
+
+  test("a chat window with a query string is reloaded too (the path is what counts)", async () => {
+    assert.deepEqual(await navigatedOnActivate(["https://politik.example/?utm=1"]), ["https://politik.example/?utm=1"]);
   });
 });
 

@@ -4,7 +4,7 @@
 import type { SourceItem, SourceName } from "../contracts.ts";
 import type { D1Like } from "../data/d1.ts";
 import { STOP_WORDS } from "../data/fts.ts";
-import { getManifest } from "../data/store.ts";
+import { getManifest, getRecord } from "../data/store.ts";
 import { groqLlm, resolveChatModels } from "../llm/groq.ts";
 import type { Llm } from "../llm/groq.ts";
 import { searchPublicBluesky } from "../sources/bsky-search.ts";
@@ -205,6 +205,31 @@ function modeOf(route: Route): Mode {
   return shapeOf(route);
 }
 
+/**
+ * `citations` with `fetched` (YYYY-MM-DD) added to each policy citation, read from its full record (spec §6: a card shows
+ * when the source was fetched). One read per distinct record, all at once. A read that fails, or a record that is gone,
+ * leaves that citation without `fetched`; this never throws.
+ */
+async function withFetched(citations: Citation[], db: D1Like): Promise<Citation[]> {
+  const ids = [...new Set(citations.flatMap((c) => (c.kind === "policy" && c.recordId ? [c.recordId] : [])))];
+  if (ids.length === 0) return citations;
+  const days = new Map<string, string>();
+  await Promise.all(
+    ids.map(async (id) => {
+      try {
+        const day = /^\d{4}-\d{2}-\d{2}/.exec((await getRecord(db, id))?.fetched ?? "")?.[0];
+        if (day) days.set(id, day);
+      } catch (error) {
+        console.warn("chat: could not read when a record was fetched", id, error);
+      }
+    }),
+  );
+  return citations.map((c) => {
+    const fetched = c.recordId ? days.get(c.recordId) : undefined;
+    return fetched ? { ...c, fetched } : c;
+  });
+}
+
 /** True when `reply` has a letter or digit outside its [n] markers: a reply that is only markers says nothing. */
 const hasWords = (reply: string): boolean => /[\p{L}\p{N}]/u.test(stripMarkers(reply));
 
@@ -214,7 +239,7 @@ const FALLBACK_RECORDS = 3;
  * The fallback (spec §5): the top records that were retrieved, each quoting the start of its summary. A source with no
  * usable link is skipped, and so is a record that is already listed. With none left it is a plain failure reply.
  */
-function fallback(sources: Source[], asOf: string): ChatResponse {
+async function fallback(sources: Source[], asOf: string, db: D1Like): Promise<ChatResponse> {
   const seen = new Set<string>();
   const citations: Citation[] = [];
   for (const source of sources) {
@@ -228,7 +253,7 @@ function fallback(sources: Source[], asOf: string): ChatResponse {
     seen.add(key);
     citations.push(citation);
   }
-  return { reply: citations.length ? FALLBACK_REPLY : FAIL_REPLY, mode: "fallback", citations, followUps: [], asOf };
+  return { reply: citations.length ? FALLBACK_REPLY : FAIL_REPLY, mode: "fallback", citations: await withFetched(citations, db), followUps: [], asOf };
 }
 
 // ---- the pipeline ----------------------------------------------------------------------------------------------------
@@ -271,16 +296,16 @@ async function respond(req: ChatInput, db: D1Like, deps: ChatDeps): Promise<Chat
   const route: Route = retrieved.promoted ? { ...decided, intent: "explain" } : decided;
   const sources = await rank(route, retrieved.sources, deps.scorer);
 
-  if (!deps.composer) return fallback(sources, asOf);
+  if (!deps.composer) return fallback(sources, asOf, db);
   try {
     const raw = await compose(route, sources, deps.composer, asOf, { timeoutMs: deps.composeTimeoutMs });
-    const { reply, citations, valid } = finalize(raw, sources);
+    const { reply, citations: cited, valid } = finalize(raw, sources);
     // No valid marker, or no words outside the markers ("[1]" alone), is a compose failure (spec §3.5).
     if (valid && hasWords(reply)) {
       return {
         reply,
         mode: modeOf(route),
-        citations,
+        citations: await withFetched(cited, db),
         ...(raw.general ? { general: raw.general } : {}),
         followUps: raw.followUps,
         asOf,
@@ -289,5 +314,5 @@ async function respond(req: ChatInput, db: D1Like, deps: ChatDeps): Promise<Chat
   } catch (error) {
     console.warn("chat: compose failed", error);
   }
-  return fallback(sources, asOf);
+  return fallback(sources, asOf, db);
 }

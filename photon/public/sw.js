@@ -39,7 +39,7 @@ self.addEventListener("activate", (event) => {
       const windows = await self.clients.matchAll({ type: "window" });
       await Promise.all(
         windows
-          .filter((client) => new URL(client.url).pathname === "/map")
+          .filter((client) => ["/", "/map"].includes(new URL(client.url).pathname))
           .map((client) => client.navigate(client.url)),
       );
     })(),

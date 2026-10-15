@@ -20,7 +20,7 @@ import {
 import { BRIEF_JUDGEMENT, type Scorer } from "../../photon/src/chat/rank.ts";
 import type { ChatInput, ChatResponse, ChatTurn, ComposeOut, Mode } from "../../photon/src/chat/types.ts";
 import type { SourceItem } from "../../photon/src/contracts.ts";
-import type { D1Like } from "../../photon/src/data/d1.ts";
+import type { D1Like, D1StatementLike } from "../../photon/src/data/d1.ts";
 import type { Manifest, Passage, PolicyRecord } from "../../photon/src/data/schema.ts";
 import { snapshotStatements } from "../../photon/src/data/seed.ts";
 import type { Llm } from "../../photon/src/llm/groq.ts";
@@ -620,6 +620,149 @@ describe("chat on a seeded database", () => {
         res.citations.map((x) => x.n),
       );
     });
+  });
+});
+
+// ---- when each cited record was fetched ---------------------------------------------------------------------------
+
+const RECORD_READ = "SELECT data_json FROM records WHERE id = ?";
+
+/**
+ * `db` with the full-record read (`getRecord`) watched: each record id read is pushed to `reads`, and `behaviour` can make
+ * a read fail (the store throws) or find nothing. Every other statement goes through untouched.
+ */
+function watchingRecordReads(db: D1Like, behaviour: (id: string) => "ok" | "fail" | "missing" = () => "ok") {
+  const reads: string[] = [];
+  const wrapped: D1Like = {
+    batch: (statements) => db.batch(statements),
+    prepare(sql) {
+      const real = db.prepare(sql);
+      if (sql !== RECORD_READ) return real;
+      const statement: D1StatementLike = {
+        bind(...values) {
+          const id = String(values[0]);
+          reads.push(id);
+          const how = behaviour(id);
+          const bound = real.bind(...values);
+          return {
+            bind: () => statement,
+            all: () => bound.all(),
+            run: () => bound.run(),
+            async first<T>() {
+              if (how === "fail") throw new Error("D1 is down");
+              return how === "missing" ? null : bound.first<T>();
+            },
+          };
+        },
+        all: () => real.all(),
+        first: () => real.first(),
+        run: () => real.run(),
+      };
+      return statement;
+    },
+  };
+  return { db: wrapped, reads };
+}
+
+describe("citations say when their record was fetched", () => {
+  let db: D1Like;
+  let dispose: () => Promise<void>;
+  // Every record gets its own fetch time, late in the day, so a constant or a time-zone shift would show.
+  const dated = policies.map((p, i) => ({ ...p, fetched: `2026-08-${String(i + 1).padStart(2, "0")}T23:59:59Z` }));
+  const day = (id: string) => dated.find((p) => p.id === id)!.fetched.slice(0, 10);
+  before(async () => {
+    ({ db, dispose } = await openTestDb());
+    await seed(db, dated);
+  });
+  after(() => dispose());
+  silenceWarnings();
+
+  const ask = (database: D1Like, composer: Llm, message = "What is going on?") => chat(input(message), { DB: database }, { router: router().llm, composer, bluesky: noPosts });
+
+  test("a composed answer's policy citations carry the date their own record was fetched", async () => {
+    const res = await ask(db, citingComposer().llm);
+    assertShape(res);
+    assert.equal(res.mode, "brief");
+    assert.ok(res.citations.length >= 2);
+    for (const cite of res.citations) assert.equal(cite.fetched, day(cite.recordId!), String(cite.recordId));
+    assert.ok(new Set(res.citations.map((x) => x.fetched)).size >= 2, "different records have different dates");
+    assert.match(res.citations[0]!.fetched!, /^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  test("the fixture's own records say 2026-09-30", async () => {
+    const plain = await openTestDb();
+    try {
+      await seed(plain.db);
+      const res = await ask(plain.db, citingComposer().llm);
+      assert.ok(res.citations.length >= 1);
+      assert.ok(res.citations.every((x) => x.fetched === "2026-09-30"));
+    } finally {
+      await plain.dispose();
+    }
+  });
+
+  test("the fallback's citations carry it too, whether the compose model failed or there is none", async () => {
+    const broken = fakeLlm(() => {
+      throw new Error("Groq API error 503");
+    });
+    const failed = await ask(db, broken.llm);
+    assert.equal(failed.mode, "fallback");
+    assert.equal(failed.citations.length, 3);
+    for (const cite of failed.citations) assert.equal(cite.fetched, day(cite.recordId!), String(cite.recordId));
+
+    const noModel = await chat(input("What is going on?"), { DB: db }, { bluesky: noPosts });
+    assert.equal(noModel.mode, "fallback");
+    assert.equal(noModel.citations.length, 3);
+    for (const cite of noModel.citations) assert.equal(cite.fetched, day(cite.recordId!), String(cite.recordId));
+  });
+
+  test("a post has no fetch date, and the policy citations beside it still do", async () => {
+    const post: SourceItem = { id: "p1", source: "bluesky", title: "A post", plain: "Data centres worry me.", url: "https://bsky.app/profile/a/post/1", author: "a.bsky.social" };
+    const r = router({ intent: "sentiment", standalone: "What are people saying about data centres?", search: "data centres" });
+    const res = await chat(input("What are people saying about data centres?"), { DB: db }, { router: r.llm, composer: citingComposer().llm, bluesky: async () => [post] });
+    const posts = res.citations.filter((x) => x.kind === "post");
+    assert.equal(posts.length, 1);
+    assert.ok(!("fetched" in posts[0]!));
+    const policy = res.citations.filter((x) => x.kind === "policy");
+    assert.ok(policy.length >= 1);
+    for (const cite of policy) assert.equal(cite.fetched, day(cite.recordId!));
+  });
+
+  test("each distinct record is read once", async () => {
+    const watched = watchingRecordReads(db);
+    const res = await ask(watched.db, citingComposer().llm);
+    const ids = res.citations.map((x) => x.recordId!);
+    assert.deepEqual([...watched.reads].sort(), [...new Set(ids)].sort());
+  });
+
+  test("a store error during the lookup still returns the answer, without fetched", async () => {
+    const watched = watchingRecordReads(db, () => "fail");
+    const res = await ask(watched.db, citingComposer().llm);
+    assertShape(res);
+    assert.equal(res.mode, "brief", "the composed answer is kept");
+    assert.ok(watched.reads.length >= 1, "the lookup was tried");
+    assert.ok(res.citations.length >= 2);
+    assert.ok(res.citations.every((x) => !("fetched" in x)));
+    assertMarkersResolve(res);
+
+    const broken = fakeLlm(() => {
+      throw new Error("Groq API error 503");
+    });
+    const fell = await ask(watched.db, broken.llm);
+    assert.equal(fell.mode, "fallback");
+    assert.equal(fell.citations.length, 3);
+    assert.ok(fell.citations.every((x) => !("fetched" in x)));
+  });
+
+  test("a record that has gone, or one lookup that fails, only leaves its own citations without a date", async () => {
+    const first = await ask(db, citingComposer().llm);
+    const [gone, down] = [first.citations[0]!.recordId!, first.citations[1]!.recordId!];
+    const watched = watchingRecordReads(db, (id) => (id === gone ? "missing" : id === down ? "fail" : "ok"));
+    const res = await ask(watched.db, citingComposer().llm);
+    for (const cite of res.citations) {
+      if (cite.recordId === gone || cite.recordId === down) assert.ok(!("fetched" in cite), String(cite.recordId));
+      else assert.equal(cite.fetched, day(cite.recordId!), String(cite.recordId));
+    }
   });
 });
 
