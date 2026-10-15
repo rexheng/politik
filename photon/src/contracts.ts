@@ -8,7 +8,8 @@ export type SourceName =
   | "pitchbook"
   | "briefing"
   | "ca-ag"
-  | "site";
+  | "site"
+  | "policy";
 
 export interface SourceItem {
   id: string;

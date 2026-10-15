@@ -13,7 +13,8 @@
     "check:jev": "tsx scripts/check-jev.ts",
     "check:select": "tsx scripts/check-select.ts",
     "check:stagehand": "tsx scripts/check-stagehand.ts",
-    "snapshot:build": "tsx photon/scripts/snapshot/build.ts"
+    "snapshot:build": "tsx photon/scripts/snapshot/build.ts",
+    "seed:d1": "tsx photon/scripts/snapshot/seed-d1.ts"
   },
   "dependencies": {
     "@browserbasehq/stagehand": "^4.1.0",

@@ -1,0 +1,245 @@
+// The invented briefings, the ten California Attorney General items and the hardcoded catalog that
+// the chat used before it read from D1. They live here only so `pnpm check:select` keeps testing the
+// chat logic against the same inputs. Nothing under photon/ imports this file.
+import type { Catalog } from "../../photon/src/catalog.ts";
+import type { TaggedItem } from "../../photon/src/contracts.ts";
+
+const BRIEFINGS: TaggedItem[] = [
+  {
+    id: "briefing-bill-vote",
+    source: "briefing",
+    title: "AI transparency bill waits on House vote",
+    plain: "A bill requiring clearer labels on AI-generated content cleared committee months ago. Leadership has not scheduled a floor vote.",
+    url: "https://www.congress.gov/",
+    happenedAt: "2026-03-12T14:00:00.000Z",
+    category: "bill-stuck",
+    tags: ["congress", "ai", "transparency", "house"],
+  },
+  {
+    id: "briefing-data-center-town",
+    source: "briefing",
+    title: "Town hall clash over proposed data center",
+    plain: "Residents in a Midwestern town are split over a large data center plan. Some want the jobs and tax base; others worry about water use and noise.",
+    happenedAt: "2026-02-18T19:30:00.000Z",
+    category: "local-worry",
+    tags: ["data-center", "local", "water", "jobs"],
+  },
+  {
+    id: "briefing-lab-chip-round",
+    source: "briefing",
+    title: "Chip startup raises large Series B",
+    plain: "A semiconductor design lab closed a big funding round to build faster AI chips. The money will expand its U.S. engineering team.",
+    happenedAt: "2026-01-22T16:00:00.000Z",
+    category: "lab-money",
+    tags: ["funding", "chips", "startup"],
+  },
+  {
+    id: "briefing-openalex-safety",
+    source: "briefing",
+    title: "New study on AI model safety testing",
+    plain: "Researchers published a paper comparing how labs test models before release. They found big gaps in how teams check for harmful outputs.",
+    happenedAt: "2026-04-03T10:15:00.000Z",
+    category: "research",
+    tags: ["safety", "models", "paper"],
+  },
+  {
+    id: "briefing-nist-speech",
+    source: "briefing",
+    title: "Commerce official outlines AI standards push",
+    plain: "A senior Commerce Department speaker said the agency will keep updating voluntary AI safety guidelines. The talk stressed working with industry and universities.",
+    happenedAt: "2026-05-08T17:45:00.000Z",
+    category: "speech",
+    tags: ["commerce", "standards", "guidelines"],
+  },
+  {
+    id: "briefing-bill-senate-hold",
+    source: "briefing",
+    title: "Senate AI workforce bill stalled in committee",
+    plain: "A bipartisan bill to fund AI job training is stuck after markup. Sponsors say they still lack agreement on who gets the grants.",
+    happenedAt: "2026-06-11T13:20:00.000Z",
+    category: "bill-stuck",
+    tags: ["senate", "workforce", "training"],
+  },
+  {
+    id: "briefing-school-ai-policy",
+    source: "briefing",
+    title: "Parents push school board on classroom AI tools",
+    plain: "A suburban school board heard hours of comment on whether students may use AI for homework. Parents asked for a clear written policy before fall.",
+    happenedAt: "2026-08-14T23:00:00.000Z",
+    category: "local-worry",
+    tags: ["schools", "parents", "policy"],
+  },
+  {
+    id: "briefing-lab-cloud-deal",
+    source: "briefing",
+    title: "AI lab signs multi-year cloud compute deal",
+    plain: "A major AI lab locked in a long cloud contract to train larger models. The deal is one of the biggest compute buys reported this year.",
+    happenedAt: "2026-09-02T15:30:00.000Z",
+    category: "lab-money",
+    tags: ["cloud", "compute", "deal"],
+  },
+];
+
+const CA_AG: TaggedItem[] = [
+  {
+    id: "ca-ag-0",
+    source: "ca-ag",
+    title: "Ahead of Anniversary of Critical Disability Rights Legislation, Attorney General Bonta Reaffirms California’s Commitment to Uplifting and Defending the Rights of Californians with Disabilities",
+    plain: "Press release from the California Attorney General.",
+    url: "https://oag.ca.gov/news/press-releases/ahead-anniversary-critical-disability-rights-legislation-attorney-general-bonta",
+    happenedAt: "2026-09-25T17:16:18+00:00",
+    jurisdiction: "US-CA",
+    category: "other",
+    tags: [],
+  },
+  {
+    id: "ca-ag-1",
+    source: "ca-ag",
+    title: "Attorney General Bonta Rebukes Trump Administration Attempt to Politicize and Undermine Education Grant Funding",
+    plain: "Press release from the California Attorney General.",
+    url: "https://oag.ca.gov/news/press-releases/attorney-general-bonta-rebukes-trump-administration-attempt-politicize-and",
+    happenedAt: "2026-09-25T15:02:59+00:00",
+    jurisdiction: "US-CA",
+    category: "other",
+    tags: [],
+  },
+  {
+    id: "ca-ag-2",
+    source: "ca-ag",
+    title: "Attorney General Bonta Opposes Another Attempt by Trump Administration to Impose Unlawful Taxes on H-1B Visas",
+    plain: "Press release from the California Attorney General.",
+    url: "https://oag.ca.gov/news/press-releases/attorney-general-bonta-opposes-another-attempt-trump-administration-impose",
+    happenedAt: "2026-09-24T17:27:18+00:00",
+    jurisdiction: "US-CA",
+    category: "other",
+    tags: [],
+  },
+  {
+    id: "ca-ag-3",
+    source: "ca-ag",
+    title: "Attorney General Bonta Secures Major Victories from State’s Highest Court, Confirming Authority to Issue Binding Directives to Riverside Sheriff and Ordering Sheriff to Return Voted Ballots to the Registrar of Voters",
+    plain: "Press release from the California Attorney General.",
+    url: "https://oag.ca.gov/news/press-releases/attorney-general-bonta-secures-major-victories-state%E2%80%99s-highest-court-confirming",
+    happenedAt: "2026-09-24T16:17:06+00:00",
+    jurisdiction: "US-CA",
+    category: "other",
+    tags: [],
+  },
+  {
+    id: "ca-ag-4",
+    source: "ca-ag",
+    title: "Attorney General Bonta: Congress Must Act Urgently to Protect Against Catastrophic AI Threats",
+    plain: "Attorney General Bonta called on Congress to act on catastrophic AI threats.",
+    url: "https://oag.ca.gov/news/press-releases/attorney-general-bonta-congress-must-act-urgently-protect-against-catastrophic",
+    happenedAt: "2026-09-24T15:37:54+00:00",
+    jurisdiction: "US-CA",
+    category: "other",
+    tags: [],
+  },
+  {
+    id: "ca-ag-5",
+    source: "ca-ag",
+    title: "Attorney General Bonta Urges Consumers to Claim Compensation for Inflated Generic Drug Prices",
+    plain: "Press release from the California Attorney General.",
+    url: "https://oag.ca.gov/news/press-releases/attorney-general-bonta-urges-consumers-claim-compensation-inflated-generic-drug",
+    happenedAt: "2026-09-24T14:04:08+00:00",
+    jurisdiction: "US-CA",
+    category: "other",
+    tags: [],
+  },
+  {
+    id: "ca-ag-6",
+    source: "ca-ag",
+    title: "Attorney General Bonta Disputes Another Trump Administration Proposal That Would Harm Our National Forests",
+    plain: "Press release from the California Attorney General.",
+    url: "https://oag.ca.gov/news/press-releases/attorney-general-bonta-disputes-another-trump-administration-proposal-would-harm",
+    happenedAt: "2026-09-23T20:23:18+00:00",
+    jurisdiction: "US-CA",
+    category: "other",
+    tags: [],
+  },
+  {
+    id: "ca-ag-7",
+    source: "ca-ag",
+    title: "Attorney General Bonta Calls on Trump Administration to Stop Undermining Federal Vaccine Guidance",
+    plain: "Press release from the California Attorney General.",
+    url: "https://oag.ca.gov/news/press-releases/attorney-general-bonta-calls-trump-administration-stop-undermining-federal",
+    happenedAt: "2026-09-22T17:24:45+00:00",
+    jurisdiction: "US-CA",
+    category: "other",
+    tags: [],
+  },
+  {
+    id: "ca-ag-8",
+    source: "ca-ag",
+    title: "Attorney General Bonta Opposes Trump Administration Proposed Rule That Would Unlawfully Disrupt How Medicaid Is Currently Funded, Shift More Costs to States",
+    plain: "Press release from the California Attorney General.",
+    url: "https://oag.ca.gov/news/press-releases/attorney-general-bonta-opposes-trump-administration-proposed-rule-would",
+    happenedAt: "2026-09-22T16:11:48+00:00",
+    jurisdiction: "US-CA",
+    category: "other",
+    tags: [],
+  },
+  {
+    id: "ca-ag-9",
+    source: "ca-ag",
+    title: "During Climate Week, Attorney General Bonta Announces Second Lawsuit Challenging Unlawful Trump Administration Offshore Wind Deal",
+    plain: "Press release from the California Attorney General.",
+    url: "https://oag.ca.gov/news/press-releases/during-climate-week-attorney-general-bonta-announces-second-lawsuit-challenging",
+    happenedAt: "2026-09-21T21:02:02+00:00",
+    jurisdiction: "US-CA",
+    category: "other",
+    tags: [],
+  },
+];
+
+/** The 8 briefings followed by the 10 California AG items, exactly as the old chat pool had them. */
+export function legacyPool(): TaggedItem[] {
+  return structuredClone([...BRIEFINGS, ...CA_AG]);
+}
+
+/** The old hardcoded catalog (Singapore Statutes Online blocked, 3,485 GeBIZ notices), for the coverage notes. */
+export function legacyCatalog(): Catalog {
+  return {
+    blocked: [
+      {
+        id: "sso-new-legislation",
+        jurisdiction: "SG",
+        live: true,
+        ended: "2026-09-26T00:01:07+00:00",
+        error: "HTTP 403 from https://sso.agc.gov.sg/What's-New/New-Legislation/RSS",
+        url: "https://sso.agc.gov.sg",
+        attribution: "Singapore Statutes Online, Attorney-General’s Chambers",
+        officialText: false,
+      },
+    ],
+    jurisdictions: [
+      {
+        id: "SG",
+        label: "SG",
+        documents: 3485,
+      },
+      {
+        id: "US-CA",
+        label: "US-CA",
+        documents: 10,
+      },
+    ],
+    sources: [
+      {
+        id: "ca-ag-rss",
+        documents: 10,
+        redistributionOk: true,
+        attribution: "California Department of Justice, Office of the Attorney General",
+      },
+      {
+        id: "gebiz",
+        documents: 3485,
+        redistributionOk: true,
+        attribution: "Contains information from data.gov.sg (GeBIZ Government Procurement) made available under the Singapore Open Data Licence",
+      },
+    ],
+    latest: [],
+    snapshotDate: "",
+  };
+}

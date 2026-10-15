@@ -1,6 +1,7 @@
+import type { Catalog } from "./catalog.ts";
 import type { Category, ChatTurn, TaggedItem } from "./contracts.ts";
-import { loadCatalog } from "./catalog.ts";
 import { DATACENTRES } from "./datacentres.ts";
+import type { RecordSummary } from "./data/schema.ts";
 
 export type Intent = "ask" | "more" | "overview" | "both" | "continue";
 export type Relation = "answers" | "related";
@@ -312,20 +313,22 @@ export function present(rows: Ranked[]): Ranked[] {
   });
 }
 
-export function catalogItems(): TaggedItem[] {
-  return loadCatalog().latest.map((doc, index) => ({
-    id: `ca-ag-${index}`,
-    source: "ca-ag",
-    title: doc.title,
-    plain: /catastrophic ai/i.test(doc.title)
-      ? "Attorney General Bonta called on Congress to act on catastrophic AI threats."
-      : "Press release from the California Attorney General.",
-    url: doc.url,
-    happenedAt: doc.published,
-    jurisdiction: doc.jurisdiction,
-    category: "other" as const,
-    tags: [],
-  }));
+/** Policy records as chat items: the summary is the plain text, and they carry no tags and the `other` category. */
+export function recordItems(records: RecordSummary[]): TaggedItem[] {
+  return records.map((record) => {
+    const happenedAt = record.published ?? record.statusDate;
+    return {
+      id: record.id,
+      source: "policy" as const,
+      title: record.title,
+      plain: record.summary,
+      url: record.url,
+      ...(happenedAt !== undefined && { happenedAt }),
+      jurisdiction: record.jurisdiction,
+      category: "other" as const,
+      tags: [],
+    };
+  });
 }
 
 export function siteItems(): TaggedItem[] {
@@ -371,8 +374,9 @@ function countText(value: number): string {
   return value.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
-export function coverageNotes(question: string, items: Ranked[]): string[] {
-  if (!placesIn(question).has("SG") || !policySeeking(question)) return [];
+/** Notes on what the catalog says is missing for Singapore. With no catalog there is nothing to say. */
+export function coverageNotes(question: string, items: Ranked[], catalog?: Catalog): string[] {
+  if (!catalog || !placesIn(question).has("SG") || !policySeeking(question)) return [];
   const hasSgAnswer = items.some(
     (row) => row.relation === "answers" && itemPlaces(row.item).has("SG"),
   );
@@ -382,7 +386,6 @@ export function coverageNotes(question: string, items: Ranked[]): string[] {
       itemPlaces(row.item).has("SG") &&
       row.item.source !== "openalex",
   );
-  const catalog = loadCatalog();
   const blocked = catalog.blocked.find((row) => row.jurisdiction === "SG");
   const gebiz = catalog.sources.find((row) => row.id === "gebiz");
   const notes: string[] = [];

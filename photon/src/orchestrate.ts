@@ -1,4 +1,5 @@
 import { score, TypeSafeClient } from "@typesafe-ai/sdk";
+import type { Catalog } from "./catalog.ts";
 import type { AskCard, AskResponse, Category, ChatTurn, TaggedItem } from "./contracts.ts";
 import { knownJurisdiction } from "./place.ts";
 import {
@@ -20,7 +21,7 @@ const EMPTY_REPLY = "I do not have a fresh update on that yet.";
 const ERROR_REPLY = "I could not check that just now.";
 
 const POLICY_ASK =
-  /\b(?:bills?|votes?|voting|laws?|statutes?|legislation|senate|house|congress|committees?|filibusters?|hearings?|speeches|speech|transcripts?|data\s*cent(?:er|re)s?|datacent(?:er|re)s?|towns?|cities|city|counties|county|districts?|neighborhoods?|communities|community|places?|california|water|noise|grids?|power|sources?|papers?|studies|study|journals?|research|funding|funds|funded|labs?|startups?|investments?|investors?|chips?|transparency|policies|policy|regulations?|ai|saying|briefings?|updates?|happening|watch)\b|\b(?:sb|ab|hb|hr)\s*\d+\b|\bgoing on\b|\bcatch me up\b|\bbrief me\b|\bwhat(?:'s| is) new\b|\bpeople are saying\b|\bwhat to watch\b/;
+  /\b(?:bills?|votes?|voting|laws?|statutes?|legislation|senate|house|congress|committees?|filibusters?|hearings?|speeches|speech|transcripts?|data\s*cent(?:er|re)s?|datacent(?:er|re)s?|towns?|cities|city|counties|county|districts?|neighborhoods?|communities|community|places?|california|water|noise|grids?|power|sources?|papers?|studies|study|journals?|research|funding|funds|funded|labs?|startups?|investments?|investors?|chips?|transparency|policies|policy|regulations?|ai|saying|briefing(?:s)?|updates?|happening|watch)\b|\b(?:sb|ab|hb|hr)\s*\d+\b|\bgoing on\b|\bcatch me up\b|\bbrief me\b|\bwhat(?:'s| is) new\b|\bpeople are saying\b|\bwhat to watch\b/;
 
 const SOURCE_LABEL: Record<string, string> = {
   briefing: "briefing",
@@ -161,6 +162,8 @@ export async function answer(input: {
   items: TaggedItem[];
   history?: ChatTurn[];
   typesafeKey?: string;
+  /** What the catalog says is missing, for the Singapore coverage notes. Left out, there are none. */
+  catalog?: Catalog;
 }): Promise<AskResponse> {
   try {
     const message = input.message ?? "";
@@ -196,7 +199,7 @@ export async function answer(input: {
     }
 
     const ordered = present(rows);
-    const notes = coverageNotes(question, ordered);
+    const notes = coverageNotes(question, ordered, input.catalog);
     const earlier = history
       .filter((turn) => turn.role === "assistant")
       .map((turn) => turn.text)

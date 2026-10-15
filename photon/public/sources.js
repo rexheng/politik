@@ -3,7 +3,21 @@
   const jurisdictions = document.getElementById("jurisdictions");
   const sources = document.getElementById("sources");
   const latest = document.getElementById("latest");
+  const asof = document.getElementById("asof");
   const DASH = "\u2014";
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+  // "2026-10-15" becomes "15 Oct 2026". An empty date means D1 holds no snapshot.
+  function showAsOf(snapshotDate) {
+    const match = typeof snapshotDate === "string" ? snapshotDate.match(/^(\d{4})-(\d{2})-(\d{2})$/) : null;
+    if (match && MONTHS[Number(match[2]) - 1]) {
+      asof.textContent = "Data as of " + Number(match[3]) + " " + MONTHS[Number(match[2]) - 1] + " " + match[1];
+    } else if (typeof snapshotDate === "string" && snapshotDate) {
+      asof.textContent = "Data as of " + snapshotDate;
+    } else {
+      asof.textContent = "No policy data loaded yet";
+    }
+  }
 
   function chip(text) {
     const span = document.createElement("span");
@@ -158,6 +172,7 @@
   fetch("/api/sources")
     .then(function (res) { return res.json(); })
     .then(function (data) {
+      showAsOf(data.snapshotDate);
       (data.blocked || []).forEach(function (row) {
         blocked.appendChild(blockedCard(row));
       });
@@ -170,5 +185,7 @@
       (data.latest || []).forEach(function (row) {
         latest.appendChild(docCard(row));
       });
+    }, function () {
+      showAsOf("");
     });
 })();

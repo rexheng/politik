@@ -18,11 +18,14 @@ export function migrationStatements(): string[] {
     .filter(Boolean);
 }
 
-/** An in-memory local D1 with the migration applied and nothing else loaded. */
-export async function openTestDb(): Promise<{ db: D1Like; dispose(): Promise<void> }> {
+/**
+ * An in-memory local D1 with the migration applied and nothing else loaded.
+ * `{ migrate: false }` leaves it bare, like a production D1 nobody has migrated yet.
+ */
+export async function openTestDb(options: { migrate?: boolean } = {}): Promise<{ db: D1Like; dispose(): Promise<void> }> {
   const proxy = await getPlatformProxy<{ DB: D1Like }>({ configPath, persist: false });
   const db = proxy.env.DB;
   if (!db) throw new Error("wrangler.jsonc has no DB binding");
-  await db.batch(migrationStatements().map((sql) => db.prepare(sql)));
+  if (options.migrate !== false) await db.batch(migrationStatements().map((sql) => db.prepare(sql)));
   return { db, dispose: () => proxy.dispose() };
 }

@@ -1,8 +1,11 @@
-import { loadBriefings } from "../photon/src/briefings.ts";
-import { answer } from "../photon/src/orchestrate.ts";
-import { catalogItems, siteItems, type ChatTurn } from "../photon/src/select.ts";
+import type { ChatTurn } from "../photon/src/contracts.ts";
+import { answer as answerWith } from "../photon/src/orchestrate.ts";
+import { siteItems } from "../photon/src/select.ts";
+import { legacyCatalog, legacyPool } from "../tests/fixtures/legacy-pool.ts";
 
-const pool = [...loadBriefings(), ...catalogItems(), ...siteItems()];
+// The chat logic is checked against the pool and catalog it had before it read from D1.
+const pool = [...legacyPool(), ...siteItems()];
+const answer = (input: Parameters<typeof answerWith>[0]) => answerWith({ catalog: legacyCatalog(), ...input });
 
 function fail(message: string): never {
   throw new Error(message);
@@ -41,7 +44,7 @@ assert(
 assert(bill.items[0].relation === "answers", "transparency bill should answer");
 assert(/floor vote/i.test(bill.reply), bill.reply);
 
-const trapped = loadBriefings()
+const trapped = legacyPool()
   .filter((item) => item.id === "briefing-school-ai-policy")
   .map((item) => ({ ...item, category: "other" as const }));
 const trappedReply = await answer({ message: singapore, items: trapped, history: [] });

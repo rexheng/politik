@@ -122,7 +122,7 @@ export default {
       }
 
       if (url.pathname === "/api/sources" && request.method === "GET") {
-        return json(await loadCatalog());
+        return json(await loadCatalog(env.DB));
       }
 
       if (url.pathname === "/api/map-token" && request.method === "GET") {

@@ -12,7 +12,13 @@ A source card shows the URL, fetched time, source, and jurisdiction when the rec
 
 ## Sources
 
-The Sources page lists jurisdictions, sources, a blocked source, and the latest documents. The latest documents are 10 California Attorney General releases. GeBIZ is listed at 3,485 documents. The blocked source is Singapore Statutes Online.
+The Sources page reads the policy dataset in D1. It shows the "as of" date, the record count per jurisdiction and per publisher, the 10 most recently published records, and the sources the build had to exclude, with the reason. With no data loaded it says so.
+
+## Data
+
+The policy dataset covers California and Singapore tech policy. `pnpm snapshot:build` builds it into `photon/data/snapshot/` (needs `GROQ_API_KEY`). `pnpm check:data` validates it. `pnpm seed:d1` loads it into the local D1 database, and `pnpm seed:d1 --remote` loads it into production. Seeding checks the snapshot first, applies the migrations, then wipes and reloads the tables. Use `--dir <path>` to seed another folder.
+
+Policy data is only as current as the last seed, so any surface that shows it must show the snapshot's "as of" date (the Sources page does). To refresh, build and seed again. Until D1 is seeded, the chat and the Sources page show empty lists, not errors.
 
 ## Map
 
@@ -46,3 +52,4 @@ Put secrets in `.dev.vars`. Git ignores that file. Key names:
 - TELEGRAM_BOT_TOKEN
 - OPENAI_API_KEY
 - ELEVENLABS_API_KEY
+- GROQ_API_KEY

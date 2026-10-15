@@ -7,14 +7,17 @@ import type {
   TaggedItem,
 } from "./contracts.ts";
 import { categorise } from "./categoriser.ts";
+import type { D1Like } from "./data/d1.ts";
+import { listRecords } from "./data/store.ts";
 import { answer, wantsPolicy } from "./orchestrate.ts";
-import { loadBriefings } from "./briefings.ts";
-import { catalogItems, siteItems, topicQuestion } from "./select.ts";
+import { recordItems, siteItems, topicQuestion } from "./select.ts";
 import { fetchOpenAlex } from "./sources/openalex.ts";
 import { transcribeSpeech } from "./sources/elevenlabs.ts";
 
 export interface Env {
   ASSETS: Fetcher;
+  DB: D1Like;
+  GROQ_API_KEY?: string;
   TYPESAFE_API_KEY?: string;
   OPENAI_API_KEY?: string;
   ELEVENLABS_API_KEY?: string;
@@ -32,6 +35,16 @@ const CATEGORIES = new Set<string>([
   "other",
 ]);
 
+/** The policy records as chat items. A store error, such as an unseeded or unmigrated D1, means none. */
+async function policyItems(db: D1Like): Promise<TaggedItem[]> {
+  try {
+    return recordItems(await listRecords(db));
+  } catch (error) {
+    console.warn("ask: the policy store could not be read", error);
+    return [];
+  }
+}
+
 export async function ask(
   message: string,
   env: Env,
@@ -47,7 +60,8 @@ export async function ask(
 
   const known = normalizeKnowledge(knowledge);
   const topic = topicQuestion(message, turns);
-  const [openalexItems, speechItems] = await Promise.all([
+  const [records, openalexItems, speechItems] = await Promise.all([
+    policyItems(env.DB),
     fetchOpenAlex(topic.slice(0, 300)),
     audioUrl
       ? transcribeSpeech({
@@ -59,13 +73,7 @@ export async function ask(
   const taggedSources = await Promise.all(
     [...openalexItems, ...speechItems].map((item) => tagItem(item, env.TYPESAFE_API_KEY)),
   );
-  const pool = dedupe([
-    ...loadBriefings(),
-    ...catalogItems(),
-    ...siteItems(),
-    ...known,
-    ...taggedSources,
-  ]);
+  const pool = dedupe([...records, ...siteItems(), ...known, ...taggedSources]);
   return answer({
     message,
     items: pool,
