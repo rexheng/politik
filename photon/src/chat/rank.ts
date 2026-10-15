@@ -1,7 +1,7 @@
 // Step 3 of the chat pipeline: put the retrieved sources in order of importance.
 // One TypeSafe (Jev) call scores every candidate. The call is optional and has a deadline: with no scorer, a timeout, an
 // error or an answer that is not scores, the store's order is kept. Ranking only reorders; it never adds or drops a source.
-// Spec §3.3; the call follows `dropWeakRelated` in ../orchestrate.ts and .agents/skills/typesafe-ai/SKILL.md.
+// Spec §3.3; the call follows `judgeWithJev` in ../categoriser.ts and .agents/skills/typesafe-ai/SKILL.md.
 import { score, TypeSafeClient } from "@typesafe-ai/sdk";
 import type { Route, Source } from "./types.ts";
 

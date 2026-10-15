@@ -1,4 +1,6 @@
 import { ask, type Env } from "./ask.ts";
+import { GENERAL_LABEL } from "./chat/index.ts";
+import type { ChatResponse } from "./chat/types.ts";
 
 type TelegramUpdate = {
   message?: {
@@ -6,6 +8,14 @@ type TelegramUpdate = {
     text?: string;
   };
 };
+
+/** The reply with its markers, then any general-knowledge text under its label, then one "[n] title — url" line per source. */
+export function formatTelegramReply(result: ChatResponse): string {
+  const parts = [result.reply];
+  if (result.general) parts.push(`${GENERAL_LABEL}:\n${result.general}`);
+  if (result.citations.length > 0) parts.push(result.citations.map((c) => `[${c.n}] ${c.title} — ${c.url}`).join("\n"));
+  return parts.join("\n\n");
+}
 
 export async function handleTelegram(request: Request, env: Env): Promise<Response> {
   const token = env.TELEGRAM_BOT_TOKEN?.trim();
@@ -28,13 +38,8 @@ export async function handleTelegram(request: Request, env: Env): Promise<Respon
   }
 
   try {
-    const result = await ask(text, env);
-    const lines = [result.reply];
-    for (const item of result.items.slice(0, 5)) {
-      const title = item.placeNote ? `${item.placeNote}: ${item.title}` : item.title;
-      lines.push(item.url ? `${title}\n${item.url}` : title);
-    }
-    await sendMessage(token, chatId, lines.join("\n\n"));
+    const result = await ask(text, env, undefined, []);
+    await sendMessage(token, chatId, formatTelegramReply(result));
   } catch {
     await sendMessage(token, chatId, "I could not check that just now.");
   }

@@ -33,6 +33,23 @@ export function resolveModels(env: Record<string, string | undefined>): { enrich
   };
 }
 
+/**
+ * The models the chatbot uses when GROQ_CHAT_MODEL / GROQ_ROUTER_MODEL are not set (see resolveChatModels): the strong
+ * model writes the answer and the fast one routes the question. Both are production models with strict json_schema.
+ */
+export const DEFAULT_CHAT_MODELS: { compose: string; router: string } = {
+  compose: "openai/gpt-oss-120b",
+  router: "openai/gpt-oss-20b",
+};
+
+/** Applies the GROQ_CHAT_MODEL / GROQ_ROUTER_MODEL overrides from an environment the caller supplies. Blank values are ignored. */
+export function resolveChatModels(env: Record<string, string | undefined>): { compose: string; router: string } {
+  return {
+    compose: env.GROQ_CHAT_MODEL?.trim() || DEFAULT_CHAT_MODELS.compose,
+    router: env.GROQ_ROUTER_MODEL?.trim() || DEFAULT_CHAT_MODELS.router,
+  };
+}
+
 /** Models the docs list under "Models with Strict Mode" (constrained decoding). */
 const STRICT_MODELS = new Set(["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"]);
 

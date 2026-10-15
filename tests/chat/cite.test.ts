@@ -268,3 +268,55 @@ describe("stripMarkers", () => {
     assert.equal(stripMarkers("See [Annex A] and [1a]."), "See [Annex A] and [1a].");
   });
 });
+
+describe("markers: what counts as one (B-R10)", () => {
+  const sources = [policy("one"), policy("two")];
+
+  test("a bracketed year is text, not a marker", () => {
+    const got = finalize(out("In [2024] it passed [1]."), sources);
+    assert.equal(got.reply, "In [2024] it passed [1].");
+    assert.deepEqual(
+      got.citations.map((c) => c.recordId),
+      ["one"],
+    );
+    assert.equal(stripMarkers("In [2024] it passed [1]."), "In [2024] it passed.");
+  });
+
+  test("a neutral citation such as [2020] SGCA 5 is left as written", () => {
+    assert.equal(stripMarkers("Tan v Lim [2020] SGCA 5"), "Tan v Lim [2020] SGCA 5");
+    assert.equal(finalize(out("Tan v Lim [2020] SGCA 5 held this [2]."), sources).reply, "Tan v Lim [2020] SGCA 5 held this [1].");
+    assert.equal(finalize(out("Tan v Lim [2020] SGCA 5"), sources).valid, false, "a year is not a marker, so nothing here is cited");
+  });
+
+  test("a group may not hide a year either", () => {
+    assert.equal(stripMarkers("See [2024, 1]."), "See [2024, 1].");
+  });
+
+  test("one or two digits make a marker; three do not", () => {
+    const twelve = Array.from({ length: 12 }, (_, i) => policy(`r${i + 1}`));
+    const got = finalize(out("A [12]. B [123]."), twelve);
+    assert.equal(got.reply, "A [1]. B [123].");
+    assert.deepEqual(
+      got.citations.map((c) => c.recordId),
+      ["r12"],
+    );
+  });
+
+  test("spaces inside the brackets are allowed: [ 1 ] is marker 1", () => {
+    const got = finalize(out("A [ 1 ]. B [ 2 , 1 ]. C [\t2\t]."), sources);
+    assert.equal(got.reply, "A [1]. B [1][2]. C [2].");
+    assert.deepEqual(
+      got.citations.map((c) => c.recordId),
+      ["one", "two"],
+    );
+    assert.equal(stripMarkers("A [ 1 ] and B [ 2, 3 ]."), "A and B.");
+  });
+
+  test("spaces inside the brackets do not turn other text into a marker", () => {
+    assert.equal(stripMarkers("See [ Annex 1 ] and [ ] and [ a ]."), "See [ Annex 1 ] and [ ] and [ a ].");
+  });
+
+  test("line breaks inside the brackets are not a marker", () => {
+    assert.equal(stripMarkers("A [\n1\n]."), "A [\n1\n].");
+  });
+});

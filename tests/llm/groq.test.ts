@@ -4,7 +4,7 @@ import { test } from "node:test";
 
 import { z } from "zod/v4";
 
-import { DEFAULT_MODELS, groqLlm, LlmError, resolveModels } from "../../photon/src/llm/groq.ts";
+import { DEFAULT_CHAT_MODELS, DEFAULT_MODELS, groqLlm, LlmError, resolveChatModels, resolveModels } from "../../photon/src/llm/groq.ts";
 
 const URL_CHAT = "https://api.groq.com/openai/v1/chat/completions";
 
@@ -287,6 +287,19 @@ test("resolveModels lets GROQ_ENRICH_MODEL and GROQ_VERIFY_MODEL override the de
   assert.deepEqual(resolveModels({ GROQ_ENRICH_MODEL: "  ", GROQ_VERIFY_MODEL: "" }), {
     enrich: DEFAULT_MODELS.enrich,
     verify: DEFAULT_MODELS.verify,
+  });
+});
+
+test("DEFAULT_CHAT_MODELS is the strong model for compose and the fast one for routing, both with strict json_schema (B-R2)", () => {
+  assert.deepEqual(DEFAULT_CHAT_MODELS, { compose: "openai/gpt-oss-120b", router: "openai/gpt-oss-20b" });
+});
+
+test("resolveChatModels lets GROQ_CHAT_MODEL and GROQ_ROUTER_MODEL override the defaults, ignoring blanks (B-R2)", () => {
+  assert.deepEqual(resolveChatModels({}), { compose: DEFAULT_CHAT_MODELS.compose, router: DEFAULT_CHAT_MODELS.router });
+  assert.deepEqual(resolveChatModels({ GROQ_CHAT_MODEL: " a/b ", GROQ_ROUTER_MODEL: "c/d" }), { compose: "a/b", router: "c/d" });
+  assert.deepEqual(resolveChatModels({ GROQ_CHAT_MODEL: "  ", GROQ_ROUTER_MODEL: "" }), {
+    compose: DEFAULT_CHAT_MODELS.compose,
+    router: DEFAULT_CHAT_MODELS.router,
   });
 });
 

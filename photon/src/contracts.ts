@@ -19,36 +19,10 @@ export interface SourceItem {
   url?: string;
   happenedAt?: string;
   jurisdiction?: string;
+  author?: string;
 }
 
 export interface TaggedItem extends SourceItem {
   category: Category;
   tags: string[];
-}
-
-export interface AskRequest {
-  message: string;
-}
-
-export interface ChatTurn {
-  role: "user" | "assistant";
-  text: string;
-  titles?: string[];
-}
-
-export interface AskCard {
-  title: string;
-  plain: string;
-  source?: string;
-  url?: string;
-  fetched?: string;
-  jurisdiction?: string;
-  relation?: "answers" | "related";
-  placeNote?: string;
-}
-
-export interface AskResponse {
-  reply: string;
-  category: Category;
-  items: AskCard[];
 }

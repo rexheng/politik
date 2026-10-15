@@ -1,6 +1,7 @@
 import { askShared, type Env } from "./ask.ts";
-import type { ChatTurn } from "./contracts.ts";
-import { GREETING } from "./orchestrate.ts";
+import { GREETING } from "./chat/index.ts";
+import { toSpoken } from "./chat/spoken.ts";
+import type { ChatTurn } from "./chat/types.ts";
 
 const SPEAK_URL = "https://api.deepgram.com/v1/speak?model=aura-2-thalia-en";
 const LISTEN_URL =
@@ -105,7 +106,8 @@ function questionFromArguments(raw: unknown): string {
   }
 }
 
-async function answerFunctionCall(raw: string, env: Env, remote: WebSocket, knowledge: unknown): Promise<boolean> {
+/** Answers the voice agent's `politik` function call with the reply as speech. Returns true when `raw` was a function call. */
+export async function answerFunctionCall(raw: string, env: Env, remote: WebSocket, knowledge: unknown): Promise<boolean> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -124,9 +126,9 @@ async function answerFunctionCall(raw: string, env: Env, remote: WebSocket, know
     let content = "I could not check that just now.";
     if (name === "politik" && question) {
       try {
-        const result = await askShared(question, env, undefined, knowledge);
-        const reply = result.reply?.trim();
-        if (reply) content = reply.slice(0, 800);
+        const result = await askShared(question, env, knowledge);
+        const spoken = toSpoken(result.reply ?? "");
+        if (spoken) content = spoken;
       } catch {
         content = "I could not check that just now.";
       }
@@ -434,15 +436,8 @@ export async function think(request: Request, env: Env): Promise<Response> {
     const messages = Array.isArray(body.messages) ? body.messages : [];
     const message = latestUserText(messages);
     if (!message) return completion(GREETING, stream);
-    const result = await askShared(
-      message,
-      env,
-      undefined,
-      knowledgeFromMessages(messages),
-      undefined,
-      historyFromMessages(messages),
-    );
-    return completion(result.reply || GREETING, stream);
+    const result = await askShared(message, env, knowledgeFromMessages(messages), historyFromMessages(messages));
+    return completion(toSpoken(result.reply ?? "") || GREETING, stream);
   } catch {
     return completion("I could not check that just now.", stream);
   }

@@ -13,11 +13,18 @@ export const MAX_QUOTE_CHARS = 280;
 const WORD_SLACK = 60;
 
 /**
+ * One marker: one or two digits in square brackets, or a comma-separated group of them ("[1, 2]"). Spaces and tabs may
+ * sit inside the brackets ("[ 1 ]"). Three or more digits are not a marker, so a year ("In [2024] it passed") or a
+ * neutral citation ("Tan v Lim [2020] SGCA 5") is left as written (sources never reach 100).
+ */
+const MARKER = String.raw`\[[ \t]*\d{1,2}(?:[ \t]*,[ \t]*\d{1,2})*[ \t]*\]`;
+
+/**
  * A run of adjacent markers with the horizontal space before it: "[2]", "[2][1]", "[2] [1]" or "[1, 2]".
  * Group 1 is the space, group 2 the markers. A match starts at the start of its space (the lookbehind), so a long
  * run of spaces is scanned once, not once per space.
  */
-const MARKER_RUN = /(?<![ \t])([ \t]*)(\[\d+(?:[ \t]*,[ \t]*\d+)*\](?:[ \t]*\[\d+(?:[ \t]*,[ \t]*\d+)*\])*)/g;
+const MARKER_RUN = new RegExp(String.raw`(?<![ \t])([ \t]*)(${MARKER}(?:[ \t]*${MARKER})*)`, "g");
 
 /** What may follow a removed marker without a space being needed between the words around it. */
 const NO_SPACE_BEFORE = /[\s.,;:!?)\]]/;
@@ -68,7 +75,7 @@ export function postTitle(post: { author: string }): string {
 }
 
 /** The citation for a source, numbered `n`, or undefined when the source cannot be cited (no record or post, or no http(s) link). */
-function citationOf(source: Source, n: number): Citation | undefined {
+export function citationOf(source: Source, n: number): Citation | undefined {
   if (source.kind === "post") {
     const post = source.post;
     const url = typeof post?.url === "string" ? post.url.trim() : "";

@@ -1,23 +1,13 @@
-import type {
-  AskResponse,
-  Category,
-  ChatTurn,
-  SourceItem,
-  SourceName,
-  TaggedItem,
-} from "./contracts.ts";
-import { categorise } from "./categoriser.ts";
+import { chat, normalizeChatRequest } from "./chat/index.ts";
+import type { ChatResponse } from "./chat/types.ts";
 import type { D1Like } from "./data/d1.ts";
-import { listRecords } from "./data/store.ts";
-import { answer, wantsPolicy } from "./orchestrate.ts";
-import { recordItems, siteItems, topicQuestion } from "./select.ts";
-import { fetchOpenAlex } from "./sources/openalex.ts";
-import { transcribeSpeech } from "./sources/elevenlabs.ts";
 
 export interface Env {
   ASSETS: Fetcher;
   DB: D1Like;
   GROQ_API_KEY?: string;
+  GROQ_CHAT_MODEL?: string;
+  GROQ_ROUTER_MODEL?: string;
   TYPESAFE_API_KEY?: string;
   OPENAI_API_KEY?: string;
   ELEVENLABS_API_KEY?: string;
@@ -26,184 +16,30 @@ export interface Env {
   MAPBOX_ACCESS_TOKEN?: string;
 }
 
-const CATEGORIES = new Set<string>([
-  "bill-stuck",
-  "local-worry",
-  "lab-money",
-  "research",
-  "speech",
-  "other",
-]);
-
-/** The policy records as chat items. A store error, such as an unseeded or unmigrated D1, means none. */
-async function policyItems(db: D1Like): Promise<TaggedItem[]> {
-  try {
-    return recordItems(await listRecords(db));
-  } catch (error) {
-    console.warn("ask: the policy store could not be read", error);
-    return [];
-  }
+/**
+ * Answers a question. `knowledge` (posts the client saved from /saying) and `history` (the earlier turns) are read
+ * as untrusted input and cut to the limits in `normalizeChatRequest`. It never throws.
+ */
+export function ask(message: string, env: Env, knowledge?: unknown, history?: unknown): Promise<ChatResponse> {
+  return chat(normalizeChatRequest({ message, knowledge, history }), env);
 }
 
-export async function ask(
-  message: string,
-  env: Env,
-  audioUrl?: string,
-  knowledge?: unknown,
-  _who?: unknown,
-  history?: unknown,
-): Promise<AskResponse> {
-  const turns = normalizeHistory(history);
-  if (!wantsPolicy(message, turns)) {
-    return answer({ message, items: [], history: turns });
-  }
+const inflightAsks = new Map<string, Promise<ChatResponse>>();
 
-  const known = normalizeKnowledge(knowledge);
-  const topic = topicQuestion(message, turns);
-  const [records, openalexItems, speechItems] = await Promise.all([
-    policyItems(env.DB),
-    fetchOpenAlex(topic.slice(0, 300)),
-    audioUrl
-      ? transcribeSpeech({
-          apiKey: env.ELEVENLABS_API_KEY,
-          audioUrl,
-        })
-      : Promise.resolve([] as SourceItem[]),
-  ]);
-  const taggedSources = await Promise.all(
-    [...openalexItems, ...speechItems].map((item) => tagItem(item, env.TYPESAFE_API_KEY)),
-  );
-  const pool = dedupe([...records, ...siteItems(), ...known, ...taggedSources]);
-  return answer({
-    message,
-    items: pool,
-    history: turns,
-    typesafeKey: env.TYPESAFE_API_KEY,
-  });
-}
-
-const inflightAsks = new Map<string, Promise<AskResponse>>();
-
+/** What makes two questions the same: the words (case and spacing aside), the saved posts and the earlier turns. */
 function askKey(message: string, knowledge: unknown, history: unknown): string {
-  const text = message.trim().toLowerCase().replace(/\s+/g, " ");
-  let notes = "";
-  let prior = "";
-  try {
-    if (knowledge !== undefined) notes = JSON.stringify(knowledge);
-    if (history !== undefined) prior = JSON.stringify(history);
-  } catch {
-    notes = "";
-    prior = "";
-  }
-  return `${text}\n${notes}\n${prior}`;
+  const input = normalizeChatRequest({ message, knowledge, history });
+  return `${input.message.toLowerCase().replace(/\s+/g, " ")}\n${JSON.stringify(input.knowledge)}\n${JSON.stringify(input.history)}`;
 }
 
-export function askShared(
-  message: string,
-  env: Env,
-  audioUrl?: string,
-  knowledge?: unknown,
-  who?: unknown,
-  history?: unknown,
-): Promise<AskResponse> {
+/** Like `ask`, but a question already being answered gives the same answer to everyone who asks it meanwhile. */
+export function askShared(message: string, env: Env, knowledge?: unknown, history?: unknown): Promise<ChatResponse> {
   const key = askKey(message, knowledge, history);
   const existing = inflightAsks.get(key);
   if (existing) return existing;
-  const work = ask(message, env, audioUrl, knowledge, who, history).finally(() => {
+  const work = ask(message, env, knowledge, history).finally(() => {
     if (inflightAsks.get(key) === work) inflightAsks.delete(key);
   });
   inflightAsks.set(key, work);
   return work;
-}
-
-function dedupe(items: TaggedItem[]): TaggedItem[] {
-  const seen = new Set<string>();
-  const out: TaggedItem[] = [];
-  for (const item of items) {
-    const key = item.title.trim().toLowerCase();
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(item);
-  }
-  return out;
-}
-
-function normalizeHistory(raw: unknown): ChatTurn[] {
-  if (!Array.isArray(raw)) return [];
-  const out: ChatTurn[] = [];
-  for (const row of raw) {
-    if (!row || typeof row !== "object") continue;
-    const record = row as Record<string, unknown>;
-    const role = record.role === "assistant" || record.role === "user" ? record.role : null;
-    if (!role || typeof record.text !== "string") continue;
-    const text = record.text.trim().slice(0, 2000);
-    if (!text) continue;
-    const titles = Array.isArray(record.titles)
-      ? record.titles
-          .filter((title): title is string => typeof title === "string" && title.trim() !== "")
-          .slice(0, 8)
-      : undefined;
-    const turn: ChatTurn = { role, text };
-    if (titles && titles.length > 0) turn.titles = titles;
-    out.push(turn);
-  }
-  return out.slice(-8);
-}
-
-function normalizeKnowledge(raw: unknown): TaggedItem[] {
-  if (!Array.isArray(raw)) return [];
-  const out: TaggedItem[] = [];
-  for (let i = 0; i < raw.length; i++) {
-    const item = raw[i];
-    if (!item || typeof item !== "object") continue;
-    const row = item as Record<string, unknown>;
-    if (typeof row.title !== "string" || typeof row.plain !== "string") continue;
-    const category =
-      typeof row.category === "string" && CATEGORIES.has(row.category)
-        ? (row.category as Category)
-        : "other";
-    const tags = Array.isArray(row.tags)
-      ? row.tags
-          .map((t) => {
-            if (typeof t === "string") return t;
-            if (t && typeof t === "object" && typeof (t as { text?: unknown }).text === "string") {
-              return (t as { text: string }).text;
-            }
-            return "";
-          })
-          .filter(Boolean)
-      : [];
-    const source =
-      typeof row.source === "string" ? (row.source as SourceName) : "briefing";
-    const tagged: TaggedItem = {
-      id: typeof row.id === "string" ? row.id : `kb-${i}`,
-      source,
-      title: row.title,
-      plain: row.plain,
-      category,
-      tags,
-    };
-    if (typeof row.url === "string" && row.url) tagged.url = row.url;
-    if (typeof row.happenedAt === "string" && row.happenedAt.trim()) {
-      tagged.happenedAt = row.happenedAt.trim();
-    }
-    if (
-      typeof row.jurisdiction === "string" &&
-      row.jurisdiction.trim() &&
-      row.jurisdiction.trim() !== "Unplaced"
-    ) {
-      tagged.jurisdiction = row.jurisdiction.trim();
-    }
-    out.push(tagged);
-  }
-  return out;
-}
-
-async function tagItem(item: SourceItem, apiKey?: string): Promise<TaggedItem> {
-  const { category, tags } = await categorise(
-    `${item.title}. ${item.plain}`,
-    apiKey,
-    item.source,
-  );
-  return { ...item, category, tags: tags.map((t) => t.text) };
 }

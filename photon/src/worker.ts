@@ -1,13 +1,11 @@
-import type { AskResponse } from "./contracts.ts";
 import { askShared, type Env } from "./ask.ts";
+import { failureResponse, normalizeChatRequest } from "./chat/index.ts";
 import { loadMap } from "./map.ts";
 import { BLUESKY_URL, GROUP_URL, buildSaying } from "./saying.ts";
 import { loadCatalog } from "./catalog.ts";
 import { proxyAgent, proxyListen, speak, think } from "./voice.ts";
 
 export type { Env };
-
-const FAIL_REPLY = "I could not check that just now. Try again in a minute.";
 
 function json(data: unknown, status = 200, cache?: string): Response {
   const headers: Record<string, string> = { "content-type": "application/json" };
@@ -19,30 +17,14 @@ function json(data: unknown, status = 200, cache?: string): Response {
 }
 
 function failResponse(): Response {
-  const body: AskResponse = {
-    reply: FAIL_REPLY,
-    category: "other",
-    items: [],
-  };
-  return json(body);
+  return json(failureResponse());
 }
 
 async function handleAsk(request: Request, env: Env): Promise<Response> {
   try {
-    const body = (await request.json()) as {
-      message?: unknown;
-      audioUrl?: unknown;
-      who?: unknown;
-      knowledge?: unknown;
-      history?: unknown;
-    };
-    const message = typeof body.message === "string" ? body.message.trim() : "";
-    if (!message) return json({ error: "Ask a question." }, 400);
-    const audioUrl =
-      typeof body.audioUrl === "string" && body.audioUrl.trim()
-        ? body.audioUrl.trim()
-        : undefined;
-    return json(await askShared(message, env, audioUrl, body.knowledge, body.who, body.history));
+    const input = normalizeChatRequest(await request.json());
+    if (!input.message) return json({ error: "Ask a question." }, 400);
+    return json(await askShared(input.message, env, input.knowledge, input.history));
   } catch {
     return failResponse();
   }

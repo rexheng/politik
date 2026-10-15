@@ -3,13 +3,11 @@ import { readFileSync } from "node:fs";
 import { after, afterEach, before, beforeEach, describe, mock, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { ask, type Env } from "../../photon/src/ask.ts";
 import { loadCatalog, type Catalog } from "../../photon/src/catalog.ts";
 import type { D1Like } from "../../photon/src/data/d1.ts";
-import type { Manifest, Passage, PolicyRecord, RecordSummary } from "../../photon/src/data/schema.ts";
+import type { Manifest, Passage, PolicyRecord } from "../../photon/src/data/schema.ts";
 import { snapshotStatements } from "../../photon/src/data/seed.ts";
 import { listRecords } from "../../photon/src/data/store.ts";
-import { recordItems } from "../../photon/src/select.ts";
 import { openTestDb } from "../helpers/d1.ts";
 
 const fixtureDir = fileURLToPath(new URL("../fixtures/snapshot/", import.meta.url));
@@ -194,108 +192,5 @@ describe("loadCatalog without data", () => {
 
   test("a missing binding gives empty lists", async () => {
     assert.deepEqual(await loadCatalog(undefined as unknown as D1Like), EMPTY);
-  });
-});
-
-describe("recordItems", () => {
-  let summaries: RecordSummary[];
-  let dispose: () => Promise<void>;
-
-  before(async () => {
-    const opened = await openTestDb();
-    dispose = opened.dispose;
-    await seed(opened.db);
-    summaries = await listRecords(opened.db);
-  });
-  after(() => dispose());
-
-  test("a record becomes a policy item whose plain text is its summary", () => {
-    const item = recordItems(summaries).find((i) => i.id === "ca-sb-53-2025")!;
-    const sb53 = policies.find((r) => r.id === "ca-sb-53-2025")!;
-    assert.equal(item.source, "policy");
-    assert.equal(item.title, sb53.title);
-    assert.equal(item.plain, sb53.summary.value);
-    assert.equal(item.url, sb53.url);
-    assert.equal(item.happenedAt, sb53.published);
-    assert.equal(item.jurisdiction, "US-CA");
-  });
-
-  test("one item per record, in the order given", () => {
-    assert.deepEqual(
-      recordItems(summaries).map((i) => i.id),
-      summaries.map((r) => r.id),
-    );
-    assert.deepEqual(recordItems([]), []);
-  });
-
-  test("happenedAt falls back to the status date, and is left out when there is neither", () => {
-    const base = summaries[0];
-    const noPublished = { ...base, published: undefined, statusDate: "2026-01-01" };
-    const noDates = { ...base, published: undefined, statusDate: undefined };
-    assert.equal(recordItems([noPublished])[0].happenedAt, "2026-01-01");
-    assert.equal("happenedAt" in recordItems([noDates])[0], false);
-  });
-});
-
-describe("the chat pool", () => {
-  let realFetch: typeof fetch;
-  before(() => {
-    realFetch = globalThis.fetch;
-    // OpenAlex is the only network call on this path; make it fail fast and offline.
-    globalThis.fetch = (async () => new Response("{}", { status: 503 })) as typeof fetch;
-  });
-  after(() => {
-    globalThis.fetch = realFetch;
-  });
-  silenceWarnings();
-
-  const envFor = (db: D1Like) => ({ DB: db }) as unknown as Env;
-  const question = "What is the Transparency in Frontier Artificial Intelligence Act?";
-
-  test("answers from the seeded policy records", async () => {
-    const { db, dispose } = await openTestDb();
-    try {
-      await seed(db);
-      const result = await ask(question, envFor(db));
-      const sb53 = policies.find((r) => r.id === "ca-sb-53-2025")!;
-      const card = result.items.find((c) => c.title === sb53.title);
-      assert.ok(card, `cards: ${result.items.map((c) => c.title).join(" | ")}`);
-      assert.equal(card.source, "policy");
-      assert.equal(card.plain, sb53.summary.value);
-      assert.match(result.reply, /SB 53 requires/);
-    } finally {
-      await dispose();
-    }
-  });
-
-  test("an unseeded D1 still gets a reply, with no cards", async () => {
-    const { db, dispose } = await openTestDb();
-    try {
-      const result = await ask(question, envFor(db));
-      assert.deepEqual(result.items, []);
-      assert.equal(typeof result.reply, "string");
-      assert.ok(result.reply.length > 0);
-    } finally {
-      await dispose();
-    }
-  });
-
-  test("a D1 that was never migrated still gets a reply, with no cards", async () => {
-    const { db, dispose } = await openTestDb({ migrate: false });
-    try {
-      const result = await ask(question, envFor(db));
-      assert.deepEqual(result.items, []);
-      assert.ok(result.reply.length > 0);
-    } finally {
-      await dispose();
-    }
-  });
-
-  test("a broken or missing binding still gets a reply, with no cards", async () => {
-    for (const DB of [brokenDb, undefined]) {
-      const result = await ask(question, { DB } as unknown as Env);
-      assert.deepEqual(result.items, []);
-      assert.ok(result.reply.length > 0);
-    }
   });
 });
