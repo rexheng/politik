@@ -51,6 +51,7 @@
 - Produces:
   - `types.ts`: `Intent`, `Route`, `Source`, `Citation`, `ChatResponse` (spec §3–§4); `ChatTurn = { role: "user" | "assistant"; text: string }`; `ChatInput = { message: string; history: ChatTurn[]; knowledge: SourceItem[] }`; `ComposeOut = { answer: string; general: string | null; followUps: string[] }`.
   - `getPassages(db: D1Like, ids: string[]): Promise<Passage[]>`. It returns passages in the order of `ids`, skips unknown ids, and returns `[]` for an empty list.
+  - `searchPassages` gains an optional 5th argument, `opts?: { match?: "all" | "any" }`. The default `"all"` keeps today's behaviour. `"any"` joins the quoted terms with `OR`. Add `toFtsQuery(text, match = "all")`. (Ruling R7: `retrieve` in Task 2 uses `"all"` and falls back to `"any"` when it gets fewer than 3 hits.)
   - `RouteSchema` (zod).
   - `route(message: string, history: ChatTurn[], llm: Llm): Promise<Route>`. It calls `llm` with `name: "route"` and the zod schema. The system prompt lists the coverage (US-CA, SG, the 7 topics) and the intent definitions. On any error it returns `fallbackRoute(message, history)`.
   - `fallbackRoute(message: string, history: ChatTurn[]): Route`:
@@ -63,6 +64,8 @@
 
 - [ ] **Step 1: Write failing tests.**
   - `getPassages`: it returns the 2 passages of `ca-sb-53-2025` in the given order and skips `"nope#1"`. `[]` → `[]`.
+  - `toFtsQuery("frontier consent", "any")` → `'"frontier" OR "consent"'`.
+  - `searchPassages(db, "frontier consent")` → `[]` (AND). With `{ match: "any" }`, hits come from both the CA bills and `sg-pdpa-2012`.
   - `fallbackRoute("hi")` → `greeting`.
   - `fallbackRoute("What is going on?")` → `brief` with `search === ""`.
   - `fallbackRoute("Explain SB 53 in detail")` → `explain`, `detail: true`, `recordHints` includes `"SB 53"`.
@@ -89,6 +92,7 @@
     - It implements the table in spec §3.2.
     - "Recent" means `since = snapshotDate − (route.sinceDays ?? 120) days`, as an ISO date.
     - It dedupes by record (one best passage per record for `brief`), caps at 12, and truncates passage text to 1,200 chars.
+    - Every `searchPassages` call uses `match: "all"` first, then retries with `match: "any"` when it gets fewer than 3 hits (R7).
     - It never throws on Bluesky failure.
     - For `out-of-scope`, if the top `searchPassages` hit has `score ≥ OOS_PROMOTE_SCORE` (a named constant; pick it from the fixture so `"frontier AI"` promotes and `"EU AI Act"` does not), it returns those hits with `promoted: true`, and the caller treats the question as `explain`. In every other case `promoted` is `false`.
   - `type Scorer = (question: string, candidates: { id: string; text: string }[]) => Promise<Record<string, number>>`.
