@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import { describe, mock, test, beforeEach, afterEach } from "node:test";
 
 import type { Env } from "../../photon/src/ask.ts";
-import { IDLE_MS, MAX_SESSION_MS, VOICE_THINK_PROVIDER, bridgeSockets, sessionGuard, tuneSettings, type BridgeSocket, type Timers } from "../../photon/src/voice.ts";
+import { readFileSync } from "node:fs";
+import { IDLE_MS, MAX_FRAME_BYTES, MAX_SESSION_MS, VOICE_LISTEN_PROVIDER, VOICE_SPEAK_PROVIDER, VOICE_THINK_PROVIDER, bridgeSockets, sessionGuard, tuneSettings, type BridgeSocket, type Timers } from "../../photon/src/voice.ts";
 
 const ORIGIN = "https://politik.test";
 const OWN = "https://politik.test/api/voice/think";
@@ -89,7 +90,7 @@ describe("tuneSettings: only a rewritten copy of the page's JSON is ever sent on
     assert.doesNotMatch(text, /evil/);
     assert.deepEqual(msg.agent.think.list, ["fine"]);
     assert.deepEqual(msg.agent.speak.tags, ["ok"]);
-    assert.deepEqual(msg.agent.speak.provider, { type: "deepgram", model: "aura" });
+    assert.deepEqual(msg.agent.speak.provider, VOICE_SPEAK_PROVIDER, "the voice is the server's, and the URL-valued voice the page sent is gone");
   });
 
   test("JSON written inside a string is read through: agent, think and speak as strings, and strings inside them", () => {
@@ -211,6 +212,172 @@ describe("tuneSettings: only a rewritten copy of the page's JSON is ever sent on
     assert.equal(Object.getPrototypeOf(msg.agent.think), Object.prototype);
     assert.equal(({} as { endpoint?: unknown }).endpoint, undefined);
     assert.equal(Object.keys(msg.agent.think).includes("__proto__"), false);
+  });
+});
+
+describe("tuneSettings: a frame from the page is at most 256 KB", () => {
+  /** A valid JSON text of exactly `bytes` UTF-8 bytes. */
+  const frameOfBytes = (bytes: number, filler = "x") => {
+    const head = '{"type":"KeepAlive","pad":"';
+    const tail = '"}';
+    const room = bytes - Buffer.byteLength(head + tail);
+    return head + filler.repeat(room / Buffer.byteLength(filler)) + tail;
+  };
+
+  test("the limit is 256 KB", () => {
+    assert.equal(MAX_FRAME_BYTES, 256 * 1024);
+  });
+
+  test("a frame of exactly 256 KB is read; one byte more is dropped", () => {
+    const at = frameOfBytes(MAX_FRAME_BYTES);
+    assert.equal(Buffer.byteLength(at), MAX_FRAME_BYTES);
+    assert.ok(tuneSettings(at, ORIGIN), "256 KB is allowed");
+    assert.equal(tuneSettings(frameOfBytes(MAX_FRAME_BYTES + 1), ORIGIN), null);
+  });
+
+  test("a 300 KB frame is dropped, valid JSON or not", () => {
+    assert.equal(tuneSettings(frameOfBytes(300 * 1024), ORIGIN), null);
+    assert.equal(tuneSettings("x".repeat(300 * 1024), ORIGIN), null);
+    assert.equal(tuneSettings(settings({ think: { prompt: "p".repeat(300 * 1024) } }), ORIGIN), null);
+  });
+
+  test("it is bytes that count, not characters: 140,000 two-byte characters are 280,000 bytes", () => {
+    const frame = frameOfBytes(280_000, "é");
+    assert.ok(frame.length < MAX_FRAME_BYTES, "fewer than 256 K characters");
+    assert.equal(tuneSettings(frame, ORIGIN), null);
+  });
+});
+
+describe("tuneSettings: URLs are taken out of the whole Settings message, not only think and speak", () => {
+  test("listen, audio, context and keys at the top of the message lose their URL keys and URL values", () => {
+    const { msg, text } = tune(
+      JSON.stringify({
+        type: "Settings",
+        callback_url: EVIL,
+        webhook: "https://evil.example/w",
+        notes: { link: "//evil.example/n", fine: "ok" },
+        audio: { input: { encoding: "linear16", sample_rate: 16000, url: EVIL }, output: { encoding: "linear16", container: "wss://evil.example/c" }, endpoint: EVIL },
+        agent: {
+          language: "en",
+          listen: { provider: { type: "deepgram", model: "nova-3", url: EVIL, keyterms: ["Politik", "https://evil.example/k"] }, endpoint: { url: EVIL } },
+          context: { messages: [{ type: "History", role: "user", content: "hello", url: EVIL }, { type: "History", role: "assistant", content: "https://evil.example/c" }], endpoint: EVIL },
+        },
+      }),
+    );
+    assert.doesNotMatch(text, /evil/);
+    assert.deepEqual(msg.audio, { input: { encoding: "linear16", sample_rate: 16000 }, output: { encoding: "linear16" } });
+    assert.deepEqual(msg.agent.listen.provider.keyterms, ["Politik"]);
+    assert.deepEqual(msg.agent.context.messages, [{ type: "History", role: "user", content: "hello" }, { type: "History", role: "assistant" }]);
+    assert.deepEqual(msg.notes, { fine: "ok" });
+    assert.equal(msg.agent.language, "en");
+  });
+
+  test("any message that is not free text is scrubbed whatever its type: updates, unknown types, no type", () => {
+    for (const type of ["UpdateListen", "UpdatePrompt", "UpdateSpeak", "settings", "Nonsense", undefined]) {
+      const { text } = tune(JSON.stringify({ type, prompt: "https://evil.example/p", agent: { audio: { x: EVIL } }, deep: { er: { est: ["//evil.example/z"] } } }));
+      assert.doesNotMatch(text, /evil/, String(type));
+    }
+  });
+
+  test("text that people write is left alone: injected messages and function responses keep a URL as their content", () => {
+    for (const message of [
+      { type: "InjectUserMessage", content: "https://example.com/a" },
+      { type: "InjectAgentMessage", message: "see https://example.com" },
+      { type: "FunctionCallResponse", id: "f1", name: "politik", content: "//example.com" },
+      { type: "injectusermessage", content: "https://example.com/b", url: "kept" },
+    ]) {
+      assert.deepEqual(tune(JSON.stringify(message)).msg, message);
+    }
+  });
+
+  test("a URL inside a sentence is text, not a URL: it is kept in a greeting, a prompt or a history message", () => {
+    const { msg } = tune(settings({ greeting: "Hi — see https://politik.example for more", context: { messages: [{ type: "History", role: "user", content: "what is https://example.com?" }] }, think: { prompt: "Read https://example.com/rules first." } }));
+    assert.equal(msg.agent.greeting, "Hi — see https://politik.example for more");
+    assert.equal(msg.agent.context.messages[0].content, "what is https://example.com?");
+    assert.match(msg.agent.think.prompt, /^Read https:\/\/example\.com\/rules first\./);
+  });
+
+  test("Deepgram's own fields are kept, including ones that only look like URL words: endpointing, keyterms, sample_rate, history", () => {
+    const keep = {
+      type: "Settings",
+      tags: ["demo"],
+      experimental: false,
+      mip_opt_out: false,
+      flags: { history: true },
+      audio: { input: { encoding: "linear16", sample_rate: 24000 }, output: { encoding: "linear16", sample_rate: 24000, bitrate: 48000, container: "none" } },
+      agent: {
+        language: "en",
+        greeting: "Hi",
+        context: { messages: [{ type: "History", role: "user", content: "hi" }, { type: "History", role: "assistant", content: "hello" }, { type: "History", function_calls: [{ id: "c1", name: "politik", client_side: true, arguments: '{"question":"hi"}', response: "ok" }] }] },
+        listen: { provider: { type: "deepgram", model: "nova-3", keyterms: ["Politik"], smart_format: true, endpointing: 300 } },
+        speak: { provider: { type: "deepgram", model: "aura-2-thalia-en" } },
+      },
+    };
+    assert.deepEqual(tune(JSON.stringify(keep)).msg, keep);
+  });
+
+  test("a key that names a URL is dropped from anywhere in the tree, but 'security' and 'during' stay", () => {
+    const { msg } = tune(JSON.stringify({ type: "Settings", baseUrl: "x", agent: { a: { api_url: 1, image_url: 2, webhookUri: 3, security_level: 4, during: 5, endpointing: 6 } } }));
+    assert.equal("baseUrl" in msg, false);
+    assert.deepEqual(msg.agent.a, { security_level: 4, during: 5, endpointing: 6 });
+  });
+});
+
+describe("tuneSettings: the voices and the listening model are the server's", () => {
+  const page = (relativePath: string) => readFileSync(new URL(`../../photon/public/${relativePath}`, import.meta.url), "utf8");
+
+  test("the constants are what the page asks for today", () => {
+    assert.deepEqual(VOICE_SPEAK_PROVIDER, { type: "deepgram", model: "aura-2-thalia-en" });
+    assert.deepEqual(VOICE_LISTEN_PROVIDER, { type: "deepgram", model: "nova-3" });
+    const js = page("app.js");
+    assert.match(js, /listen: \{\s*provider: \{ type: "deepgram", model: "nova-3" \}/);
+    assert.match(js, /speak: \{\s*provider: \{ type: "deepgram", model: "aura-2-thalia-en" \}/);
+  });
+
+  test("a speak provider and model the page chose are overridden, whatever the provider", () => {
+    for (const provider of [{ type: "eleven_labs", model_id: "eleven_turbo", voice_id: "v" }, { type: "deepgram", model: "aura-2-expensive-en" }, { type: "open_ai", model: "tts-1-hd", voice: "alloy" }, "nonsense", null, ["x"]]) {
+      const { msg } = tune(settings({ speak: { provider, language: "en" } }));
+      assert.deepEqual(msg.agent.speak.provider, VOICE_SPEAK_PROVIDER, JSON.stringify(provider));
+      assert.equal(msg.agent.speak.language, "en", "other speak settings are the page's");
+    }
+  });
+
+  test("a speak section with no provider is given the server's, as a list and in UpdateSpeak too", () => {
+    assert.deepEqual(tune(settings({ speak: {} })).msg.agent.speak, { provider: VOICE_SPEAK_PROVIDER });
+    const list = tune(settings({ speak: [{ provider: { type: "x", model: "y" } }, { endpoint: EVIL }] })).msg.agent.speak;
+    assert.deepEqual(list, [{ provider: VOICE_SPEAK_PROVIDER }, { provider: VOICE_SPEAK_PROVIDER }]);
+    const update = tune(JSON.stringify({ type: "UpdateSpeak", speak: { provider: { type: "eleven_labs", model_id: "m" } } })).msg;
+    assert.deepEqual(update.speak.provider, VOICE_SPEAK_PROVIDER);
+  });
+
+  test("a listen model the page chose is overridden, and the provider is Deepgram's", () => {
+    for (const provider of [{ type: "deepgram", model: "nova-2-medical" }, { type: "open_ai", model: "whisper-1" }, {}, "nonsense", null]) {
+      const { msg } = tune(settings({ listen: { provider } }));
+      assert.deepEqual(msg.agent.listen.provider, VOICE_LISTEN_PROVIDER, JSON.stringify(provider));
+    }
+  });
+
+  test("the page's other listen settings stay (keyterms, smart_format), minus any URL", () => {
+    const { msg } = tune(settings({ listen: { provider: { type: "deepgram", model: "nova-3", keyterms: ["SB 53"], smart_format: true, url: EVIL } } }));
+    assert.deepEqual(msg.agent.listen.provider, { type: "deepgram", model: "nova-3", keyterms: ["SB 53"], smart_format: true });
+  });
+
+  test("UpdateListen, a top-level listen and a list of listen sections are pinned the same way", () => {
+    const update = tune(JSON.stringify({ type: "UpdateListen", listen: { provider: { type: "deepgram", model: "nova-2" } } })).msg;
+    assert.deepEqual(update.listen.provider, VOICE_LISTEN_PROVIDER);
+    const top = tune(JSON.stringify({ type: "Settings", listen: { provider: { model: "other" } }, agent: {} })).msg;
+    assert.deepEqual(top.listen.provider, VOICE_LISTEN_PROVIDER);
+    const list = tune(settings({ listen: [{ provider: { model: "a" } }, { provider: { model: "b" } }] })).msg.agent.listen;
+    assert.deepEqual(list, [{ provider: VOICE_LISTEN_PROVIDER }, { provider: VOICE_LISTEN_PROVIDER }]);
+  });
+
+  test("no listen section is made up for a message that has none", () => {
+    assert.equal("listen" in tune(settings({ language: "en" })).msg.agent, false);
+    assert.equal("listen" in tune('{"type":"KeepAlive"}').msg, false);
+  });
+
+  test("the think provider is still the server's", () => {
+    assert.deepEqual(tune(settings({ think: { provider: { type: "anthropic", model: "big" } } })).msg.agent.think.provider, VOICE_THINK_PROVIDER);
   });
 });
 
@@ -397,6 +564,22 @@ describe("bridgeSockets", () => {
     for (const raw of ['{"type":"KeepAlive","n":NaN}', '﻿{"type":"KeepAlive"}', '{"type":"KeepAlive"} trailing', "hello", "", "5"]) server.message(raw);
     assert.deepEqual(remote.sent, []);
     assert.deepEqual(server.closes, [], "the session goes on");
+  });
+
+  test("a 300 KB text frame is dropped, not forwarded, and the session goes on", () => {
+    const { server, remote } = bridge();
+    server.message(`{"type":"KeepAlive","pad":"${"x".repeat(300 * 1024)}"}`);
+    assert.deepEqual(remote.sent, []);
+    assert.deepEqual(server.closes, []);
+    server.message('{"type":"KeepAlive"}');
+    assert.deepEqual(remote.sent, ['{"type":"KeepAlive"}']);
+  });
+
+  test("a large audio frame is not held to the text limit", () => {
+    const { server, remote } = bridge();
+    const audio = new Uint8Array(300 * 1024);
+    server.message(audio);
+    assert.deepEqual(remote.sent, [audio]);
   });
 
   test("other JSON messages (keep-alives, injected text) are forwarded, as the same JSON written again", () => {

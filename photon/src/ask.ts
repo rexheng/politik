@@ -17,6 +17,8 @@ export interface Env {
   TELEGRAM_WEBHOOK_SECRET?: string;
   /** The Workers Rate Limiting binding (wrangler.jsonc `ratelimits`): 10 questions a minute for each IP address. */
   ASK_LIMITER?: RateLimiter;
+  /** A second binding, for opening a voice socket (the agent and the listen upgrades): 2 a minute for each IP address. */
+  VOICE_LIMITER?: RateLimiter;
   DEEPGRAM_API_KEY?: string;
   MAPBOX_ACCESS_TOKEN?: string;
 }

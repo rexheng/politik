@@ -505,17 +505,17 @@ describe("surfaces", () => {
 
       test("over the limit: HTTP 429 with a short JSON error, and no connection to Deepgram", async () => {
         const { binding, keys } = limiter(false);
-        const { result, urls } = await open(upgrade("203.0.113.7"), env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
+        const { result, urls } = await open(upgrade("203.0.113.7"), env({ VOICE_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
         assert.equal(result.status, 429);
         assert.match(result.headers.get("content-type") ?? "", /^application\/json/);
         assert.deepEqual(await result.json(), { error: BUSY_REPLY });
         assert.deepEqual(urls, [], "Deepgram was not asked for a session");
-        assert.deepEqual(keys, ["203.0.113.7"], "keyed on CF-Connecting-IP, the same limiter as the questions");
+        assert.deepEqual(keys, ["203.0.113.7"], "keyed on CF-Connecting-IP, on the voice limiter");
       });
 
       test("under the limit the session is opened as before, after one check on the caller's IP", async () => {
         const { binding, keys } = limiter(true);
-        const { result, urls } = await open(upgrade("198.51.100.4"), env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
+        const { result, urls } = await open(upgrade("198.51.100.4"), env({ VOICE_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
         assert.deepEqual(urls, [DEEPGRAM_AGENT], "one connection to Deepgram, which fails here, so 502");
         assert.equal(result.status, 502);
         assert.deepEqual(keys, ["198.51.100.4"]);
@@ -523,17 +523,17 @@ describe("surfaces", () => {
 
       test("the limit is per caller: one address over its allowance does not stop another", async () => {
         const { binding } = limiter((key) => key !== "203.0.113.7");
-        const e = env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" });
+        const e = env({ VOICE_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" });
         assert.equal((await open(upgrade("203.0.113.7"), e)).result.status, 429);
         assert.equal((await open(upgrade("203.0.113.8"), e)).result.status, 502);
       });
 
-      test("the same skip rules as the questions: no binding, no address, a local request, or a limiter that fails", async () => {
+      test("the same skip rules as the questions, on the voice limiter: no binding, no address, a local request, or a limiter that fails", async () => {
         const e = env({ DEEPGRAM_API_KEY: "dg-test" });
         assert.deepEqual((await open(upgrade("203.0.113.7"), e)).urls, [DEEPGRAM_AGENT], "no binding");
 
         const { binding, keys } = limiter(false);
-        const limited = env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" });
+        const limited = env({ VOICE_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" });
         assert.deepEqual((await open(upgrade(undefined), limited)).urls, [DEEPGRAM_AGENT], "no CF-Connecting-IP");
         assert.deepEqual((await open(upgrade("127.0.0.1", "http://localhost:8787/api/voice/v1/agent/converse"), limited)).urls, ["https://agent.deepgram.com/v1/agent/converse"], "wrangler dev");
         assert.deepEqual(keys, []);
@@ -543,22 +543,22 @@ describe("surfaces", () => {
             throw new Error("limiter down");
           },
         };
-        assert.deepEqual((await open(upgrade("203.0.113.7"), env({ ASK_LIMITER: broken, DEEPGRAM_API_KEY: "dg-test" }))).urls, [DEEPGRAM_AGENT], "a limiter that fails");
+        assert.deepEqual((await open(upgrade("203.0.113.7"), env({ VOICE_LIMITER: broken, DEEPGRAM_API_KEY: "dg-test" }))).urls, [DEEPGRAM_AGENT], "a limiter that fails");
       });
 
       test("with no Deepgram key it is still 503, and the limiter is not asked", async () => {
         const { binding, keys } = limiter(false);
-        const { result } = await open(upgrade("203.0.113.7"), env({ ASK_LIMITER: binding }));
+        const { result } = await open(upgrade("203.0.113.7"), env({ VOICE_LIMITER: binding }));
         assert.equal(result.status, 503);
         assert.deepEqual(keys, []);
       });
 
       test("a plain GET to the same address (how the page finds out why a socket was refused) gets the same 429, and otherwise 426", async () => {
         const plain = (ip: string) => new Request(AGENT, { headers: { "CF-Connecting-IP": ip } });
-        const over = await open(plain("203.0.113.7"), env({ ASK_LIMITER: limiter(false).binding, DEEPGRAM_API_KEY: "dg-test" }));
+        const over = await open(plain("203.0.113.7"), env({ VOICE_LIMITER: limiter(false).binding, DEEPGRAM_API_KEY: "dg-test" }));
         assert.equal(over.result.status, 429);
         assert.deepEqual(await over.result.json(), { error: BUSY_REPLY });
-        const fine = await open(plain("203.0.113.7"), env({ ASK_LIMITER: limiter(true).binding, DEEPGRAM_API_KEY: "dg-test" }));
+        const fine = await open(plain("203.0.113.7"), env({ VOICE_LIMITER: limiter(true).binding, DEEPGRAM_API_KEY: "dg-test" }));
         assert.equal(fine.result.status, 426);
         assert.deepEqual(fine.urls, [], "no Deepgram connection without an upgrade");
       });
@@ -579,7 +579,7 @@ describe("surfaces", () => {
 
       test("/api/voice/listen over the limit: HTTP 429 with the JSON error, no Deepgram connection, keyed on CF-Connecting-IP", async () => {
         const { binding, keys } = limiter(false);
-        const { result, urls } = await run(upgrade("203.0.113.7"), env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
+        const { result, urls } = await run(upgrade("203.0.113.7"), env({ VOICE_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
         assert.equal(result.status, 429);
         assert.match(result.headers.get("content-type") ?? "", /^application\/json/);
         assert.deepEqual(await result.json(), { error: BUSY_REPLY });
@@ -589,7 +589,7 @@ describe("surfaces", () => {
 
       test("/api/voice/listen under the limit opens one Deepgram connection as before", async () => {
         const { binding, keys } = limiter(true);
-        const { result, urls } = await run(upgrade("198.51.100.4"), env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
+        const { result, urls } = await run(upgrade("198.51.100.4"), env({ VOICE_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
         assert.equal(urls.length, 1);
         assert.match(urls[0]!, DEEPGRAM_LISTEN);
         assert.equal(result.status, 502, "Deepgram is not reachable in tests");
@@ -598,7 +598,7 @@ describe("surfaces", () => {
 
       test("/api/voice/listen: a plain GET (how the page finds out why a socket was refused) gets the same 429", async () => {
         const plain = new Request(LISTEN, { headers: { "CF-Connecting-IP": "203.0.113.7" } });
-        const { result, urls } = await run(plain, env({ ASK_LIMITER: limiter(false).binding, DEEPGRAM_API_KEY: "dg-test" }));
+        const { result, urls } = await run(plain, env({ VOICE_LIMITER: limiter(false).binding, DEEPGRAM_API_KEY: "dg-test" }));
         assert.equal(result.status, 429);
         assert.deepEqual(urls, []);
       });
@@ -613,13 +613,6 @@ describe("surfaces", () => {
         assert.deepEqual(keys, ["203.0.113.7"]);
       });
 
-      test("/api/voice/speak over the limit does not even read the body", async () => {
-        const { binding } = limiter(false);
-        const request = new Request(SPEAK, { method: "POST", headers: { "CF-Connecting-IP": "203.0.113.7" }, body: "this is not JSON" });
-        const { result } = await run(request, env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
-        assert.equal(result.status, 429);
-      });
-
       test("/api/voice/speak under the limit speaks as before, after one check on the caller's IP", async () => {
         const { binding, keys } = limiter(true);
         const { result, urls } = await run(speakRequest("198.51.100.4"), env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
@@ -632,7 +625,7 @@ describe("surfaces", () => {
 
       test("the limit is per caller on both: one address over its allowance does not stop another", async () => {
         const { binding } = limiter((key) => key !== "203.0.113.7");
-        const e = env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" });
+        const e = env({ ASK_LIMITER: binding, VOICE_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" });
         assert.equal((await run(upgrade("203.0.113.7"), e)).result.status, 429);
         assert.equal((await run(upgrade("203.0.113.8"), e)).result.status, 502);
         assert.equal((await run(speakRequest("203.0.113.7"), e)).result.status, 429);
@@ -648,13 +641,13 @@ describe("surfaces", () => {
         const { binding, keys } = limiter(false);
         const cases: [string, Env][] = [
           ["no binding", env({ DEEPGRAM_API_KEY: "dg-test" })],
-          ["a failing limiter", env({ ASK_LIMITER: broken, DEEPGRAM_API_KEY: "dg-test" })],
+          ["a failing limiter", env({ ASK_LIMITER: broken, VOICE_LIMITER: broken, DEEPGRAM_API_KEY: "dg-test" })],
         ];
         for (const [name, e] of cases) {
           assert.equal((await run(upgrade("203.0.113.7"), e)).urls.length, 1, `listen: ${name}`);
           assert.equal((await run(speakRequest("203.0.113.7"), e)).result.status, 200, `speak: ${name}`);
         }
-        const limited = env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" });
+        const limited = env({ ASK_LIMITER: binding, VOICE_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" });
         assert.equal((await run(upgrade(undefined), limited)).urls.length, 1, "listen: no CF-Connecting-IP");
         assert.equal((await run(speakRequest(undefined), limited)).result.status, 200, "speak: no CF-Connecting-IP");
         assert.equal((await run(upgrade("127.0.0.1", "http://localhost:8787/api/voice/listen"), limited)).urls.length, 1, "listen: wrangler dev");
@@ -664,10 +657,88 @@ describe("surfaces", () => {
 
       test("with no Deepgram key both are still 503, and the limiter is not asked", async () => {
         const { binding, keys } = limiter(false);
-        const e = env({ ASK_LIMITER: binding });
+        const e = env({ ASK_LIMITER: binding, VOICE_LIMITER: binding });
         assert.equal((await run(upgrade("203.0.113.7"), e)).result.status, 503);
         assert.equal((await run(speakRequest("203.0.113.7"), e)).result.status, 503);
         assert.deepEqual(keys, []);
+      });
+      test("each route has its own limiter: the socket upgrades use VOICE_LIMITER only, speak and the questions use ASK_LIMITER only", async () => {
+        const voice = limiter(true);
+        const ask = limiter(true);
+        const e = env({ ASK_LIMITER: ask.binding, VOICE_LIMITER: voice.binding, DEEPGRAM_API_KEY: "dg-test" });
+        await run(upgrade("203.0.113.7", "https://politik.test/api/voice/v1/agent/converse"), e);
+        await run(upgrade("203.0.113.7"), e);
+        assert.deepEqual([voice.keys, ask.keys], [["203.0.113.7", "203.0.113.7"], []], "agent and listen upgrades");
+        voice.keys.length = 0;
+        await run(speakRequest("203.0.113.7"), e);
+        await run(new Request("https://politik.test/api/voice/think", { method: "POST", headers: { "CF-Connecting-IP": "203.0.113.7" }, body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }) }), e);
+        await run(new Request("https://politik.test/api/ask", { method: "POST", headers: { "CF-Connecting-IP": "203.0.113.7", "content-type": "application/json" }, body: JSON.stringify({ message: "hi" }) }), e);
+        assert.deepEqual([voice.keys, ask.keys], [[], ["203.0.113.7", "203.0.113.7", "203.0.113.7"]], "speak, think and ask");
+      });
+
+      test("an empty voice allowance does not stop the questions, and an empty question allowance does not stop a voice session", async () => {
+        const open = env({ ASK_LIMITER: limiter(true).binding, VOICE_LIMITER: limiter(false).binding, DEEPGRAM_API_KEY: "dg-test" });
+        assert.equal((await run(upgrade("203.0.113.7"), open)).result.status, 429);
+        assert.equal((await run(speakRequest("203.0.113.7"), open)).result.status, 200);
+        const spent = env({ ASK_LIMITER: limiter(false).binding, VOICE_LIMITER: limiter(true).binding, DEEPGRAM_API_KEY: "dg-test" });
+        assert.equal((await run(upgrade("203.0.113.7"), spent)).result.status, 502, "through to Deepgram, which is unreachable here");
+        assert.equal((await run(speakRequest("203.0.113.7"), spent)).result.status, 429);
+      });
+
+      describe("the body of a spoken-reply request is checked before a limiter token is spent", () => {
+        const bodyRequest = (body: string | undefined, ip = "203.0.113.7") =>
+          new Request(SPEAK, { method: "POST", headers: { "content-type": "application/json", "CF-Connecting-IP": ip }, ...(body === undefined ? {} : { body }) });
+
+        test("a body that is not a JSON object with a non-empty text string of at most 2,000 characters is a 400 with a JSON error, no limiter token and no Deepgram call", async () => {
+          const bad: (string | undefined)[] = [
+            undefined,
+            "",
+            "this is not JSON",
+            "null",
+            "5",
+            '"hello"',
+            "[]",
+            '[{"text":"hi"}]',
+            "{}",
+            '{"text":5}',
+            '{"text":null}',
+            '{"text":["hi"]}',
+            '{"text":{"a":1}}',
+            '{"text":""}',
+            '{"text":"   \\n\\t "}',
+            JSON.stringify({ text: "x".repeat(2001) }),
+            JSON.stringify({ text: "x".repeat(2001), pad: "y".repeat(20_000) }),
+            `{"text":"hi"${" ".repeat(20_000)}}`,
+          ];
+          for (const body of bad) {
+            const { binding, keys } = limiter(true);
+            const { result, urls } = await run(bodyRequest(body), env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
+            assert.equal(result.status, 400, JSON.stringify(body?.slice(0, 40)));
+            assert.match(result.headers.get("content-type") ?? "", /^application\/json/);
+            assert.equal(typeof ((await result.json()) as { error: unknown }).error, "string");
+            assert.deepEqual(keys, [], `${JSON.stringify(body?.slice(0, 40))}: no token spent`);
+            assert.deepEqual(urls, []);
+          }
+        });
+
+        test("a text of exactly 2,000 characters is accepted, spent a token on, and spoken (cut to what Deepgram is sent)", async () => {
+          const { binding, keys } = limiter(true);
+          const { result, urls } = await run(bodyRequest(JSON.stringify({ text: "x".repeat(2000) })), env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
+          assert.equal(result.status, 200);
+          assert.equal(urls.length, 1);
+          assert.deepEqual(keys, ["203.0.113.7"]);
+        });
+
+        test("an over-limit caller with a good body is still 429, and an over-limit caller with a bad body is a 400 (the body comes first)", async () => {
+          const { binding } = limiter(false);
+          const e = env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" });
+          assert.equal((await run(bodyRequest(JSON.stringify({ text: "hi" })), e)).result.status, 429);
+          assert.equal((await run(bodyRequest("{}"), e)).result.status, 400);
+        });
+
+        test("no Deepgram key is still a 503 before the body is looked at", async () => {
+          assert.equal((await run(bodyRequest("{}"), env())).result.status, 503);
+        });
       });
     });
 
@@ -1029,9 +1100,61 @@ describe("surfaces", () => {
       assert.equal((await run(upgrade(AGENT, "https://evil.example"), env())).result.status, 403);
     });
 
-    test("endpoints that are not on the list are not affected: GET /api/saying and the page itself", async () => {
-      const res = await run(at("/api/saying", { origin: "https://evil.example" }), env());
-      assert.equal(res.result.status, 200, "GET /api/saying has no origin check");
+    test("POST /api/voice/think, POST /api/voice/speak and GET /api/saying: another origin is a 403 before anything is spent, also for a plain cross-site form post (text/plain)", async () => {
+      const cross = "https://evil.example";
+      const routes: [string, () => Request][] = [
+        ["think", () => at("/api/voice/think", { method: "POST", origin: cross, headers: { "content-type": "text/plain" }, body: JSON.stringify({ messages: [{ role: "user", content: "What is going on?" }] }) })],
+        ["speak", () => at("/api/voice/speak", { method: "POST", origin: cross, headers: { "content-type": "text/plain" }, body: JSON.stringify({ text: "Hello there" }) })],
+        ["saying", () => at("/api/saying", { origin: cross })],
+      ];
+      for (const [name, build] of routes) {
+        const ask = keysOf();
+        const voice = keysOf();
+        const e = env({ ASK_LIMITER: ask.binding, VOICE_LIMITER: voice.binding, DEEPGRAM_API_KEY: "dg-test", GROQ_API_KEY: "gsk-test" });
+        const { result, urls } = await run(build(), e);
+        assert.equal(result.status, 403, name);
+        assert.match(result.headers.get("content-type") ?? "", /^application\/json/, name);
+        assert.deepEqual(urls, [], `${name}: nothing was fetched`);
+        assert.deepEqual([ask.keys, voice.keys], [[], []], `${name}: no limiter token`);
+      }
+    });
+
+    test("the same three routes answer a request from this site, or with no Origin header", async () => {
+      for (const origin of ["https://politik.test", undefined]) {
+        const think = await worker.fetch(at("/api/voice/think", { method: "POST", origin, body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }) }), env());
+        assert.equal(think.status, 200, `think ${origin}`);
+        assert.ok(((await think.json()) as { choices: unknown[] }).choices.length > 0);
+        const speak = await withFetch(
+          () => new Response("audio", { headers: { "content-type": "audio/mpeg" } }),
+          () => worker.fetch(at("/api/voice/speak", { method: "POST", origin, body: JSON.stringify({ text: "Hello" }) }), env({ DEEPGRAM_API_KEY: "dg-test" })),
+        );
+        assert.equal(speak.result.status, 200, `speak ${origin}`);
+        const saying = await run(at("/api/saying", { origin }), env());
+        assert.equal(saying.result.status, 200, `saying ${origin}`);
+      }
+    });
+
+    test("a route that is not on the list has no origin check: the map token and the assets", async () => {
+      const res = await run(at("/api/map-token", { origin: "https://evil.example" }), env());
+      assert.equal(res.result.status, 404, "reached the route (no token is set), not refused as 403");
+    });
+  });
+
+  describe("a Telegram handler that throws is an answer, not an unhandled rejection", () => {
+    test("worker.fetch resolves with a response when handleTelegram throws", async () => {
+      const exploding = new Proxy(
+        { DB: undefined } as unknown as Env,
+        {
+          get(target, key) {
+            if (key === "TELEGRAM_WEBHOOK_SECRET") throw new Error("boom");
+            return Reflect.get(target, key);
+          },
+        },
+      );
+      const request = new Request("https://politik.test/telegram", { method: "POST", body: JSON.stringify({ message: { chat: { id: 1 }, text: "hi" } }) });
+      const result = await worker.fetch(request, exploding);
+      assert.equal(result.constructor.name, "Response");
+      assert.equal(result.status, 500);
     });
   });
 
@@ -1334,7 +1457,7 @@ describe("surfaces", () => {
       const { msg, text } = tune(settings([{ ...speak, endpoint: { url: EVIL } }, { provider: { type: "eleven_labs" }, endpoint: { url: EVIL } }, "x", [{ endpoint: { url: EVIL } }]]));
       assert.equal(msg.agent.speak.length, 2);
       assert.ok(msg.agent.speak.every((entry: object) => !("endpoint" in entry)));
-      assert.deepEqual(msg.agent.speak[1].provider, { type: "eleven_labs" });
+      assert.deepEqual(msg.agent.speak[1].provider, { type: "deepgram", model: "aura-2-thalia-en" }, "the voice is the server's");
       assert.doesNotMatch(text, /evil/);
     });
 

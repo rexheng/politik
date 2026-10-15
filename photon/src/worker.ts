@@ -3,7 +3,7 @@ import { failureResponse, normalizeChatRequest } from "./chat/index.ts";
 import { loadMap } from "./map.ts";
 import { BLUESKY_URL, GROUP_URL, buildSaying } from "./saying.ts";
 import { loadCatalog } from "./catalog.ts";
-import { BUSY_REPLY, busyResponse, limitKey, overLimit } from "./limit.ts";
+import { BUSY_REPLY, busyResponse, limitKey, overLimit, overVoiceLimit } from "./limit.ts";
 import { proxyAgent, proxyListen, speak, think } from "./voice.ts";
 
 export type { Env };
@@ -38,9 +38,34 @@ function crossOrigin(request: Request): Response | null {
   return json({ error: "Requests from other sites are not allowed." }, 403);
 }
 
-/** The 429 for a caller who is over the limit on something that is not a chat answer (an error, not a reply the page shows), or null. */
-async function busyError(request: Request, env: Env): Promise<Response | null> {
-  return (await overLimit(env, limitKey(request))) ? json({ error: BUSY_REPLY }, 429) : null;
+/**
+ * The 429 for a caller who is over the limit on something that is not a chat answer (an error, not a reply the page shows),
+ * or null. Opening a voice socket is counted on `VOICE_LIMITER`; everything else on `ASK_LIMITER`.
+ */
+async function busyError(request: Request, env: Env, limiter: "ask" | "voice" = "ask"): Promise<Response | null> {
+  const over = limiter === "voice" ? await overVoiceLimit(env, limitKey(request)) : await overLimit(env, limitKey(request));
+  return over ? json({ error: BUSY_REPLY }, 429) : null;
+}
+
+/** The most a spoken-reply request may say, and the most body it is read for. */
+const MAX_SPEAK_CHARS = 2000;
+const MAX_SPEAK_BODY_CHARS = 10_000;
+
+/** The text of a `POST /api/voice/speak` body (a JSON object with a non-empty string `text` of at most 2,000 characters), or null. */
+async function speakText(request: Request): Promise<string | null> {
+  const declared = Number(request.headers.get("content-length"));
+  if (declared > MAX_SPEAK_BODY_CHARS) return null;
+  let body: unknown;
+  try {
+    const raw = await request.text();
+    if (raw.length > MAX_SPEAK_BODY_CHARS) return null;
+    body = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+  const text = (body as { text?: unknown }).text;
+  return typeof text === "string" && text.trim() !== "" && text.length <= MAX_SPEAK_CHARS ? text : null;
 }
 
 async function handleAsk(request: Request, env: Env): Promise<Response> {
@@ -87,7 +112,7 @@ export default {
         (request.method === "GET" || request.method === "POST")
       ) {
         // Each call searches Bluesky and has every post judged by a model, so it is counted like a question.
-        const refused = request.method === "POST" ? crossOrigin(request) : null;
+        const refused = crossOrigin(request);
         if (refused) return refused;
         const busy = await busyError(request, env);
         if (busy) return busy;
@@ -108,8 +133,8 @@ export default {
         if (refused) return refused;
         const key = env.DEEPGRAM_API_KEY?.trim();
         if (!key) return json({ error: "Voice is unavailable." }, 503);
-        // Each session the Worker opens spends the owner's Deepgram key, so the upgrade is counted like a question.
-        const busy = await busyError(request, env);
+        // Each session the Worker opens spends the owner's Deepgram key, so the upgrade has an allowance of its own.
+        const busy = await busyError(request, env, "voice");
         if (busy) return busy;
         try {
           return await proxyAgent(request, key, env);
@@ -119,7 +144,9 @@ export default {
       }
 
       if (url.pathname === "/api/voice/think" && request.method === "POST") {
-        return think(request, env);
+        const refused = crossOrigin(request);
+        if (refused) return refused;
+        return await think(request, env);
       }
 
       if (url.pathname === "/api/voice/listen" && request.method === "GET") {
@@ -127,7 +154,7 @@ export default {
         if (refused) return refused;
         const key = env.DEEPGRAM_API_KEY?.trim();
         if (!key) return json({ error: "Voice is unavailable." }, 503);
-        const busy = await busyError(request, env);
+        const busy = await busyError(request, env, "voice");
         if (busy) return busy;
         try {
           return await proxyListen(request, key);
@@ -137,12 +164,15 @@ export default {
       }
 
       if (url.pathname === "/api/voice/speak" && request.method === "POST") {
+        const refused = crossOrigin(request);
+        if (refused) return refused;
         const key = env.DEEPGRAM_API_KEY?.trim();
         if (!key) return json({ error: "Voice is unavailable." }, 503);
+        // A body that cannot be spoken costs the caller nothing: it is refused before a limiter token is spent.
+        const text = await speakText(request);
+        if (text === null) return json({ error: `Send JSON with a text of 1 to ${MAX_SPEAK_CHARS} characters.` }, 400);
         const busy = await busyError(request, env);
         if (busy) return busy;
-        const body = (await request.json()) as { text?: unknown };
-        const text = typeof body.text === "string" ? body.text : "";
         try {
           return await speak(key, text);
         } catch {
@@ -172,7 +202,7 @@ export default {
 
       if (url.pathname === "/telegram" && request.method === "POST") {
         const { handleTelegram } = await import("./telegram.ts");
-        return handleTelegram(request, env);
+        return await handleTelegram(request, env);
       }
 
       return env.ASSETS.fetch(request);

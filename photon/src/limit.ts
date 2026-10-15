@@ -1,8 +1,9 @@
 // Rate limiting for the public endpoints that run the chat pipeline (/api/ask, /api/voice/think, the voice agent's
 // function call and /telegram). Each run costs Groq tokens, and the free tier allows only 8,000 a minute, so one caller
-// must not be able to use them all. The limit is the Workers Rate Limiting binding `ASK_LIMITER` (wrangler.jsonc),
-// keyed on the caller's IP address as Cloudflare reports it in `CF-Connecting-IP` (an IPv6 address by its /64 prefix; a
-// Telegram update whose secret was checked: on the chat id).
+// must not be able to use them all. The limit is the Workers Rate Limiting binding `ASK_LIMITER` (wrangler.jsonc); opening
+// a voice socket has a smaller one of its own, `VOICE_LIMITER`. Both are keyed on the caller's IP address as Cloudflare
+// reports it in `CF-Connecting-IP` (an IPv6 address by its /64 prefix; a Telegram update whose secret was checked: on the
+// chat id).
 // With no binding (tests), no IP, or a local run (`wrangler dev` on localhost simulates the binding, so it would stop
 // a developer, or the eval, after ten questions) there is nothing to count, so nothing is limited.
 import type { ChatResponse } from "./chat/types.ts";
@@ -76,12 +77,8 @@ export function telegramLimitKey(request: Request, chatId: unknown, verified = f
   return verified && typeof chatId === "number" && Number.isFinite(chatId) ? `telegram:${chatId}` : limitKey(request);
 }
 
-/**
- * True when the caller `key` (an IP address, or `telegram:<chat id>`) has used up its allowance. With no limiter or no
- * key it is false, and so is a limiter that fails: a fault in the rate limiter must not turn every question away.
- */
-export async function overLimit(env: { ASK_LIMITER?: RateLimiter }, key: string): Promise<boolean> {
-  const limiter = env.ASK_LIMITER;
+/** True when `key` has used up its allowance on `limiter`; false with no limiter or no key, or when the limiter fails. */
+async function used(limiter: RateLimiter | undefined, key: string): Promise<boolean> {
   if (!limiter || !key) return false;
   try {
     return !(await limiter.limit({ key })).success;
@@ -89,4 +86,21 @@ export async function overLimit(env: { ASK_LIMITER?: RateLimiter }, key: string)
     console.warn("limit: the rate limiter failed, so the request goes ahead", error instanceof Error ? error.name : "");
     return false;
   }
+}
+
+/**
+ * True when the caller `key` (an IP address, or `telegram:<chat id>`) has used up its allowance of questions
+ * (`ASK_LIMITER`). With no limiter or no key it is false, and so is a limiter that fails: a fault in the rate limiter must
+ * not turn every question away.
+ */
+export function overLimit(env: { ASK_LIMITER?: RateLimiter }, key: string): Promise<boolean> {
+  return used(env.ASK_LIMITER, key);
+}
+
+/**
+ * The same for opening a voice socket (`VOICE_LIMITER`): a session is minutes of the owner's Deepgram time, so it has an
+ * allowance of its own, much smaller than the questions', and neither one uses up the other.
+ */
+export function overVoiceLimit(env: { VOICE_LIMITER?: RateLimiter }, key: string): Promise<boolean> {
+  return used(env.VOICE_LIMITER, key);
 }

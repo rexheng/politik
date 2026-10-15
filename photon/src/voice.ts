@@ -56,6 +56,12 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
  * page asks for today.)
  */
 export const VOICE_THINK_PROVIDER = { type: "open_ai", model: "gpt-4o-mini" } as const;
+/** The voice the agent speaks with: the server's choice too (Deepgram bills each voice at its own rate). The page asks for this one today. */
+export const VOICE_SPEAK_PROVIDER = { type: "deepgram", model: "aura-2-thalia-en" } as const;
+/** The speech-to-text model the agent listens with, and the provider it runs on: the server's choice too. The page asks for these today. */
+export const VOICE_LISTEN_PROVIDER = { type: "deepgram", model: "nova-3" } as const;
+/** The most a text frame from the page may be, in bytes. A real message (the settings, with the session notes) is a few kilobytes. */
+export const MAX_FRAME_BYTES = 256 * 1024;
 
 /**
  * The think endpoint the Worker offers Deepgram: its own /api/voice/think and nothing the page names. It exists only on
@@ -95,8 +101,18 @@ function knowledgeFromPrompt(prompt: string): unknown {
 /** How deep a message may nest before the rest of it is cut off (a real message is three or four levels deep). */
 const MAX_DEPTH = 32;
 const DROP = Symbol("drop");
-/** A key that names a URL: url, uri, href, endpoint and anything built on them (baseUrl, api_url, webhookUri). "security" and "during" are not. */
-const URL_KEY = /url|endpoint|href|(^|[^a-z])uri|uri$/i;
+/** The words that make a key name a URL. */
+const URL_WORDS = new Set(["url", "urls", "uri", "uris", "href", "hrefs", "endpoint", "endpoints"]);
+
+/**
+ * True for a key that names a URL: url, uri, href, endpoint and anything built on them (baseUrl, api_url, webhookUri,
+ * endpoints). "endpointing", "security" and "during" are not. The words of a key are found at its separators and
+ * at a change from lower to upper case.
+ */
+function isUrlKey(key: string): boolean {
+  if (/(url|uri|href|endpoint)s?$/i.test(key)) return true;
+  return key.split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/).some((word) => URL_WORDS.has(word.toLowerCase()));
+}
 /** A string that is a URL, whatever the key: a scheme and `//` (also `//host`), or a scheme that runs code or carries data. */
 const URL_VALUE = /^\s*(?:(?:[a-z][a-z0-9+.-]*:)?\/\/|(?:https?|wss?|ftp|file|data|blob|javascript|mailto):)\S/i;
 
@@ -134,7 +150,7 @@ function scrub(value: unknown, depth = 0, isPrompt = false): unknown {
   if (isRecord(value)) {
     const out: Record<string, unknown> = Object.create(null);
     for (const [key, item] of Object.entries(value)) {
-      if (key === "__proto__" || URL_KEY.test(key)) continue;
+      if (key === "__proto__" || isUrlKey(key)) continue;
       const clean = scrub(item, depth + 1, key.toLowerCase() === "prompt");
       if (clean !== DROP) out[key] = clean;
     }
@@ -148,19 +164,30 @@ type Tuning = { origin: string; notes: unknown[] };
 /** Settings that the Worker sets itself: a page's spelling of them in another letter case is not left beside them. */
 const OWN_KEYS = ["prompt", "provider", "functions", "endpoint"];
 
+type SectionKind = "think" | "speak" | "listen";
+
 /**
- * One think or speak section, safe to hand to the owner's Deepgram agent. A speak section is the page's with its URLs taken
- * out. A think section is that too, and in addition:
- * - its provider and model are the server's (`VOICE_THINK_PROVIDER`);
- * - a page that asks for a custom think endpoint (any `endpoint` key) is given the Worker's own /api/voice/think, with no
- *   headers of its own, and none of its functions (a function can carry an endpoint that Deepgram would call);
- * - otherwise (or on an origin Deepgram cannot reach) the agent gets the `politik` function, which it calls on this socket,
- *   and the prompt tells it to use it.
- * The session notes found in the think prompt go to `tuning.notes`.
+ * One think, speak or listen section, safe to hand to the owner's Deepgram agent. All three are the page's with their URLs
+ * taken out, and then:
+ * - a speak section's provider and model are the server's (`VOICE_SPEAK_PROVIDER`);
+ * - a listen section's provider type and model are the server's (`VOICE_LISTEN_PROVIDER`), and the page's other listen
+ *   settings (keyterms and the like) stay;
+ * - a think section's provider and model are the server's (`VOICE_THINK_PROVIDER`); a page that asks for a custom think
+ *   endpoint (any `endpoint` key) is given the Worker's own /api/voice/think, with no headers of its own, and none of its
+ *   functions (a function can carry an endpoint that Deepgram would call); otherwise (or on an origin Deepgram cannot reach)
+ *   the agent gets the `politik` function, which it calls on this socket, and the prompt tells it to use it. The session
+ *   notes found in the think prompt go to `tuning.notes`.
  */
-function tuneSection(section: Record<string, unknown>, kind: "think" | "speak", tuning: Tuning): Record<string, unknown> {
+function tuneSection(section: Record<string, unknown>, kind: SectionKind, tuning: Tuning): Record<string, unknown> {
   const clean = scrub(section) as Record<string, unknown>;
-  if (kind === "speak") return clean;
+  if (kind === "speak") {
+    clean.provider = { ...VOICE_SPEAK_PROVIDER };
+    return clean;
+  }
+  if (kind === "listen") {
+    clean.provider = { ...(isRecord(clean.provider) ? clean.provider : {}), ...VOICE_LISTEN_PROVIDER };
+    return clean;
+  }
   const wantsEndpoint = Object.keys(section).some((key) => key.toLowerCase() === "endpoint");
   let prompt = typeof clean.prompt === "string" ? clean.prompt : "";
   for (const key of Object.keys(clean)) {
@@ -184,8 +211,8 @@ function tuneSection(section: Record<string, unknown>, kind: "think" | "speak", 
   return clean;
 }
 
-/** A think or speak setting, as an object or a list of objects (or either written as a JSON string); anything else is no section and is left out. */
-function tuneSections(value: unknown, kind: "think" | "speak", tuning: Tuning): unknown {
+/** A think, speak or listen setting, as an object or a list of objects (or either written as a JSON string); anything else is no section and is left out. */
+function tuneSections(value: unknown, kind: SectionKind, tuning: Tuning): unknown {
   const unwrapped = unwrapJson(value);
   if (Array.isArray(unwrapped)) {
     return unwrapped
@@ -196,38 +223,53 @@ function tuneSections(value: unknown, kind: "think" | "speak", tuning: Tuning): 
   return isRecord(unwrapped) ? tuneSection(unwrapped, kind, tuning) : DROP;
 }
 
-/** `node` with every think and speak section in it, wherever it sits, replaced by its safe form. */
-function tuneNode(node: unknown, tuning: Tuning, depth: number): unknown {
+/** Keys whose value is a setting object, never text: a JSON string there is read as the object it holds. */
+const STRUCTURAL_KEYS = new Set(["agent", "audio", "context"]);
+
+/**
+ * `node` with every think, speak and listen section in it, wherever it sits, replaced by its safe form. With `whole` (the
+ * message is not free text) the rest of the tree is cleaned too: a key that names a URL is dropped with its value, and a
+ * string that is a URL is dropped from its object or list. Text that people write is only ever dropped when the whole of it
+ * is a URL, and a JSON string is read through only where a setting object belongs (`STRUCTURAL_KEYS`), not in text such as
+ * a history message's function-call arguments.
+ */
+function tuneNode(node: unknown, tuning: Tuning, depth: number, whole: boolean): unknown {
   if (depth > MAX_DEPTH) return DROP;
-  if (Array.isArray(node)) return node.map((item) => tuneNode(item, tuning, depth + 1)).filter((item) => item !== DROP);
+  if (typeof node === "string") return whole && URL_VALUE.test(node) ? DROP : node;
+  if (Array.isArray(node)) return node.map((item) => tuneNode(item, tuning, depth + 1, whole)).filter((item) => item !== DROP);
   if (!isRecord(node)) return node;
   const out: Record<string, unknown> = Object.create(null);
   for (const [key, value] of Object.entries(node)) {
     if (key === "__proto__") continue;
     const lower = key.toLowerCase();
-    const tuned =
-      lower === "think" || lower === "speak"
-        ? tuneSections(value, lower, tuning)
-        : tuneNode(lower === "agent" ? unwrapJson(value) : value, tuning, depth + 1);
-    if (tuned !== DROP) out[lower === "think" || lower === "speak" ? lower : key] = tuned;
+    const section = lower === "think" || lower === "speak" || lower === "listen";
+    if (!section && whole && isUrlKey(key)) continue;
+    const tuned = section ? tuneSections(value, lower as SectionKind, tuning) : tuneNode(STRUCTURAL_KEYS.has(lower) ? unwrapJson(value) : value, tuning, depth + 1, whole);
+    if (tuned !== DROP) out[section ? lower : key] = tuned;
   }
   return out;
 }
 
+/** Message types that carry what people say, not settings: a URL as their whole text is text. */
+const FREE_TEXT_TYPES = new Set(["injectusermessage", "injectagentmessage", "functioncallresponse", "functioncallrequest"]);
+
 /**
  * The text to send Deepgram for a text frame from the page, with the session notes found in the think prompt; null when
- * the frame is dropped, which is when it does not parse as JSON (NaN, a byte-order mark, text after the JSON, plain text)
- * or is not a JSON object. The raw text is never sent: what is sent is the JSON of the parsed message with every think and
- * speak section made safe (`tuneSection`), in any message, whatever its `type` says, because a parser that reads the type
- * differently, or the same message twice, must find nothing to follow. `origin` is the Worker's own origin, taken from the
- * request that opened the socket.
+ * the frame is dropped, which is when it is over `MAX_FRAME_BYTES`, does not parse as JSON (NaN, a byte-order mark, text
+ * after the JSON, plain text), or is not a JSON object. The raw text is never sent: what is sent is the JSON of the parsed
+ * message with every think, speak and listen section made safe (`tuneSection`) in any message, whatever its `type` says,
+ * because a parser that reads the type differently, or the same message twice, must find nothing to follow. Unless the
+ * message is free text (`FREE_TEXT_TYPES`), every URL in the rest of it is taken out too. `origin` is the Worker's own origin,
+ * taken from the request that opened the socket.
  */
 export function tuneSettings(raw: string, origin: string): { text: string; knowledge: unknown } | null {
+  if (raw.length > MAX_FRAME_BYTES || new TextEncoder().encode(raw).byteLength > MAX_FRAME_BYTES) return null;
   try {
     const parsed = unwrapJson(JSON.parse(raw));
     if (!isRecord(parsed)) return null;
+    const type = typeof parsed.type === "string" ? parsed.type.trim().toLowerCase() : "";
     const tuning: Tuning = { origin, notes: [] };
-    const tuned = tuneNode(parsed, tuning, 0);
+    const tuned = tuneNode(parsed, tuning, 0, !FREE_TEXT_TYPES.has(type));
     if (!isRecord(tuned)) return null;
     return { text: JSON.stringify(tuned), knowledge: tuning.notes.find((found) => found !== undefined) };
   } catch {
