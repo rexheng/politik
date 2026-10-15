@@ -105,14 +105,20 @@ export function parseAnswer(md) {
   return blocks;
 }
 
-/** "2026-10-15" as "Data as of 15 Oct 2026", or "" when there is no usable date (an empty database has none). */
-export function formatAsOf(iso) {
+/** "2026-10-15" (or an ISO timestamp that starts with it) as "15 Oct 2026", or "" when there is no real date. */
+export function formatDay(iso) {
   const match = typeof iso === "string" ? /^(\d{4})-(\d{2})-(\d{2})(?:$|[T ])/.exec(iso.trim()) : null;
   if (!match) return "";
   const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
   const date = new Date(Date.UTC(year, month - 1, day));
   if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return "";
-  return `Data as of ${day} ${MONTHS[month - 1]} ${year}`;
+  return `${day} ${MONTHS[month - 1]} ${year}`;
+}
+
+/** "2026-10-15" as "Data as of 15 Oct 2026", or "" when there is no usable date (an empty database has none). */
+export function formatAsOf(iso) {
+  const day = formatDay(iso);
+  return day ? `Data as of ${day}` : "";
 }
 
 /** `text` cut to at most `max` characters, never between the two halves of an emoji. */
@@ -130,6 +136,8 @@ export function historyTurn(role, text) {
 }
 
 const SPOKEN_MAX_CHARS = 600;
+const SPOKEN_FALLBACK_TITLES = 3;
+const SPOKEN_FALLBACK_LEAD = "I couldn't write a summary just now.";
 
 /**
  * The answer as plain sentences to read aloud: no markers, no markdown, each heading or bullet a sentence of its own,
@@ -149,4 +157,80 @@ export function spokenText(md, max = SPOKEN_MAX_CHARS) {
   const head = clip(text, max);
   const end = Math.max(head.lastIndexOf(". "), head.lastIndexOf("! "), head.lastIndexOf("? "));
   return end > 0 ? head.slice(0, end + 1) : head;
+}
+
+/**
+ * What a response sounds like. An answer is `spokenText(reply)`. A fallback that has records names them, as the Worker
+ * does for the voice agent (photon/src/chat/spoken.ts): "I couldn't write a summary just now. The most relevant records are
+ * SB 53, SB 1047 and PDPA." `view` needs `reply`, and `mode` and `citations` for a fallback.
+ */
+export function spokenReply(view, max = SPOKEN_MAX_CHARS) {
+  const reply = view && typeof view.reply === "string" ? view.reply : "";
+  const citations = view && Array.isArray(view.citations) ? view.citations : [];
+  if (!view || view.mode !== "fallback" || citations.length === 0) return spokenText(reply, max);
+  const titles = citations
+    .slice(0, SPOKEN_FALLBACK_TITLES)
+    .map((c) => String((c && (typeof c.shortTitle === "string" && c.shortTitle.trim() ? c.shortTitle : c.title)) || "").replace(/\s+/g, " ").trim().replace(/[.,;:]+$/, ""))
+    .filter(Boolean);
+  if (titles.length === 0) return spokenText(reply, max);
+  const list = titles.length === 1 ? titles[0] : `${titles.slice(0, -1).join(", ")} and ${titles[titles.length - 1]}`;
+  return spokenText(`${SPOKEN_FALLBACK_LEAD} The most relevant records are ${list}.`, max);
+}
+
+/** The type of the frame the Worker sends down the voice socket with the full answer to a spoken question (photon/src/voice.ts). */
+export const VOICE_ANSWER_TYPE = "PolitikAnswer";
+
+/**
+ * A frame from the voice socket as a spoken question's answer: `{ question, response }`, or null when it is any other
+ * frame (audio, or the agent's own JSON) or is not shaped like one. Nothing in it is trusted yet: the page reads
+ * `response` with the same checks it gives an /api/ask reply.
+ */
+export function voiceAnswerOf(data) {
+  if (typeof data !== "string" || !data.includes(VOICE_ANSWER_TYPE)) return null;
+  let frame;
+  try {
+    frame = JSON.parse(data);
+  } catch (err) {
+    return null;
+  }
+  if (!frame || typeof frame !== "object" || frame.type !== VOICE_ANSWER_TYPE) return null;
+  if (typeof frame.question !== "string" || !frame.question.trim()) return null;
+  if (!frame.response || typeof frame.response !== "object") return null;
+  return { question: frame.question.trim(), response: frame.response };
+}
+
+/** True when `url` is the voice agent's socket on this site (the path /api/voice/...), so the page reads answers off it. */
+export function isVoiceSocketUrl(url, base) {
+  try {
+    return new URL(String(url), base).pathname.startsWith("/api/voice/");
+  } catch (err) {
+    return false;
+  }
+}
+
+/**
+ * Makes every socket that `target` (the window) opens to /api/voice/... also report the answer frames it receives to
+ * `onAnswer(question, response)`, by replacing `target.WebSocket` with a subclass. It changes nothing else about a
+ * socket, and a handler that throws does not disturb it. It must run before the voice widget connects. Returns false
+ * when there is no WebSocket to wrap or it was already wrapped.
+ */
+export function tapVoiceAnswers(target, base, onAnswer) {
+  const Native = target && target.WebSocket;
+  if (typeof Native !== "function" || Native.politikTapped) return false;
+  class TappedWebSocket extends Native {
+    constructor(url, protocols) {
+      super(url, protocols);
+      if (!isVoiceSocketUrl(url, base)) return;
+      this.addEventListener("message", function (event) {
+        const answer = voiceAnswerOf(event.data);
+        if (!answer) return;
+        try {
+          onAnswer(answer.question, answer.response);
+        } catch (err) {}
+      });
+    }
+  }
+  TappedWebSocket.politikTapped = true;
+  target.WebSocket = TappedWebSocket;
+  return true;
 }

@@ -1,4 +1,4 @@
-const CACHE_NAME = "politik-shell-v25";
+const CACHE_NAME = "politik-shell-v26";
 
 const SHELL_ASSETS = [
   "/",

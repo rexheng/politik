@@ -6,14 +6,15 @@ import { fileURLToPath } from "node:url";
 
 import { ask, askShared, type Env } from "../../photon/src/ask.ts";
 import { EMPTY_REPLY, FAIL_REPLY, FALLBACK_REPLY, GREETING } from "../../photon/src/chat/index.ts";
-import { toSpoken } from "../../photon/src/chat/spoken.ts";
+import { toSpoken, toSpokenResponse } from "../../photon/src/chat/spoken.ts";
 import type { ChatResponse } from "../../photon/src/chat/types.ts";
 import type { D1Like } from "../../photon/src/data/d1.ts";
 import type { Manifest, Passage, PolicyRecord } from "../../photon/src/data/schema.ts";
 import { snapshotStatements } from "../../photon/src/data/seed.ts";
 import worker from "../../photon/src/worker.ts";
 import { handleTelegram, formatTelegramReply } from "../../photon/src/telegram.ts";
-import { answerFunctionCall, think } from "../../photon/src/voice.ts";
+import { BUSY_REPLY, busyResponse, type RateLimiter } from "../../photon/src/limit.ts";
+import { answerFunctionCall, think, VOICE_ANSWER_TYPE } from "../../photon/src/voice.ts";
 import { openTestDb } from "../helpers/d1.ts";
 
 const fixtureDir = fileURLToPath(new URL("../fixtures/snapshot/", import.meta.url));
@@ -156,8 +157,9 @@ describe("surfaces", () => {
       const a = askShared("What is going on?", env(), undefined, []);
       const b = askShared("What is going on?", env(), undefined, []);
       assert.equal(a, b);
-      assert.notEqual(askShared("hi", env()), a);
-      await Promise.all([a, b]);
+      const other = askShared("hi", env());
+      assert.notEqual(other, a);
+      await Promise.all([a, b, other]);
       const again = askShared("What is going on?", env(), undefined, []);
       assert.notEqual(again, a, "a finished question is asked afresh");
       await again;
@@ -204,9 +206,16 @@ describe("surfaces", () => {
       assert.match(seen[0]!, /Latest message:\nWho does it apply to\?/);
     });
 
-    test("with no Groq key the spoken reply is the fallback line", async () => {
+    test("I3: with no Groq key the spoken reply names the records, not just 'here are the records'", async () => {
       const res = await think(new Request("https://politik.test/api/voice/think", { method: "POST", body: JSON.stringify(thinkBody("What is going on?")) }), env());
-      assert.equal(await spokenOf(res), toSpoken(FALLBACK_REPLY));
+      const spoken = await spokenOf(res);
+      const written = (await (await post("/api/ask", { message: "What is going on?" })).json()) as ChatResponse;
+      assert.equal(written.mode, "fallback");
+      assert.equal(written.citations.length, 3);
+      const names = written.citations.map((c) => c.shortTitle ?? c.title);
+      assert.equal(spoken, `I couldn't write a summary just now. The most relevant records are ${names[0]}, ${names[1]} and ${names[2]}.`);
+      assert.equal(spoken, toSpokenResponse(written));
+      assert.match(spoken, /^I couldn't write a summary just now\. The most relevant records are /);
     });
 
     test("no question is the greeting", async () => {
@@ -250,14 +259,26 @@ describe("surfaces", () => {
       assert.equal(
         formatTelegramReply(response()),
         [
-          "**SB 53 is law [1].** It covers developers [2].",
+          "SB 53 is law [1]. It covers developers [2].",
           "[1] Transparency in Frontier Artificial Intelligence Act — https://example.org/sb53\n[2] Public post by alice — https://bsky.app/profile/alice/post/1",
         ].join("\n\n"),
       );
     });
 
     test("a reply with no sources is just the reply", () => {
-      assert.equal(formatTelegramReply(response({ citations: [] })), "**SB 53 is law [1].** It covers developers [2].");
+      assert.equal(formatTelegramReply(response({ citations: [] })), "SB 53 is law [1]. It covers developers [2].");
+    });
+
+    test("M8: ** and ### are taken out of the text, whatever the reply or the general-knowledge text", () => {
+      const text = formatTelegramReply(
+        response({ reply: "**Bold answer [1].**\n### What it does\nIt **sets** rules [1].\n#### Deeper\n- a bullet", citations: [], general: "### Background\nA **fact**." }),
+      );
+      assert.equal(text, "Bold answer [1].\nWhat it does\nIt sets rules [1].\nDeeper\n- a bullet\n\nNot from Politik's sources — unverified:\nBackground\nA fact.");
+      assert.doesNotMatch(text, /\*\*|^#+ /m);
+    });
+
+    test("M8: a hash that is not a heading mark stays (C# and #1)", () => {
+      assert.equal(formatTelegramReply(response({ reply: "It is ranked #1 in C#.", citations: [] })), "It is ranked #1 in C#.");
     });
 
     test("general knowledge is added with its label", () => {
@@ -281,6 +302,7 @@ describe("surfaces", () => {
       assert.equal(sent[0]!.body.chat_id, 77);
       const text: string = sent[0]!.body.text;
       assert.ok(text.startsWith(FALLBACK_REPLY), text);
+      assert.doesNotMatch(text, /\*\*/);
       const lines = text.split("\n").filter((l) => /^\[\d\] /.test(l));
       assert.equal(lines.length, 3);
       assert.match(lines[0]!, /^\[1\] .+ — https:\/\/\S+$/);
@@ -300,6 +322,259 @@ describe("surfaces", () => {
       assert.equal(sent.length, 1);
       assert.equal(typeof sent[0].text, "string");
       assert.ok(sent[0].text.length > 0);
+    });
+  });
+
+  // ---- I2: rate limiting and the Telegram secret ----------------------------------------------------------------------
+
+  describe("I2: rate limiting", () => {
+    /** A limiter that records the keys it was asked about and lets `allow` decide. */
+    function limiter(allow: boolean | ((key: string) => boolean) = true): { keys: string[]; binding: RateLimiter } {
+      const keys: string[] = [];
+      return { keys, binding: { limit: async ({ key }) => (keys.push(key), { success: typeof allow === "function" ? allow(key) : allow }) } };
+    }
+    const asPost = (path: string, body: unknown, e: Env, ip = "203.0.113.7") =>
+      worker.fetch(new Request(`https://politik.test${path}`, { method: "POST", headers: { "content-type": "application/json", "CF-Connecting-IP": ip }, body: JSON.stringify(body) }), e);
+    const noModel = (): Response => assert.fail("no model call");
+
+    test("the busy response is a fallback ChatResponse with the fixed line and nothing else", () => {
+      assert.equal(BUSY_REPLY, "Politik is busy — please try again in a minute.");
+      assert.deepEqual(busyResponse(), { reply: BUSY_REPLY, mode: "fallback", citations: [], followUps: [], asOf: "" });
+    });
+
+    test("/api/ask over the limit: HTTP 200 and the busy ChatResponse, with no pipeline and no database read", async () => {
+      const { binding, keys } = limiter(false);
+      const e = env({ ASK_LIMITER: binding, GROQ_API_KEY: "gsk-test" });
+      (e as unknown as { DB: unknown }).DB = new Proxy({}, { get: () => assert.fail("no database read") });
+      const { result, urls } = await withFetch(noModel, () => asPost("/api/ask", { message: "What is going on?" }, e));
+      assert.equal(result.status, 200);
+      assert.deepEqual(await result.json(), busyResponse());
+      assert.deepEqual(keys, ["203.0.113.7"], "keyed on CF-Connecting-IP");
+      assert.deepEqual(urls, []);
+    });
+
+    test("/api/ask under the limit is answered as before, after one check on the caller's IP", async () => {
+      const { binding, keys } = limiter(true);
+      const res = await asPost("/api/ask", { message: "hi" }, env({ ASK_LIMITER: binding }), "198.51.100.4");
+      assert.equal(((await res.json()) as ChatResponse).mode, "greeting");
+      assert.deepEqual(keys, ["198.51.100.4"]);
+    });
+
+    test("the limit is per caller: one address over its allowance does not stop another", async () => {
+      const { binding } = limiter((key) => key !== "203.0.113.7");
+      const e = env({ ASK_LIMITER: binding });
+      assert.equal(((await (await asPost("/api/ask", { message: "hi" }, e, "203.0.113.7")).json()) as ChatResponse).reply, BUSY_REPLY);
+      assert.equal(((await (await asPost("/api/ask", { message: "hi" }, e, "203.0.113.8")).json()) as ChatResponse).mode, "greeting");
+    });
+
+    test("with no limiter binding (tests, local) nothing is checked", async () => {
+      const res = await asPost("/api/ask", { message: "hi" }, env());
+      assert.equal(((await res.json()) as ChatResponse).mode, "greeting");
+    });
+
+    test("with no CF-Connecting-IP there is nothing to key on, so nothing is checked", async () => {
+      const { binding, keys } = limiter(false);
+      const res = await post("/api/ask", { message: "hi" }, env({ ASK_LIMITER: binding }));
+      assert.equal(((await res.json()) as ChatResponse).mode, "greeting");
+      assert.deepEqual(keys, []);
+    });
+
+    test("a limiter that fails does not stop questions", async () => {
+      const broken: RateLimiter = {
+        limit: async () => {
+          throw new Error("limiter down");
+        },
+      };
+      const res = await asPost("/api/ask", { message: "hi" }, env({ ASK_LIMITER: broken }));
+      assert.equal(((await res.json()) as ChatResponse).mode, "greeting");
+    });
+
+    test("/api/voice/think over the limit speaks the busy line, streaming or not, without asking the pipeline", async () => {
+      for (const stream of [false, true]) {
+        const { binding } = limiter(false);
+        const request = new Request("https://politik.test/api/voice/think", { method: "POST", headers: { "CF-Connecting-IP": "203.0.113.7" }, body: JSON.stringify({ stream, messages: [{ role: "user", content: "What is going on?" }] }) });
+        const { result, urls } = await withFetch(noModel, () => worker.fetch(request, env({ ASK_LIMITER: binding, GROQ_API_KEY: "gsk-test" })));
+        assert.deepEqual(urls, []);
+        if (stream) assert.equal(JSON.parse((await result.text()).split("\n\n")[0]!.replace(/^data: /, "")).choices[0].delta.content, BUSY_REPLY);
+        else assert.equal(((await result.json()) as any).choices[0].message.content, BUSY_REPLY);
+      }
+    });
+
+    test("the voice agent's function call over the limit answers with the busy line, shows the page the busy response, and runs nothing", async () => {
+      const sent: any[] = [];
+      const page: any[] = [];
+      const remote = { send: (data: string) => sent.push(JSON.parse(data)) } as unknown as WebSocket;
+      const client = { send: (data: string) => page.push(JSON.parse(data)) };
+      const raw = JSON.stringify({ type: "FunctionCallRequest", functions: [{ id: "f1", name: "politik", arguments: JSON.stringify({ question: "What is going on?" }), client_side: true }] });
+      const { binding, keys } = limiter(false);
+      const { urls } = await withFetch(noModel, () => answerFunctionCall(raw, env({ ASK_LIMITER: binding, GROQ_API_KEY: "gsk-test" }), remote, undefined, { client, ip: "203.0.113.7" }));
+      assert.deepEqual(urls, []);
+      assert.deepEqual(keys, ["203.0.113.7"]);
+      assert.equal(sent[0].content, BUSY_REPLY);
+      assert.deepEqual(page, [{ type: VOICE_ANSWER_TYPE, question: "What is going on?", response: busyResponse() }]);
+    });
+
+    test("Telegram over the limit sends the busy line to the chat and runs nothing", async () => {
+      const { binding, keys } = limiter(false);
+      const sent: any[] = [];
+      const update = { message: { chat: { id: 9 }, text: "What is going on?" } };
+      const { result, urls } = await withFetch(
+        (url, init) => {
+          assert.match(url, /^https:\/\/api\.telegram\.org\/bottok\/sendMessage$/);
+          sent.push(JSON.parse(String(init?.body)));
+          return new Response("{}");
+        },
+        () =>
+          worker.fetch(
+            new Request("https://politik.test/telegram", { method: "POST", headers: { "CF-Connecting-IP": "91.108.4.1" }, body: JSON.stringify(update) }),
+            env({ TELEGRAM_BOT_TOKEN: "tok", ASK_LIMITER: binding, GROQ_API_KEY: "gsk-test" }),
+          ),
+      );
+      assert.equal(await result.text(), "ok");
+      assert.deepEqual(sent, [{ chat_id: 9, text: BUSY_REPLY }]);
+      assert.deepEqual(keys, ["91.108.4.1"]);
+      assert.equal(urls.length, 1, "only the Telegram send");
+    });
+  });
+
+  describe("I2: the Telegram webhook secret", () => {
+    const update = { message: { chat: { id: 5 }, text: "hi" } };
+    const send = (headers: Record<string, string>, e: Env) =>
+      withFetch(
+        () => new Response("{}"),
+        () => worker.fetch(new Request("https://politik.test/telegram", { method: "POST", headers, body: JSON.stringify(update) }), e),
+      );
+
+    test("a wrong or missing secret is a 401 and nothing is sent or run", async () => {
+      for (const headers of [{ "X-Telegram-Bot-Api-Secret-Token": "wrong" }, {}, { "X-Telegram-Bot-Api-Secret-Token": "s3cre" }, { "X-Telegram-Bot-Api-Secret-Token": "s3cret-and-more" }, { "X-Telegram-Bot-Api-Secret-Token": "" }]) {
+        const { result, urls } = await send(headers, env({ TELEGRAM_BOT_TOKEN: "tok", TELEGRAM_WEBHOOK_SECRET: "s3cret" }));
+        assert.equal(result.status, 401, JSON.stringify(headers));
+        assert.deepEqual(urls, []);
+      }
+    });
+
+    test("the right secret is answered as usual", async () => {
+      const { result, urls } = await send({ "X-Telegram-Bot-Api-Secret-Token": "s3cret" }, env({ TELEGRAM_BOT_TOKEN: "tok", TELEGRAM_WEBHOOK_SECRET: "s3cret" }));
+      assert.equal(result.status, 200);
+      assert.equal(urls.length, 1, "the greeting was sent");
+    });
+
+    test("with no secret configured (or a blank one) the header is not required, as before", async () => {
+      for (const TELEGRAM_WEBHOOK_SECRET of [undefined, "", "  "]) {
+        const { result, urls } = await send({}, env({ TELEGRAM_BOT_TOKEN: "tok", TELEGRAM_WEBHOOK_SECRET }));
+        assert.equal(result.status, 200);
+        assert.equal(urls.length, 1);
+      }
+    });
+
+    test("a secret mismatch is refused even when no bot token is set", async () => {
+      const { result } = await send({}, env({ TELEGRAM_WEBHOOK_SECRET: "s3cret" }));
+      assert.equal(result.status, 401);
+    });
+  });
+
+  // ---- I3: one run of the pipeline for one spoken question ------------------------------------------------------------
+
+  describe("I3: one pipeline per spoken question", () => {
+    const callFor = (question: string, id = "f1") => JSON.stringify({ type: "FunctionCallRequest", functions: [{ id, name: "politik", arguments: JSON.stringify({ question }), client_side: true }] });
+    const session = () => {
+      const sent: any[] = [];
+      const page: any[] = [];
+      return {
+        sent,
+        page,
+        remote: { send: (data: string) => sent.push(JSON.parse(data)) } as unknown as WebSocket,
+        client: { send: (data: string) => page.push(JSON.parse(data)) },
+      };
+    };
+
+    test("a spoken question is one route call and one compose call, and the page is sent that answer rather than asking again", async () => {
+      const { sent, page, remote, client } = session();
+      const { result, urls } = await withFetch(fakeGroq, () => answerFunctionCall(callFor("What is going on?"), env({ GROQ_API_KEY: "gsk-test" }), remote, undefined, { client, history: [] }));
+      assert.equal(result, true);
+      assert.deepEqual(urls, [GROQ, GROQ], "route + compose: one chat()");
+      assert.equal(sent.length, 1);
+      assert.equal(page.length, 1);
+      assert.equal(page[0].type, VOICE_ANSWER_TYPE);
+      assert.equal(page[0].question, "What is going on?");
+      const response = page[0].response as ChatResponse;
+      assert.equal(response.mode, "brief");
+      assert.equal(response.citations.length, 2);
+      assert.match(response.reply, /^\*\*California and Singapore both moved \[1\]\.\*\*/);
+      assert.equal(sent[0].content, toSpokenResponse(response), "what is spoken is what the page shows");
+    });
+
+    test("the page's frame is sent before the agent's answer, so the cards appear while it speaks", async () => {
+      const order: string[] = [];
+      const remote = { send: () => order.push("agent") } as unknown as WebSocket;
+      const client = { send: () => order.push("page") };
+      await withFetch(fakeGroq, () => answerFunctionCall(callFor("What is going on?"), env({ GROQ_API_KEY: "gsk-test" }), remote, undefined, { client }));
+      assert.deepEqual(order, ["page", "agent"]);
+    });
+
+    test("a fallback answer is spoken with its record titles and shown to the page with its records", async () => {
+      const { sent, page, remote, client } = session();
+      await answerFunctionCall(callFor("What is going on?"), env(), remote, undefined, { client });
+      const response = page[0].response as ChatResponse;
+      assert.equal(response.mode, "fallback");
+      const names = response.citations.map((c) => c.shortTitle ?? c.title);
+      assert.equal(names.length, 3);
+      assert.equal(sent[0].content, `I couldn't write a summary just now. The most relevant records are ${names[0]}, ${names[1]} and ${names[2]}.`);
+    });
+
+    test("a page that has gone away does not stop the agent getting its answer", async () => {
+      const { sent, remote } = session();
+      const client = {
+        send: () => {
+          throw new Error("closed");
+        },
+      };
+      await answerFunctionCall(callFor("hi"), env(), remote, undefined, { client });
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0].content, GREETING);
+    });
+
+    test("with no page to tell (the old call) it still answers the agent", async () => {
+      const { sent, remote } = session();
+      await answerFunctionCall(callFor("hi"), env(), remote, undefined);
+      assert.equal(sent[0].content, GREETING);
+    });
+
+    test("the questions of a voice session are the history of the next one, so a follow-up keeps its thread", async () => {
+      const { remote, client } = session();
+      const history: { role: "user" | "assistant"; text: string }[] = [];
+      const seen: string[] = [];
+      const recordingGroq = (url: string, init?: RequestInit): Response => {
+        const body = JSON.parse(String(init?.body));
+        if (body.response_format.json_schema.name === "route") seen.push(String(body.messages[1].content));
+        return fakeGroq(url, init);
+      };
+      const e = env({ GROQ_API_KEY: "gsk-test" });
+      await withFetch(recordingGroq, async () => {
+        await answerFunctionCall(callFor("Tell me about SB 53", "f1"), e, remote, undefined, { client, history });
+        await answerFunctionCall(callFor("Who does it apply to?", "f2"), e, remote, undefined, { client, history });
+      });
+      assert.equal(seen.length, 2);
+      assert.match(seen[0]!, /\(no earlier conversation\)/);
+      assert.match(seen[1]!, /User: Tell me about SB 53\nAssistant: /);
+      assert.match(seen[1]!, /Latest message:\nWho does it apply to\?/);
+      assert.equal(history.length, 4);
+      assert.ok(history.length <= 8);
+    });
+
+    test("the history kept for a session is bounded", async () => {
+      const { remote } = session();
+      const history = Array.from({ length: 8 }, (_, i) => ({ role: i % 2 ? ("assistant" as const) : ("user" as const), text: `t${i}` }));
+      await answerFunctionCall(callFor("hi"), env(), remote, undefined, { history });
+      assert.equal(history.length, 8);
+      assert.equal(history[history.length - 2]!.text, "hi");
+    });
+
+    test("/api/voice/think runs the pipeline once for a spoken question too", async () => {
+      const { urls } = await withFetch(fakeGroq, () =>
+        think(new Request("https://politik.test/api/voice/think", { method: "POST", body: JSON.stringify({ messages: [{ role: "user", content: "What is going on?" }] }) }), env({ GROQ_API_KEY: "gsk-test" })),
+      );
+      assert.deepEqual(urls, [GROQ, GROQ]);
     });
   });
 });

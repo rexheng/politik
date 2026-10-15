@@ -3,6 +3,7 @@ import { failureResponse, normalizeChatRequest } from "./chat/index.ts";
 import { loadMap } from "./map.ts";
 import { BLUESKY_URL, GROUP_URL, buildSaying } from "./saying.ts";
 import { loadCatalog } from "./catalog.ts";
+import { busyResponse, clientIp, overLimit } from "./limit.ts";
 import { proxyAgent, proxyListen, speak, think } from "./voice.ts";
 
 export type { Env };
@@ -22,6 +23,8 @@ function failResponse(): Response {
 
 async function handleAsk(request: Request, env: Env): Promise<Response> {
   try {
+    // Over the limit is an answer, not an error (status 200), so the page shows it like any other reply.
+    if (await overLimit(env, clientIp(request))) return json(busyResponse());
     const input = normalizeChatRequest(await request.json());
     if (!input.message) return json({ error: "Ask a question." }, 400);
     return json(await askShared(input.message, env, input.knowledge, input.history));

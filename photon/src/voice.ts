@@ -1,7 +1,8 @@
 import { askShared, type Env } from "./ask.ts";
-import { GREETING } from "./chat/index.ts";
-import { toSpoken } from "./chat/spoken.ts";
-import type { ChatTurn } from "./chat/types.ts";
+import { GREETING, MAX_HISTORY_TURNS } from "./chat/index.ts";
+import { toSpokenResponse } from "./chat/spoken.ts";
+import type { ChatResponse, ChatTurn } from "./chat/types.ts";
+import { busyResponse, clientIp, overLimit } from "./limit.ts";
 
 const SPEAK_URL = "https://api.deepgram.com/v1/speak?model=aura-2-thalia-en";
 const LISTEN_URL =
@@ -106,8 +107,42 @@ function questionFromArguments(raw: unknown): string {
   }
 }
 
-/** Answers the voice agent's `politik` function call with the reply as speech. Returns true when `raw` was a function call. */
-export async function answerFunctionCall(raw: string, env: Env, remote: WebSocket, knowledge: unknown): Promise<boolean> {
+/**
+ * The type of the frame that carries a spoken question's full answer down to the page. The voice widget cannot hand the
+ * page a `ChatResponse`, and the page must not ask /api/ask again (that would run the pipeline twice for one question), so
+ * the Worker, which has just run it, sends the answer along the same socket; the widget ignores a type it does not know,
+ * and the page reads the frame off the socket (photon/public/app.js, `tapVoiceAnswers`).
+ */
+export const VOICE_ANSWER_TYPE = "PolitikAnswer";
+
+const COULD_NOT_CHECK = "I could not check that just now.";
+
+/** What `answerFunctionCall` knows about the session besides the function call itself. */
+export type FunctionCallSession = {
+  /** The page's side of the socket. Each answer's `ChatResponse` goes to it in a `PolitikAnswer` frame. */
+  client?: Pick<WebSocket, "send">;
+  /** The caller's IP address, which the rate limit counts. */
+  ip?: string;
+  /** The questions and replies so far in this voice session: read for each question, and added to after it. */
+  history?: ChatTurn[];
+};
+
+/** One spoken question, run through the pipeline once: the rate limit, then `askShared` with the session's history. */
+async function answerSpokenQuestion(question: string, env: Env, knowledge: unknown, session: FunctionCallSession): Promise<ChatResponse> {
+  if (await overLimit(env, session.ip ?? "")) return busyResponse();
+  const result = await askShared(question, env, knowledge, session.history);
+  if (session.history) {
+    session.history.push({ role: "user", text: question }, { role: "assistant", text: result.reply ?? "" });
+    while (session.history.length > MAX_HISTORY_TURNS) session.history.shift();
+  }
+  return result;
+}
+
+/**
+ * Answers the voice agent's `politik` function call with the reply as speech, and shows the page the same answer (one
+ * run of the pipeline for the spoken question, not two). Returns true when `raw` was a function call.
+ */
+export async function answerFunctionCall(raw: string, env: Env, remote: WebSocket, knowledge: unknown, session: FunctionCallSession = {}): Promise<boolean> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -123,14 +158,19 @@ export async function answerFunctionCall(raw: string, env: Env, remote: WebSocke
     if (fn.client_side === false) continue;
     const name = typeof fn.name === "string" ? fn.name : "";
     const question = questionFromArguments(fn.arguments);
-    let content = "I could not check that just now.";
+    let content = COULD_NOT_CHECK;
     if (name === "politik" && question) {
       try {
-        const result = await askShared(question, env, knowledge);
-        const spoken = toSpoken(result.reply ?? "");
+        const result = await answerSpokenQuestion(question, env, knowledge, session);
+        const spoken = toSpokenResponse(result);
         if (spoken) content = spoken;
+        try {
+          session.client?.send(JSON.stringify({ type: VOICE_ANSWER_TYPE, question, response: result }));
+        } catch {
+          // the page is gone; the agent still gets its answer
+        }
       } catch {
-        content = "I could not check that just now.";
+        content = COULD_NOT_CHECK;
       }
     }
     try {
@@ -208,6 +248,7 @@ async function proxySocket(
   };
 
   let sessionKnowledge: unknown;
+  const session: FunctionCallSession = { client: server, ip: clientIp(request), history: [] };
   server.addEventListener("message", (event) => {
     try {
       if (typeof event.data === "string") {
@@ -249,7 +290,7 @@ async function proxySocket(
       if (typeof event.data === "string") {
         if (env) {
           const raw = event.data;
-          void answerFunctionCall(raw, env, remote, sessionKnowledge).then(
+          void answerFunctionCall(raw, env, remote, sessionKnowledge, session).then(
             (handled) => {
               if (handled || shuttingDown) return;
               try {
@@ -436,9 +477,11 @@ export async function think(request: Request, env: Env): Promise<Response> {
     const messages = Array.isArray(body.messages) ? body.messages : [];
     const message = latestUserText(messages);
     if (!message) return completion(GREETING, stream);
-    const result = await askShared(message, env, knowledgeFromMessages(messages), historyFromMessages(messages));
-    return completion(toSpoken(result.reply ?? "") || GREETING, stream);
+    const result = (await overLimit(env, clientIp(request)))
+      ? busyResponse()
+      : await askShared(message, env, knowledgeFromMessages(messages), historyFromMessages(messages));
+    return completion(toSpokenResponse(result) || GREETING, stream);
   } catch {
-    return completion("I could not check that just now.", stream);
+    return completion(COULD_NOT_CHECK, stream);
   }
 }

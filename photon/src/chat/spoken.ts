@@ -1,6 +1,8 @@
 // A reply as speech, for the voice route and anywhere else the text is read aloud (design §4): no [n] markers and no
 // markdown, each bullet or heading a sentence of its own, and no more than `max` characters, cut at a sentence end.
 import { ABBREVIATION, stripMarkers } from "./cite.ts";
+import { FALLBACK_REPLY } from "./index.ts";
+import type { ChatResponse } from "./types.ts";
 
 /** The most characters a spoken reply has by default. */
 export const SPOKEN_MAX_CHARS = 600;
@@ -41,4 +43,33 @@ function cut(text: string, max: number): string {
   if (space > 0) head = head.slice(0, space);
   head = head.replace(/[\ud800-\udbff]$/, "").replace(/[\s,;:\-–—(]+$/, "");
   return head ? `${head}.` : "";
+}
+
+/** The most record titles a spoken fallback names. */
+export const SPOKEN_FALLBACK_TITLES = 3;
+
+/** "A", "A and B" or "A, B and C". */
+function joinTitles(titles: string[]): string {
+  return titles.length <= 1 ? (titles[0] ?? "") : `${titles.slice(0, -1).join(", ")} and ${titles[titles.length - 1]}`;
+}
+
+/** The fixed fallback line up to its dash: "I couldn't write a summary just now." (the rest, "here are the records", cannot be heard as a list). */
+const FALLBACK_LEAD = (() => {
+  const dash = FALLBACK_REPLY.indexOf(" — ");
+  return dash > 0 ? `${FALLBACK_REPLY.slice(0, dash)}.` : FALLBACK_REPLY;
+})();
+
+/**
+ * A response as speech. An answer is `toSpoken(reply)`. A fallback that has records (the model could not write a summary)
+ * names them, because "here are the most relevant records" means nothing without a screen: "I couldn't write a summary
+ * just now. The most relevant records are SB 53, SB 1047 and PDPA." (up to three, by short title where there is one).
+ */
+export function toSpokenResponse(response: Pick<ChatResponse, "reply" | "mode" | "citations">, max = SPOKEN_MAX_CHARS): string {
+  if (response.mode !== "fallback" || response.citations.length === 0) return toSpoken(response.reply ?? "", max);
+  const titles = response.citations
+    .slice(0, SPOKEN_FALLBACK_TITLES)
+    .map((c) => (c.shortTitle?.trim() || c.title).replace(/\s+/g, " ").trim().replace(/[.,;:]+$/, ""))
+    .filter(Boolean);
+  if (titles.length === 0) return toSpoken(response.reply ?? "", max);
+  return toSpoken(`${FALLBACK_LEAD} The most relevant records are ${joinTitles(titles)}.`, max);
 }

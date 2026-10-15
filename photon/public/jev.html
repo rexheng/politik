@@ -178,10 +178,11 @@
         <h2>Ask</h2>
         <p class="where">/api/ask</p>
         <ol>
-          <li>Greeting skips Jev.</li>
-          <li>Question keeps the desk.</li>
-          <li>Fetched rows keep who and tier.</li>
-          <li>OpenAI writes the line.</li>
+          <li>Route: a greeting gets one line; any other question is sorted by what it asks.</li>
+          <li>Find records in the policy dataset.</li>
+          <li>Rank them: Jev judges how significant or how relevant each one is.</li>
+          <li>Groq writes a cited answer from the best of them.</li>
+          <li>Citations are checked against the sources.</li>
         </ol>
       </article>
       <article class="path">
@@ -317,8 +318,8 @@
       const desk = deskOf(trimmed);
       const weight = WEIGHT[tier];
       const use = kind === "question"
-        ? `desk ${desk}`
-        : `${desk} · ${who} · ${tier}`;
+        ? "ranked by relevance to the question"
+        : `ranked by significance (${tier})`;
       out.innerHTML = [
         row("who", who),
         row("tier", `${tier} ${weight}`),

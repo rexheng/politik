@@ -1,6 +1,6 @@
 // The chat screen. index.html loads this as an ES module so it can import the pure helpers in format.js. Whatever the
 // model wrote reaches the page through createElement and textContent, never through innerHTML.
-import { MAX_HISTORY_TURNS, formatAsOf, historyTurn, parseAnswer, spokenText } from "/format.js";
+import { MAX_HISTORY_TURNS, formatAsOf, formatDay, historyTurn, parseAnswer, spokenReply, tapVoiceAnswers } from "/format.js";
 
 const GREETING = "Hi — ask me what's going on in California or Singapore tech policy.";
 const GENERAL_LABEL = "Not from Politik's sources — unverified";
@@ -174,7 +174,7 @@ function sourceCard(cite) {
     const flags = el("p", "src-flags");
     if (cite.reviewState === "human-reviewed") flags.appendChild(el("span", "src-review src-review--human", "✓ Reviewed"));
     else if (cite.reviewState === "auto-checked") flags.appendChild(el("span", "src-review", "Auto-checked"));
-    const day = fetchedDay(cite.fetched);
+    const day = formatDay(fetchedDay(cite.fetched)); // D Mon YYYY, as the footer shows the data date
     if (day) flags.appendChild(el("span", null, "Fetched " + day));
     if (flags.firstChild) card.appendChild(flags);
   }
@@ -238,6 +238,7 @@ function readReply(data) {
   };
   return {
     reply: reply,
+    mode: typeof data.mode === "string" ? data.mode : "",
     citations: list(data.citations).filter(function (cite) {
       return cite && typeof cite === "object" && Number.isInteger(cite.n);
     }),
@@ -391,8 +392,27 @@ function agentSocketBase() {
   return url.href.replace(/\/$/, "");
 }
 
-let voiceTurn = "";
 let voiceFailed = false;
+
+// ---- the voice agent's answers -----------------------------------------------------------------------------------
+// A spoken question is one run of the chat pipeline, not two. The agent asks the Worker for every real question (a
+// "politik" function call on the socket the Worker proxies), the Worker runs the pipeline once, speaks the reply, and
+// sends this page the same answer in a "PolitikAnswer" frame down that socket. The widget ignores a frame type it does
+// not know and cannot hand a response to the page, so tapVoiceAnswers (format.js) reads the frames off the socket
+// instead. The page never calls /api/ask for a spoken question.
+
+async function showVoiceAnswer(question, data) {
+  reachNoted = false;
+  showTranscript();
+  appendUser(question);
+  try {
+    const view = readReply(data);
+    rememberTurn(question, view.reply);
+    await appendPhoton(view);
+  } catch (err) {
+    appendError();
+  }
+}
 
 function mountFallbackTalk(host) {
   host.innerHTML = "";
@@ -526,7 +546,7 @@ function mountFallbackTalk(host) {
       rememberTurn(message, view.reply);
       await appendPhoton(view);
       setLabel("Speaking");
-      await playReply(spokenText(view.reply) || GREETING);
+      await playReply(spokenReply(view) || GREETING);
     } catch (err) {
       showTranscript();
       appendError();
@@ -668,9 +688,6 @@ function mountVoice() {
         think: {
           provider: { type: "open_ai", model: "gpt-4o-mini" },
           prompt: prompt,
-          endpoint: {
-            url: new URL("/api/voice/think", window.location.href).href,
-          },
         },
         speak: {
           provider: { type: "deepgram", model: "aura-2-thalia-en" },
@@ -719,15 +736,6 @@ function mountVoice() {
         onAgentError: function () {
           useFallback();
         },
-        onMessage: function (msg) {
-          if (!msg || msg.role !== "user") return;
-          const text = typeof msg.content === "string" ? msg.content.trim() : "";
-          if (!text || text === voiceTurn) return;
-          voiceTurn = text;
-          renderAsk(text).finally(function () {
-            if (voiceTurn === text) voiceTurn = "";
-          });
-        },
       },
     });
   } catch (err) {
@@ -742,6 +750,8 @@ function mountVoice() {
   });
 }
 
+// The tap must be in place before the widget opens its socket.
+tapVoiceAnswers(window, window.location.href, showVoiceAnswer);
 mountVoice();
 
 form.addEventListener("submit", async function (event) {

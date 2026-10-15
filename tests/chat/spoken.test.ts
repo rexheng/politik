@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { toSpoken } from "../../photon/src/chat/spoken.ts";
+import { FAIL_REPLY, FALLBACK_REPLY } from "../../photon/src/chat/index.ts";
+import { toSpoken, toSpokenResponse } from "../../photon/src/chat/spoken.ts";
+import type { Citation } from "../../photon/src/chat/types.ts";
 
 describe("toSpoken", () => {
   test("drops markers and markdown and turns bullets into sentences", () => {
@@ -104,5 +106,40 @@ describe("toSpoken", () => {
   test("the limit is a parameter", () => {
     assert.equal(toSpoken("One. Two. Three.", 10), "One. Two.");
     assert.equal(toSpoken("One. Two. Three.", 0), "");
+  });
+});
+
+describe("I3: a spoken fallback names the records", () => {
+  const cite = (n: number, title: string, shortTitle?: string): Citation => ({ n, kind: "policy", recordId: `r${n}`, title, ...(shortTitle ? { shortTitle } : {}), url: `https://example.org/${n}`, quote: "q" });
+  const fallback = (citations: Citation[]) => ({ reply: FALLBACK_REPLY, mode: "fallback" as const, citations });
+
+  test("up to three titles, by short title where there is one", () => {
+    const spoken = toSpokenResponse(fallback([cite(1, "Transparency in Frontier Artificial Intelligence Act", "SB 53"), cite(2, "Personal Data Protection Act 2012", "PDPA"), cite(3, "Colocation tender")]));
+    assert.equal(spoken, "I couldn't write a summary just now. The most relevant records are SB 53, PDPA and Colocation tender.");
+  });
+
+  test("two titles, one title, and no more than three", () => {
+    assert.equal(toSpokenResponse(fallback([cite(1, "A", "SB 53"), cite(2, "B")])), "I couldn't write a summary just now. The most relevant records are SB 53 and B.");
+    assert.equal(toSpokenResponse(fallback([cite(1, "Only record")])), "I couldn't write a summary just now. The most relevant records are Only record.");
+    const four = toSpokenResponse(fallback([cite(1, "A"), cite(2, "B"), cite(3, "C"), cite(4, "D")]));
+    assert.match(four, /are A, B and C\.$/);
+    assert.doesNotMatch(four, /\bD\b/);
+  });
+
+  test("the spoken fallback has no markers, markdown or brackets", () => {
+    const spoken = toSpokenResponse(fallback([cite(1, "Act [2020]", "**SB 53**")]));
+    assert.doesNotMatch(spoken, /[\[\]]/);
+    assert.doesNotMatch(spoken, /\*\*/);
+  });
+
+  test("a fallback with no records, and every other mode, is toSpoken(reply)", () => {
+    assert.equal(toSpokenResponse({ reply: FAIL_REPLY, mode: "fallback", citations: [] }), toSpoken(FAIL_REPLY));
+    assert.equal(toSpokenResponse({ reply: "**Yes [1].** More.", mode: "brief", citations: [cite(1, "A")] }), "Yes. More.");
+    assert.equal(toSpokenResponse({ reply: FALLBACK_REPLY, mode: "brief", citations: [cite(1, "A")] }), toSpoken(FALLBACK_REPLY), "only the fallback mode lists titles");
+  });
+
+  test("it respects the character limit", () => {
+    const long = Array.from({ length: 3 }, (_, i) => cite(i + 1, `${"Very long record title ".repeat(10)}${i}`));
+    assert.ok(toSpokenResponse(fallback(long), 120).length <= 120);
   });
 });

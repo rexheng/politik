@@ -1,6 +1,7 @@
 import { chat, normalizeChatRequest } from "./chat/index.ts";
 import type { ChatResponse } from "./chat/types.ts";
 import type { D1Like } from "./data/d1.ts";
+import type { RateLimiter } from "./limit.ts";
 
 export interface Env {
   ASSETS: Fetcher;
@@ -12,6 +13,10 @@ export interface Env {
   OPENAI_API_KEY?: string;
   ELEVENLABS_API_KEY?: string;
   TELEGRAM_BOT_TOKEN?: string;
+  /** When set, /telegram only accepts requests that carry it in X-Telegram-Bot-Api-Secret-Token (set the same value in setWebhook). */
+  TELEGRAM_WEBHOOK_SECRET?: string;
+  /** The Workers Rate Limiting binding (wrangler.jsonc `ratelimits`): 10 questions a minute for each IP address. */
+  ASK_LIMITER?: RateLimiter;
   DEEPGRAM_API_KEY?: string;
   MAPBOX_ACCESS_TOKEN?: string;
 }

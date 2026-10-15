@@ -44,7 +44,7 @@ describe("the chat page loads the new front end", () => {
     const sw = read("sw.js");
     assert.match(sw, /"\/format\.js"/);
     const version = Number(/politik-shell-v(\d+)/.exec(sw)?.[1]);
-    assert.ok(version > 24, `cache version ${version}`);
+    assert.ok(version > 25, `cache version ${version}: the shell changed (voice, cards, categorisation page), so it must be a new one`);
   });
 
   test("the empty state names the three example questions from the spec", () => {
@@ -60,6 +60,64 @@ describe("the chat page loads the new front end", () => {
     assert.ok(js.includes("Hi — ask me what's going on in California or Singapore tech policy."));
     assert.ok(js.includes("Public post · Bluesky"));
     assert.ok(js.includes("✓ Reviewed") && js.includes("Auto-checked"));
+  });
+});
+
+describe("I3: a spoken question runs the pipeline once", () => {
+  const js = read("app.js");
+
+  test("the voice widget does not hand its user turns to the chat: no onMessage handler, so no second /api/ask", () => {
+    assert.doesNotMatch(js, /onMessage/);
+    assert.doesNotMatch(js, /voiceTurn/);
+  });
+
+  test("the widget is not given the /api/voice/think endpoint: the agent asks the Worker through the politik function, whose answer the page is sent", () => {
+    assert.doesNotMatch(js, /\/api\/voice\/think/);
+    assert.doesNotMatch(js, /endpoint\s*:/);
+  });
+
+  test("/api/ask is asked from only the typed question, a suggestion chip, and the plain Talk button (used when the widget could not load)", () => {
+    const calls = [...js.matchAll(/\b(postAsk|renderAsk)\(/g)].map((m) => m[1]);
+    // definitions: postAsk, renderAsk; uses: renderAsk in the form submit and in the chip click; postAsk in renderAsk and in finishTurn
+    assert.deepEqual(calls.sort(), ["postAsk", "postAsk", "postAsk", "renderAsk", "renderAsk", "renderAsk"]);
+    assert.match(js, /async function finishTurn[\s\S]*?postAsk\(message\)/, "the plain Talk button asks once for its own turn");
+  });
+
+  test("the answer frames are read off the voice socket before the widget connects, and shown without asking", () => {
+    const tap = js.indexOf("tapVoiceAnswers(window, window.location.href, showVoiceAnswer);");
+    assert.ok(tap > 0);
+    assert.ok(tap < js.indexOf("\nmountVoice();"), "the tap is installed before the widget starts");
+    const show = /async function showVoiceAnswer[\s\S]*?\n}\n/.exec(js)![0];
+    assert.doesNotMatch(show, /postAsk|fetch\(/, "showing a spoken answer asks for nothing");
+    assert.match(show, /readReply\(data\)/, "the frame gets the same checks as an /api/ask reply");
+    assert.match(show, /appendPhoton\(view\)/);
+  });
+
+  test("the spoken text of the plain Talk button names the records of a fallback, as the Worker does", () => {
+    assert.match(js, /spokenReply\(view\)/);
+    assert.doesNotMatch(js, /spokenText/);
+  });
+});
+
+describe("M6: a card's fetched date is written like the footer's", () => {
+  test("the card formats the day with formatDay (D Mon YYYY), not the raw ISO date", () => {
+    const js = read("app.js");
+    assert.match(js, /formatDay\(fetchedDay\(cite\.fetched\)\)/);
+    assert.match(js, /"Fetched " \+ day/);
+  });
+});
+
+describe("M7: the Categorisation page describes the new Ask pipeline", () => {
+  const html = read("jev.html");
+
+  test("the Ask path names route, find records, rank, Groq's cited answer and the citation check", () => {
+    const ask = /<h2>Ask<\/h2>[\s\S]*?<\/ol>/.exec(html)![0];
+    for (const step of [/Route/, /Find records/, /Rank/, /Groq writes a cited answer/, /Citations are checked/]) assert.match(ask, step);
+  });
+
+  test("the old text is gone: no 'OpenAI writes the line' and no 'Question keeps the desk'", () => {
+    assert.doesNotMatch(html, /OpenAI writes the line/);
+    assert.doesNotMatch(html, /Question keeps the desk/);
   });
 });
 

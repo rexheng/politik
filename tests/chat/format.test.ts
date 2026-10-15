@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
+import { FALLBACK_REPLY } from "../../photon/src/chat/index.ts";
+import { toSpokenResponse } from "../../photon/src/chat/spoken.ts";
+import type { Citation } from "../../photon/src/chat/types.ts";
+import { VOICE_ANSWER_TYPE as SERVER_VOICE_ANSWER_TYPE } from "../../photon/src/voice.ts";
+
 // photon/public/format.js is a browser ES module with no DOM in it, so Node can import it as it is. It has no type
 // declarations (a .d.ts in photon/public would be served to browsers), so the shapes are written out here.
 type Inline = { type: "text" | "bold" | "cite"; text?: string; n?: number };
@@ -10,8 +15,14 @@ type Format = {
   formatAsOf(iso: string): string;
   historyTurn(role: string, text: string): { role: string; text: string };
   spokenText(md: string, max?: number): string;
+  formatDay(iso: string): string;
+  spokenReply(view: { reply: string; mode?: string; citations?: { title?: string; shortTitle?: string }[] }, max?: number): string;
+  voiceAnswerOf(data: unknown): { question: string; response: Record<string, unknown> } | null;
+  isVoiceSocketUrl(url: string, base?: string): boolean;
+  tapVoiceAnswers(target: { WebSocket?: unknown }, base: string, onAnswer: (question: string, response: Record<string, unknown>) => void): boolean;
+  VOICE_ANSWER_TYPE: string;
 };
-const { parseAnswer, formatAsOf, historyTurn, spokenText } = (await import(new URL("../../photon/public/format.js", import.meta.url).href)) as Format;
+const { parseAnswer, formatAsOf, historyTurn, spokenText, formatDay, spokenReply, voiceAnswerOf, isVoiceSocketUrl, tapVoiceAnswers, VOICE_ANSWER_TYPE } = (await import(new URL("../../photon/public/format.js", import.meta.url).href)) as Format;
 
 const text = (t: string): Inline => ({ type: "text", text: t });
 const bold = (t: string): Inline => ({ type: "bold", text: t });
@@ -171,5 +182,163 @@ describe("spokenText", () => {
     assert.equal(spokenText("[1][2]"), "");
     assert.equal(spokenText(""), "");
     assert.equal(spokenText(undefined as unknown as string), "");
+  });
+});
+
+describe("formatDay (M6: the card's fetched date reads like the footer)", () => {
+  test("a date or an ISO timestamp is D Mon YYYY, the same day the footer shows", () => {
+    assert.equal(formatDay("2026-10-15"), "15 Oct 2026");
+    assert.equal(formatDay("2026-01-05"), "5 Jan 2026");
+    assert.equal(formatDay("2026-09-30T23:59:59Z"), "30 Sep 2026");
+    assert.equal(formatAsOf("2026-10-15"), `Data as of ${formatDay("2026-10-15")}`);
+  });
+
+  test("no real date is empty", () => {
+    for (const bad of ["", "soon", "2026-02-30", "2026-13-01", undefined, null, 20261015]) assert.equal(formatDay(bad as unknown as string), "", String(bad));
+  });
+});
+
+describe("spokenReply", () => {
+  const cite = (n: number, title: string, shortTitle?: string): Citation => ({ n, kind: "policy", recordId: `r${n}`, title, ...(shortTitle ? { shortTitle } : {}), url: `https://example.org/${n}`, quote: "q" });
+
+  test("a fallback names up to three records, by short title where there is one", () => {
+    const view = { reply: FALLBACK_REPLY, mode: "fallback", citations: [cite(1, "Transparency in Frontier Artificial Intelligence Act", "SB 53"), cite(2, "Personal Data Protection Act 2012", "PDPA"), cite(3, "Colocation tender"), cite(4, "Fourth")] };
+    assert.equal(spokenReply(view), "I couldn't write a summary just now. The most relevant records are SB 53, PDPA and Colocation tender.");
+  });
+
+  test("it says what the Worker says for the voice agent", () => {
+    const cases = [
+      { reply: FALLBACK_REPLY, mode: "fallback" as const, citations: [cite(1, "A", "SB 53"), cite(2, "B")] },
+      { reply: FALLBACK_REPLY, mode: "fallback" as const, citations: [cite(1, "Only")] },
+      { reply: "**Yes [1].** - bullet", mode: "brief" as const, citations: [cite(1, "A")] },
+      { reply: "I could not check that just now. Try again in a minute.", mode: "fallback" as const, citations: [] },
+    ];
+    for (const view of cases) assert.equal(spokenReply(view), toSpokenResponse(view), view.reply);
+  });
+
+  test("an answer, and a fallback with no records, are the reply as speech", () => {
+    assert.equal(spokenReply({ reply: "**Yes [1].** More.", mode: "brief", citations: [cite(1, "A")] }), "Yes. More.");
+    assert.equal(spokenReply({ reply: "Sorry. Try later.", mode: "fallback", citations: [] }), "Sorry. Try later.");
+    assert.equal(spokenReply({ reply: "Hi.", citations: undefined as unknown as [] }), "Hi.");
+  });
+});
+
+describe("the voice socket's answer frame (I3)", () => {
+  const frame = (over: Record<string, unknown> = {}) => JSON.stringify({ type: "PolitikAnswer", question: "What is going on?", response: { reply: "Hi [1].", citations: [] }, ...over });
+
+  test("the type is the one the Worker sends", () => {
+    assert.equal(VOICE_ANSWER_TYPE, SERVER_VOICE_ANSWER_TYPE);
+  });
+
+  test("a good frame gives the question and the response", () => {
+    assert.deepEqual(voiceAnswerOf(frame()), { question: "What is going on?", response: { reply: "Hi [1].", citations: [] } });
+    assert.equal(voiceAnswerOf(frame({ question: "  padded  " }))!.question, "padded");
+  });
+
+  test("any other frame is not an answer: audio, the agent's own JSON, bad JSON, a frame with no question or response", () => {
+    for (const data of [new ArrayBuffer(8), null, undefined, 5, "", "not json", '{"type":"ConversationText","role":"user","content":"PolitikAnswer"}', frame({ type: "Other" }), frame({ question: "" }), frame({ question: 5 }), frame({ response: null }), frame({ response: "text" }), "[1,2]", "PolitikAnswer"]) {
+      assert.equal(voiceAnswerOf(data), null, String(data));
+    }
+  });
+
+  test("only a socket under /api/voice/ on this site is read", () => {
+    const base = "https://politik.example/";
+    assert.equal(isVoiceSocketUrl("wss://politik.example/api/voice/v1/agent/converse", base), true);
+    assert.equal(isVoiceSocketUrl("/api/voice/v1/agent/converse", base), true);
+    assert.equal(isVoiceSocketUrl("wss://politik.example/api/voice/listen", base), true);
+    assert.equal(isVoiceSocketUrl("wss://politik.example/other", base), false);
+    assert.equal(isVoiceSocketUrl("wss://politik.example/api/ask", base), false);
+    assert.equal(isVoiceSocketUrl("not a url at all %%", "also bad"), false);
+  });
+});
+
+describe("tapVoiceAnswers", () => {
+  /** A stand-in for the browser's WebSocket: it records its url and protocols and lets a test deliver frames. */
+  class FakeSocket {
+    static CLOSING = 2;
+    static instances: FakeSocket[] = [];
+    listeners: ((event: { data: unknown }) => void)[] = [];
+    sent: unknown[] = [];
+    constructor(
+      public url: string,
+      public protocols?: string | string[],
+    ) {
+      FakeSocket.instances.push(this);
+    }
+    addEventListener(type: string, listener: (event: { data: unknown }) => void) {
+      if (type === "message") this.listeners.push(listener);
+    }
+    send(data: unknown) {
+      this.sent.push(data);
+    }
+    deliver(data: unknown) {
+      for (const listener of this.listeners) listener({ data });
+    }
+  }
+  const base = "https://politik.example/";
+  const frame = (question: string) => JSON.stringify({ type: "PolitikAnswer", question, response: { reply: "R [1].", citations: [] } });
+
+  function install() {
+    FakeSocket.instances = [];
+    const target: { WebSocket: unknown } = { WebSocket: FakeSocket };
+    const heard: [string, unknown][] = [];
+    assert.equal(tapVoiceAnswers(target, base, (q, r) => void heard.push([q, r])), true);
+    const Tapped = target.WebSocket as typeof FakeSocket;
+    return { target, heard, Tapped };
+  }
+
+  test("an answer frame on the voice agent's socket reaches the handler, once", () => {
+    const { heard, Tapped } = install();
+    const socket = new Tapped("wss://politik.example/api/voice/v1/agent/converse", ["bearer", "proxy"]);
+    socket.deliver(frame("What is going on?"));
+    assert.deepEqual(heard, [["What is going on?", { reply: "R [1].", citations: [] }]]);
+  });
+
+  test("the socket is otherwise the native one: same url and protocols, sends, statics, and an instance of the original", () => {
+    const { Tapped } = install();
+    const socket = new Tapped("wss://politik.example/api/voice/v1/agent/converse", ["bearer", "proxy"]);
+    assert.equal(socket.url, "wss://politik.example/api/voice/v1/agent/converse");
+    assert.deepEqual(socket.protocols, ["bearer", "proxy"]);
+    socket.send("audio");
+    assert.deepEqual(socket.sent, ["audio"]);
+    assert.equal(Tapped.CLOSING, 2);
+    assert.ok(socket instanceof FakeSocket);
+  });
+
+  test("other frames on the voice socket (audio, the agent's own JSON) are ignored", () => {
+    const { heard, Tapped } = install();
+    const socket = new Tapped("wss://politik.example/api/voice/v1/agent/converse");
+    socket.deliver(new ArrayBuffer(4));
+    socket.deliver(JSON.stringify({ type: "ConversationText", role: "user", content: "hi" }));
+    socket.deliver("not json");
+    assert.deepEqual(heard, []);
+  });
+
+  test("a socket to any other address is not listened to", () => {
+    const { heard, Tapped } = install();
+    const socket = new Tapped("wss://elsewhere.example/stream");
+    assert.equal(socket.listeners.length, 0);
+    socket.deliver(frame("q"));
+    assert.deepEqual(heard, []);
+  });
+
+  test("a handler that throws does not disturb the socket's other listeners", () => {
+    FakeSocket.instances = [];
+    const target: { WebSocket: unknown } = { WebSocket: FakeSocket };
+    tapVoiceAnswers(target, base, () => {
+      throw new Error("boom");
+    });
+    const socket = new (target.WebSocket as typeof FakeSocket)("wss://politik.example/api/voice/v1/agent/converse");
+    let later = 0;
+    socket.addEventListener("message", () => later++);
+    assert.doesNotThrow(() => socket.deliver(frame("q")));
+    assert.equal(later, 1);
+  });
+
+  test("it is installed once, and does nothing without a WebSocket", () => {
+    const { target } = install();
+    assert.equal(tapVoiceAnswers(target, base, () => {}), false, "already wrapped");
+    assert.equal(tapVoiceAnswers({}, base, () => {}), false);
+    assert.equal(tapVoiceAnswers(undefined as unknown as { WebSocket?: unknown }, base, () => {}), false);
   });
 });
