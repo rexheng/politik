@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { clipQuote, finalize, isCitable, MAX_QUOTE_CHARS, stripMarkers } from "../../photon/src/chat/cite.ts";
+import { bestQuote, clipQuote, finalize, isCitable, MAX_QUOTE_CHARS, splitSentences, stripMarkers } from "../../photon/src/chat/cite.ts";
 import type { ComposeOut, Source } from "../../photon/src/chat/types.ts";
 import type { Passage, RecordSummary } from "../../photon/src/data/schema.ts";
 
@@ -318,5 +318,99 @@ describe("markers: what counts as one (B-R10)", () => {
 
   test("line breaks inside the brackets are not a marker", () => {
     assert.equal(stripMarkers("A [\n1\n]."), "A [\n1\n].");
+  });
+});
+
+describe("splitSentences", () => {
+  test("splits at a full stop followed by a capital, keeping the markers with the sentence before them", () => {
+    assert.deepEqual(splitSentences("The bill passed [1]. The governor signed it [2][3]. Done."), ["The bill passed [1].", " The governor signed it [2][3].", " Done."]);
+    assert.equal(splitSentences("A [1]. B [2]. C.").join(""), "A [1]. B [2]. C.", "the pieces give the line back");
+  });
+
+  test("does not split after an abbreviation: U.S., e.g., i.e., Sec., No.", () => {
+    assert.deepEqual(splitSentences("The U.S. Congress acted [1]. It passed."), ["The U.S. Congress acted [1].", " It passed."]);
+    assert.deepEqual(splitSentences("Large developers (e.g. Meta) must report [1]. Others need not."), ["Large developers (e.g. Meta) must report [1].", " Others need not."]);
+    assert.deepEqual(splitSentences("It covers models, i.e. Frontier ones [1]. Other models are out."), ["It covers models, i.e. Frontier ones [1].", " Other models are out."]);
+    assert.deepEqual(splitSentences("See Sec. Twelve for duties [1]. Then more."), ["See Sec. Twelve for duties [1].", " Then more."]);
+    assert.deepEqual(splitSentences("It is Bill No. Five [1]. Next."), ["It is Bill No. Five [1].", " Next."]);
+  });
+
+  test("a line with no full stop is one sentence, and an empty line is one empty piece", () => {
+    assert.deepEqual(splitSentences("What to watch: the vote"), ["What to watch: the vote"]);
+    assert.deepEqual(splitSentences(""), [""]);
+  });
+});
+
+describe("I5: the quote is the stretch of the source that the citing sentence rests on", () => {
+  const FILLER = "The agency reviews routine administrative matters in the ordinary course of its work. ";
+  const FACT = "The zebra registry must be audited every year by the regulator.";
+  const long = `${FILLER.repeat(5)}${FACT} ${FILLER.repeat(5)}`;
+
+  test("a fact deep in a long passage is in the quote", () => {
+    assert.ok(long.length > 800);
+    const got = finalize(out("The zebra registry is audited every year [1]."), [policy("one", long)]);
+    const quote = got.citations[0]!.quote;
+    assert.ok(quote.includes(FACT), quote);
+    assert.ok(quote.length <= MAX_QUOTE_CHARS, `${quote.length} chars`);
+    assert.ok(quote.startsWith("…") && quote.endsWith("…"), quote);
+  });
+
+  test("with the fact near the start the quote starts at the start, with no leading ellipsis", () => {
+    const early = `${FACT} ${FILLER.repeat(10)}`;
+    const got = finalize(out("The registry is audited each year [1]."), [policy("one", early)]);
+    assert.ok(got.citations[0]!.quote.startsWith("The zebra registry must be audited"));
+    assert.ok(got.citations[0]!.quote.length <= MAX_QUOTE_CHARS);
+  });
+
+  test("each source's quote follows the sentence that cites it", () => {
+    const a = `${FILLER.repeat(5)}Alpha facility must report each incident to the board. ${FILLER.repeat(5)}`;
+    const b = `${FILLER.repeat(4)}Beta operators must renew their licence every three years. ${FILLER.repeat(6)}`;
+    const got = finalize(out("Alpha reports incidents [1]. Beta operators renew licences [2]. Both are covered [1][2]."), [policy("one", a), policy("two", b)]);
+    assert.ok(got.citations[0]!.quote.includes("Alpha facility must report"), got.citations[0]!.quote);
+    assert.ok(got.citations[1]!.quote.includes("Beta operators must renew"), got.citations[1]!.quote);
+  });
+
+  test("when several sentences cite one source, the window that serves most of them wins", () => {
+    const text = `${FILLER.repeat(4)}Operators must file annually. Late filers pay a fine of ten thousand dollars. ${FILLER.repeat(4)}Unrelated tail about parking.`;
+    const got = finalize(out("Operators file every year [1]. Late filers pay a fine [1]."), [policy("one", text)]);
+    const quote = got.citations[0]!.quote;
+    assert.ok(quote.includes("Operators must file annually") && quote.includes("Late filers pay a fine"), quote);
+  });
+
+  test("a sentence with no word in common with the source leaves the quote at the start of the source", () => {
+    const got = finalize(out("Entirely different words appear here [1]."), [policy("one", long)]);
+    assert.equal(got.citations[0]!.quote, clipQuote(long));
+  });
+
+  test("a marker with no sentence around it, or a source that is short, keeps the whole text", () => {
+    assert.equal(finalize(out("[1]"), [policy("one", "Short passage.")]).citations[0]!.quote, "Short passage.");
+    assert.equal(finalize(out("About a short passage [1]."), [policy("one", "Short passage.")]).citations[0]!.quote, "Short passage.");
+  });
+
+  test("a post's quote is cut the same way", () => {
+    const text = `${"Filler words about nothing much. ".repeat(12)}Quokkas deserve a sanctuary funded annually. ${"More filler words. ".repeat(12)}`;
+    const got = finalize(out("One post wants a quokka sanctuary funded [1]."), [post("https://bsky.app/p/1", text)]);
+    assert.ok(got.citations[0]!.quote.includes("Quokkas deserve a sanctuary"), got.citations[0]!.quote);
+  });
+
+  test("a sentence is not split at U.S.: the claim keeps its words", () => {
+    const text = `${FILLER.repeat(5)}Congress in the United States must approve any treaty with a two thirds vote. ${FILLER.repeat(5)}`;
+    const got = finalize(out("In the U.S. Congress must approve any treaty [1]."), [policy("one", text)]);
+    assert.ok(got.citations[0]!.quote.includes("must approve any treaty"), got.citations[0]!.quote);
+  });
+
+  test("it is unchanged for markers beyond the sources, which still drop out", () => {
+    const got = finalize(out("The zebra registry is audited [1]. Something else [5]."), [policy("one", long)]);
+    assert.equal(got.reply, "The zebra registry is audited [1]. Something else.");
+    assert.ok(got.citations[0]!.quote.includes(FACT));
+  });
+
+  test("bestQuote never exceeds the limit, even for one long word or an emoji at the edge", () => {
+    const wall = `${"a".repeat(400)} zebra ${"😀".repeat(200)}`;
+    for (const claim of ["zebra", "aaaa", "nothing in common"]) {
+      const quote = bestQuote(wall, claim);
+      assert.ok(quote.length <= MAX_QUOTE_CHARS, `${claim}: ${quote.length}`);
+      assert.doesNotMatch(quote, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    }
   });
 });

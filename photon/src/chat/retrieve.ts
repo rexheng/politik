@@ -6,18 +6,26 @@
 //   sentiment     public posts (Bluesky and the client's saved ones), plus a few policy passages for context
 //   out-of-scope  a three-passage search, whose only job is to notice that the corpus does cover the question
 //   greeting, clarify   nothing
+// A passage found by a search is shown as the window around the words that matched (up to MAX_PASSAGE_CHARS), not
+// the start of a long passage; a passage a record itself cites keeps its start.
 // Policy data is read only through ../data/store.ts. This never throws on a Bluesky failure.
 import type { SourceItem } from "../contracts.ts";
 import type { D1Like } from "../data/d1.ts";
-import { toFtsQuery } from "../data/fts.ts";
+import { ftsTerms, toFtsQuery } from "../data/fts.ts";
 import type { Filters, Manifest, Passage, PassageHit, PolicyRecord, RecordSummary } from "../data/schema.ts";
 import { getPassages, getRecord, listRecords, recentChanges, searchPassages } from "../data/store.ts";
+import { normaliseBill } from "./bills.ts";
 import type { Route, Source } from "./types.ts";
+
+export { normaliseBill };
 
 /** The most sources one answer gets. */
 export const MAX_SOURCES = 12;
-/** The longest passage (or post) text kept, in characters. */
-export const MAX_PASSAGE_CHARS = 1200;
+/**
+ * The longest passage (or post) text kept, in characters. 900 keeps a 12-source brief prompt small enough for Groq's
+ * free tier (8,000 tokens a minute); the eval imports this same constant for what its judge may read.
+ */
+export const MAX_PASSAGE_CHARS = 900;
 /** How far back "recent" reaches when the router did not say. */
 export const DEFAULT_SINCE_DAYS = 120;
 /** How long a Bluesky search may take before the answer goes ahead without posts. */
@@ -29,6 +37,8 @@ const MAX_POSTS = 6;
 const SEARCH_TOP = 6;
 const CONTEXT_TOP = 3;
 const OUT_OF_SCOPE_TOP = 3;
+/** Passages read to count how many distinct records an out-of-scope question matches. */
+const OUT_OF_SCOPE_POOL = 12;
 /** Fewer hits than this from a search that needs every term means the question is worded loosely: try any term (ruling R7). */
 const MIN_ALL_HITS = 3;
 /** A record has several events, so more are read than records wanted. */
@@ -98,8 +108,74 @@ function clipText(text: string, max = MAX_PASSAGE_CHARS): string {
   return `${cut.trimEnd()}…`;
 }
 
-function policySource(record: RecordSummary, passage: Passage): Source {
-  return { kind: "policy", record, passage: { ...passage, text: clipText(passage.text) } };
+/** How far before the first matched word a window starts, so the reader sees the sentence it sits in. */
+const WINDOW_LEAD_CHARS = 120;
+
+/**
+ * Where a search term (or, for a longer term, its stem: "registries" finds "registry") starts a word in `text`. The full
+ * text index stems with Porter, so a literal match would miss "regulator" for "regulators".
+ */
+function termStarts(text: string, term: string): number[] {
+  const stem = term.length >= 6 ? term.slice(0, Math.max(5, term.length - 3)) : term;
+  const safe = stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const end = term.length <= 3 ? String.raw`(?![\p{L}\p{N}])` : "";
+  const found = text.matchAll(new RegExp(String.raw`(?<![\p{L}\p{N}])${safe}${end}`, "giu"));
+  const starts: number[] = [];
+  for (const m of found) {
+    starts.push(m.index);
+    if (starts.length === 60) break;
+  }
+  return starts;
+}
+
+/** `start` moved on to the next word start (within a few characters), and past half a surrogate pair. */
+function snapToWord(text: string, start: number): number {
+  let at = start;
+  if (at > 0 && /\S/.test(text[at - 1]!)) {
+    const gap = text.slice(at, at + 40).search(/\s/);
+    if (gap !== -1) at += gap + 1;
+  }
+  const code = text.charCodeAt(at);
+  return code >= 0xdc00 && code <= 0xdfff ? at + 1 : at;
+}
+
+/**
+ * The part of `text` (at most `max` characters) around the words of a search. Of the places a window could start (the
+ * start of the text, and just before each match) it takes the one that holds the most different search terms, the
+ * earliest on a tie, so a match in the first `max` characters leaves the text as `clipText` would. A window that does not
+ * start at the beginning (or stop at the end) begins (or ends) with an ellipsis. With no term found in the text itself
+ * (the match was in the title or heading) it is the start of the text.
+ */
+export function windowText(text: string, terms: string[], max = MAX_PASSAGE_CHARS): string {
+  if (text.length <= max) return text;
+  const found = terms.map((term) => termStarts(text, term));
+  if (found.every((list) => list.length === 0)) return clipText(text, max);
+
+  const starts = new Set<number>([0]);
+  for (const list of found) for (const at of list) starts.add(snapToWord(text, Math.max(0, at - WINDOW_LEAD_CHARS)));
+  let best = { start: 0, covered: -1 };
+  for (const start of [...starts].sort((a, b) => a - b)) {
+    const room = max - (start > 0 ? 1 : 0) - 1;
+    const covered = found.filter((list) => list.some((at) => at >= start && at < start + room)).length;
+    if (covered > best.covered) best = { start, covered };
+  }
+  if (best.start === 0) return clipText(text, max);
+
+  let end = Math.min(text.length, best.start + max - 2);
+  if (end < text.length) {
+    const last = text.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+    const space = Math.max(text.lastIndexOf(" ", end - 1), text.lastIndexOf("\n", end - 1), text.lastIndexOf("\t", end - 1));
+    if (space > end - 80 && space > best.start) end = space;
+  }
+  const body = text.slice(best.start, end).trim();
+  return `…${body}${end < text.length ? "…" : ""}`;
+}
+
+/** A policy source. With `terms` (a search's words) a long passage is shown as the window around them, else from its start. */
+function policySource(record: RecordSummary, passage: Passage, terms?: string[]): Source {
+  const shown = terms?.length ? windowText(passage.text, terms) : clipText(passage.text);
+  return { kind: "policy", record, passage: { ...passage, text: shown } };
 }
 
 /** A post from a SourceItem, or null when it is not shaped like one. The URL is kept only if it is http(s). */
@@ -176,14 +252,15 @@ async function briefSources(route: Route, db: D1Like, manifest: Manifest | null)
   const asked = askedDays(route.sinceDays);
   const since = daysBefore(manifest, asked ?? DEFAULT_SINCE_DAYS);
   // The router may leave `search` empty (a plain "what is going on") or keep scope words in it ("california ai policy").
+  // Only `search` is looked for in the passages: the standalone question is worded for a reader, not for the index.
   const keywords = route.search.trim();
-  const question = route.standalone.trim() || keywords;
+  const terms = ftsTerms(keywords);
 
-  const [events, pool, matches] = await Promise.all([
+  const [events, pool] = await Promise.all([
     recentChanges(db, { ...scope, since }, EVENT_POOL),
-    question ? search(db, question, scope, BEST_PASSAGE_POOL) : [],
-    keywords ? search(db, keywords, scope, SEARCH_TOP) : [],
+    keywords ? search(db, keywords, scope, BEST_PASSAGE_POOL) : [],
   ]);
+  const matches = pool.slice(0, SEARCH_TOP);
   // A quiet stretch still has a "latest": when the router named no window and nothing falls in the default one, look further back.
   const changes = events.length === 0 && asked === undefined ? await recentChanges(db, { ...scope, since: EARLIEST }, EVENT_POOL) : events;
 
@@ -198,21 +275,42 @@ async function briefSources(route: Route, db: D1Like, manifest: Manifest | null)
   const recentIds = new Set(recent.map((r) => r.id));
   const records = [...recent.filter((r) => keptIds.has(r.id)), ...hits.filter((r) => !recentIds.has(r.id))];
 
-  // A record's passage: the one its search found, else the best for the question, else its first.
-  const passages = new Map<string, Passage>();
-  for (const hit of [...bestPerRecord(matches), ...bestPerRecord(pool)]) if (!passages.has(hit.record.id)) passages.set(hit.record.id, hit.passage);
-  const lacking = records.filter((r) => !passages.has(r.id));
-  for (const passage of await getPassages(db, lacking.map((r) => `${r.id}#1`))) passages.set(passage.recordId, passage);
-
+  // A record's passage: the one its search found (as the window around the match), else the one its own summary cites first.
+  const found = new Map<string, Passage>();
+  for (const hit of bestPerRecord(pool)) found.set(hit.record.id, hit.passage);
+  const cited = await summaryPassages(db, records.filter((r) => !found.has(r.id)));
   return records.flatMap((record) => {
-    const passage = passages.get(record.id);
+    const hit = found.get(record.id);
+    if (hit) return [policySource(record, hit, terms)];
+    const passage = cited.get(record.id);
     return passage ? [policySource(record, passage)] : [];
   });
 }
 
+/** How many of a summary's own citations are tried before the record's first passage. */
+const SUMMARY_SUPPORT_TRIED = 3;
+
+/**
+ * For each record, the passage its summary cites first (`summary.support`), else its first passage. A record that
+ * cannot be read gets its first passage; a record with no passage at all gets none.
+ */
+async function summaryPassages(db: D1Like, records: RecordSummary[]): Promise<Map<string, Passage>> {
+  const result = new Map<string, Passage>();
+  if (records.length === 0) return result;
+  // A record that cannot be read just has no citations to follow: it gets its first passage.
+  const full = await Promise.all(records.map((record) => getRecord(db, record.id).catch(() => null)));
+  const preferred = records.map((record, i) => [...supportOf(full[i]?.summary).slice(0, SUMMARY_SUPPORT_TRIED), `${record.id}#1`]);
+  const byId = new Map((await getPassages(db, preferred.flat())).map((p) => [p.id, p]));
+  records.forEach((record, i) => {
+    const id = preferred[i]!.find((candidate) => byId.has(candidate));
+    if (id) result.set(record.id, byId.get(id)!);
+  });
+  return result;
+}
+
 // ---- explain and implications ----------------------------------------------------------------------------------
 
-const normalise = (text: string) => text.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+const normalise = (text: string) => normaliseBill(text).normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 const hasPhrase = (haystack: string, phrase: string) => ` ${haystack} `.includes(` ${phrase} `);
 
 /** How well a hint names a record: 3 is its short title or title, 2 a whole phrase inside its title, 1 its short title inside the hint, 0 no match. */
@@ -280,10 +378,11 @@ async function recordSources(route: Route, db: D1Like, withAffected: boolean): P
   // With no record found, a router that left `search` blank is still asked about something: use its question.
   const query = route.search.trim() || (sources.length ? "" : route.standalone.trim());
   if (query) {
+    const terms = ftsTerms(query);
     for (const hit of await search(db, query, { jurisdiction: route.jurisdiction }, SEARCH_TOP)) {
       if (!have.has(hit.passage.id)) {
         have.add(hit.passage.id);
-        sources.push(policySource(hit.record, hit.passage));
+        sources.push(policySource(hit.record, hit.passage, terms));
       }
     }
   }
@@ -329,17 +428,32 @@ async function sentimentSources(route: Route, db: D1Like, deps: RetrieveDeps): P
     posts.push(source);
     if (posts.length === MAX_POSTS) break;
   }
-  return [...posts, ...context.map((hit) => policySource(hit.record, hit.passage))];
+  const terms = ftsTerms(keywords);
+  return [...posts, ...context.map((hit) => policySource(hit.record, hit.passage, terms))];
 }
 
 // ---- out of scope ----------------------------------------------------------------------------------------------
 
+/** True when every search term is a word of the record's title or short title (a question that names the record). */
+function namesRecord(terms: string[], record: RecordSummary): boolean {
+  if (terms.length === 0) return false;
+  const words = new Set(normalise(`${record.title} ${record.shortTitle ?? ""}`).split(" "));
+  return terms.every((term) => words.has(term));
+}
+
 /**
- * The router thinks the question is outside Politik's coverage. If any passage contains every one of its terms, the
- * corpus does cover it, so those passages are returned and the caller treats the question as an `explain`.
- * Needing every term works the same on the 6-record fixture and the full snapshot; a bm25 score would not.
+ * The router thinks the question is outside Politik's coverage. The corpus covers it only if a passage has every one of
+ * its terms AND either a hit's record is named by the question (every term is a word of its title or short title) or
+ * two distinct records match. One passing mention ("the EU AI Act" inside a California bill) does not make a California
+ * answer to a question about the EU. Needing every term works the same on the 6-record fixture and the full snapshot; a
+ * bm25 score would not. Covered, the hits are returned and the caller treats the question as an `explain`.
  */
 async function outOfScope(route: Route, db: D1Like): Promise<Retrieved> {
-  const hits = await searchPassages(db, route.search, {}, OUT_OF_SCOPE_TOP, { match: "all" });
-  return { sources: hits.map((hit) => policySource(hit.record, hit.passage)), promoted: hits.length > 0 };
+  const hits = await searchPassages(db, route.search, {}, OUT_OF_SCOPE_POOL, { match: "all" });
+  const terms = ftsTerms(route.search);
+  const named = hits.filter((hit) => namesRecord(terms, hit.record));
+  const covered = named.length > 0 || new Set(hits.map((hit) => hit.record.id)).size >= 2;
+  if (!covered) return { sources: [], promoted: false };
+  const ordered = [...named, ...hits.filter((hit) => !named.includes(hit))];
+  return { sources: ordered.slice(0, OUT_OF_SCOPE_TOP).map((hit) => policySource(hit.record, hit.passage, terms)), promoted: true };
 }

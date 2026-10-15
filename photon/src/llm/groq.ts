@@ -96,6 +96,12 @@ export type GroqOptions = {
   baseDelayMs?: number;
   /** How long one HTTP exchange (request sent to body read) may take before it is aborted. A timeout is retried like any network error. Default 60000. */
   timeoutMs?: number;
+  /**
+   * How hard the model thinks before it answers, sent as `reasoning_effort` (Groq's gpt-oss models take low, medium or
+   * high and default to medium). Less thinking is fewer tokens and a faster answer, which matters on a small
+   * tokens-per-minute plan. Left out when unset, so a model that has no such setting is never sent one.
+   */
+  reasoningEffort?: "low" | "medium" | "high";
   /** For tests: replaces the real wait. */
   sleep?: (ms: number) => Promise<void>;
 };
@@ -142,6 +148,7 @@ export function groqLlm(opts: GroqOptions): Llm {
   const maxRetries = opts.maxRetries ?? 4;
   const baseDelay = opts.baseDelayMs ?? 2000;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const effort = opts.reasoningEffort ? { reasoning_effort: opts.reasoningEffort } : {};
   if (!(timeoutMs > 0) || !Number.isFinite(timeoutMs)) throw new RangeError(`timeoutMs must be a positive number, got ${timeoutMs}`);
   const doFetch: typeof fetch = opts.fetchImpl ?? ((input, init) => fetch(input, init));
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -223,10 +230,10 @@ export function groqLlm(opts: GroqOptions): Llm {
     const requestBody = (mode: Mode, messages: Message[]) => {
       if (mode === "object") {
         const note = `\n\nReply with a single JSON object and nothing else. It must conform to this JSON Schema:\n${JSON.stringify(jsonSchema)}`;
-        return { model, temperature: 0, messages: [{ ...messages[0]!, content: messages[0]!.content + note }, ...messages.slice(1)], response_format: { type: "json_object" } };
+        return { model, temperature: 0, ...effort, messages: [{ ...messages[0]!, content: messages[0]!.content + note }, ...messages.slice(1)], response_format: { type: "json_object" } };
       }
       const format = { name: schemaName, ...(mode === "strict" ? { strict: true } : {}), schema: jsonSchema };
-      return { model, temperature: 0, messages, response_format: { type: "json_schema", json_schema: format } };
+      return { model, temperature: 0, ...effort, messages, response_format: { type: "json_schema", json_schema: format } };
     };
 
     /** Tries the modes in order of strength, moving on when Groq says the model or schema cannot do one. */

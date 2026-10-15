@@ -17,13 +17,14 @@ import {
   publicBlueskyItems,
   type ChatEnv,
 } from "../../photon/src/chat/index.ts";
+import { MAX_COMPOSE_SOURCES } from "../../photon/src/chat/compose.ts";
 import { BRIEF_JUDGEMENT, type Scorer } from "../../photon/src/chat/rank.ts";
 import type { ChatInput, ChatResponse, ChatTurn, ComposeOut, Mode } from "../../photon/src/chat/types.ts";
 import type { SourceItem } from "../../photon/src/contracts.ts";
 import type { D1Like, D1StatementLike } from "../../photon/src/data/d1.ts";
 import type { Manifest, Passage, PolicyRecord } from "../../photon/src/data/schema.ts";
 import { snapshotStatements } from "../../photon/src/data/seed.ts";
-import type { Llm } from "../../photon/src/llm/groq.ts";
+import { LlmError, type Llm } from "../../photon/src/llm/groq.ts";
 import { openTestDb } from "../helpers/d1.ts";
 
 const fixtureDir = fileURLToPath(new URL("../fixtures/snapshot/", import.meta.url));
@@ -537,7 +538,8 @@ describe("chat on a seeded database", () => {
       assertShape(res);
       assert.equal(res.mode, "sentiment");
       assert.ok(res.citations.length >= 1 && res.citations.every((x) => x.kind === "policy"));
-      assert.match(c.calls[0]!.system, /No public posts are available right now/);
+      assert.match(c.calls[0]!.system, /no relevant public posts/i);
+      assert.ok(res.reply.includes("Politik only tracks public posts about data centres right now."), res.reply);
     });
   });
 
@@ -728,11 +730,18 @@ describe("citations say when their record was fetched", () => {
     for (const cite of policy) assert.equal(cite.fetched, day(cite.recordId!));
   });
 
-  test("each distinct record is read once", async () => {
+  test("each distinct cited record is read once for its fetch date, after the answer is composed", async () => {
     const watched = watchingRecordReads(db);
-    const res = await ask(watched.db, citingComposer().llm);
+    const inner = citingComposer();
+    let readsBeforeCompose = -1;
+    const composer = (async (req: Parameters<Llm>[0]) => {
+      readsBeforeCompose = watched.reads.length; // retrieval reads some records to choose passages (M2)
+      return inner.llm(req);
+    }) as Llm;
+    const res = await ask(watched.db, composer);
     const ids = res.citations.map((x) => x.recordId!);
-    assert.deepEqual([...watched.reads].sort(), [...new Set(ids)].sort());
+    assert.ok(readsBeforeCompose >= 0);
+    assert.deepEqual(watched.reads.slice(readsBeforeCompose).sort(), [...new Set(ids)].sort());
   });
 
   test("a store error during the lookup still returns the answer, without fetched", async () => {
@@ -883,7 +892,7 @@ describe("chat without data", () => {
 
 describe("chatDepsFromEnv", () => {
   const db = {} as D1Like;
-  type Made = { apiKey: string; model: string; timeoutMs?: number; maxRetries?: number };
+  type Made = { apiKey: string; model: string; timeoutMs?: number; maxRetries?: number; reasoningEffort?: string };
   const spy = () => {
     const made: Made[] = [];
     const make = ((opts: Made) => {
@@ -900,8 +909,8 @@ describe("chatDepsFromEnv", () => {
     assert.equal(typeof deps.composer, "function");
     const byModel = Object.fromEntries(made.map((m) => [m.model, m]));
     assert.deepEqual(Object.keys(byModel).sort(), ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]);
-    assert.deepEqual(byModel["openai/gpt-oss-20b"], { apiKey: "gsk-1", model: "openai/gpt-oss-20b", timeoutMs: 3000, maxRetries: 0 }, "router");
-    assert.deepEqual(byModel["openai/gpt-oss-120b"], { apiKey: "gsk-1", model: "openai/gpt-oss-120b", timeoutMs: 8000, maxRetries: 1 }, "compose");
+    assert.deepEqual(byModel["openai/gpt-oss-20b"], { apiKey: "gsk-1", model: "openai/gpt-oss-20b", timeoutMs: 3000, maxRetries: 0, reasoningEffort: "low" }, "router");
+    assert.deepEqual(byModel["openai/gpt-oss-120b"], { apiKey: "gsk-1", model: "openai/gpt-oss-120b", timeoutMs: 8000, maxRetries: 1, reasoningEffort: "low" }, "compose");
   });
 
   test("GROQ_ROUTER_MODEL and GROQ_CHAT_MODEL choose the models", () => {
@@ -1080,5 +1089,247 @@ describe("normalizeChatRequest", () => {
       knowledge: [{ title: "T", plain: "P", url: "https://example.org/", author: "al" }],
     });
     assert.deepEqual(normalizeChatRequest(once), once);
+  });
+});
+
+// ---- I1, M1, M3, M9, I5: the final-review fixes -------------------------------------------------------------------------
+
+/** Every console.warn line since the mock was installed (silenceWarnings), as text. */
+const warnings = (): string[] => (console.warn as unknown as { mock: { calls: { arguments: unknown[] }[] } }).mock.calls.map((c) => c.arguments.map(String).join(" "));
+
+/** An error as groq.ts throws it. */
+function llmError(status: number | undefined, kind: LlmError["kind"], message = `Groq API error ${status}: rate limit reached`): LlmError {
+  const error = new LlmError(message, status);
+  error.kind = kind;
+  return error;
+}
+
+describe("I1: a request to the model is as small as the free tier needs", () => {
+  let db: D1Like;
+  let dispose: () => Promise<void>;
+  before(async () => {
+    ({ db, dispose } = await openTestDb());
+    await seed(db);
+  });
+  after(() => dispose());
+  silenceWarnings();
+
+  test("the compose model is shown at most 8 sources, however many were retrieved", async () => {
+    // Six live posts and three policy passages are nine sources.
+    const posts: SourceItem[] = Array.from({ length: 10 }, (_, i) => ({
+      id: `p${i}`,
+      source: "bluesky",
+      title: `Post ${i}`,
+      plain: `Frontier models worry commenter ${i}.`,
+      url: `https://bsky.app/profile/a/post/${i}`,
+      author: `a${i}.bsky.social`,
+    }));
+    const r = router({ intent: "sentiment", standalone: "What are people saying about frontier models?", search: "frontier" });
+    const c = citingComposer();
+    const res = await chat(input("What are people saying about frontier models?"), { DB: db }, { router: r.llm, composer: c.llm, bluesky: async () => posts });
+    assertShape(res);
+    const numbers = shown(c.calls[0]!);
+    assert.equal(MAX_COMPOSE_SOURCES, 8);
+    assert.equal(numbers.length, 8, "nine were retrieved, eight are shown");
+    assert.deepEqual(numbers, [1, 2, 3, 4, 5, 6, 7, 8]);
+    assertMarkersResolve(res);
+    assert.ok(res.citations.length <= 8);
+  });
+
+  test("a model that cites [9] when 8 were shown has that marker removed", async () => {
+    const posts: SourceItem[] = Array.from({ length: 6 }, (_, i) => ({ id: `p${i}`, source: "bluesky", title: `Post ${i}`, plain: `Frontier models worry ${i}.`, url: `https://bsky.app/p/${i}`, author: "a" }));
+    const r = router({ intent: "sentiment", standalone: "What are people saying about frontier models?", search: "frontier" });
+    const c = fakeLlm(() => ({ answer: "**Many posts [1].** Beyond the list [9].", general: null, followUps: [] }));
+    const res = await chat(input("What are people saying about frontier models?"), { DB: db }, { router: r.llm, composer: c.llm, bluesky: async () => posts });
+    assert.equal(res.reply, "**Many posts [1].** Beyond the list.");
+  });
+
+  test("a failed router call logs its status and kind once, and never the key", async () => {
+    const key = "gsk_abcdefgh12345678";
+    const failing = fakeLlm(() => {
+      throw llmError(429, "http", `Groq API error 429: Rate limit reached for key ${key}`);
+    });
+    const res = await chat(input("What is going on?"), { DB: db }, { router: failing.llm, composer: citingComposer().llm, bluesky: noPosts });
+    assert.equal(res.mode, "brief", "the rule-based route still answers");
+    const lines = warnings().filter((l) => l.includes("router"));
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!, /status=429/);
+    assert.match(lines[0]!, /kind=http/);
+    assert.ok(!warnings().join("\n").includes(key), "the key is masked");
+  });
+
+  test("a failed compose call logs its status and kind once, and the answer is the fallback", async () => {
+    const failing = fakeLlm(() => {
+      throw llmError(429, "http");
+    });
+    const res = await chat(input("What is going on?"), { DB: db }, { router: router().llm, composer: failing.llm, bluesky: noPosts });
+    assert.equal(res.mode, "fallback");
+    const lines = warnings().filter((l) => l.includes("compose"));
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!, /status=429 kind=http/);
+  });
+
+  test("a compose timeout and a network error log their kind, with no status", async () => {
+    for (const kind of ["timeout", "network"] as const) {
+      mock.restoreAll();
+      mock.method(console, "warn", () => {});
+      const failing = fakeLlm(() => {
+        throw llmError(undefined, kind, `Groq request failed: ${kind}`);
+      });
+      await chat(input("What is going on?"), { DB: db }, { router: router().llm, composer: failing.llm, bluesky: noPosts });
+      const lines = warnings().filter((l) => l.includes("compose"));
+      assert.equal(lines.length, 1, kind);
+      assert.match(lines[0]!, new RegExp(`status=none kind=${kind}`));
+    }
+  });
+
+  test("a failed ranker logs its status once", async () => {
+    const scorer: Scorer = async () => {
+      throw Object.assign(new Error("TypeSafe 429"), { status: 429 });
+    };
+    const res = await chat(input("What is going on?"), { DB: db }, { router: router().llm, composer: citingComposer().llm, scorer, bluesky: noPosts });
+    assert.equal(res.mode, "brief");
+    const lines = warnings().filter((l) => l.includes("rank"));
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!, /status=429/);
+  });
+
+  test("a request that goes well logs nothing", async () => {
+    await chat(input("What is going on?"), { DB: db }, { router: router().llm, composer: citingComposer().llm, bluesky: noPosts });
+    assert.deepEqual(warnings(), []);
+  });
+});
+
+describe("M1: an in-scope question the data does not cover", () => {
+  let db: D1Like;
+  let dispose: () => Promise<void>;
+  before(async () => {
+    ({ db, dispose } = await openTestDb());
+    await seed(db);
+  });
+  after(() => dispose());
+  silenceWarnings();
+
+  const LINE = "Nothing in Politik's data (as of 1 Oct 2026) matches this yet.";
+
+  test("a brief with nothing in its window says so, and carries no general knowledge", async () => {
+    const r = router({ intent: "brief", standalone: "What happened this week?", sinceDays: 7 });
+    const c = fakeLlm(() => ({ answer: "Something the model made up.", general: "Made-up background.", followUps: ["What is going on in California AI policy?"] }));
+    const res = await chat(input("What happened this week?"), { DB: db }, { router: r.llm, composer: c.llm, bluesky: noPosts });
+    assertShape(res);
+    assert.equal(res.mode, "brief");
+    assert.equal(res.reply, LINE);
+    assert.deepEqual(res.citations, []);
+    assert.ok(!("general" in res), "a brief never has general knowledge");
+    assert.match(c.calls[0]!.system, /"general": null/);
+    assert.deepEqual(res.followUps, ["What is going on in California AI policy?"]);
+  });
+
+  test("an explain question about a record the data lacks says so and may carry labelled general knowledge", async () => {
+    const r = router({ intent: "explain", standalone: "HB 9999", search: "", recordHints: ["HB 9999"] });
+    const c = fakeLlm(() => ({ answer: "ignored", general: "A short background.", followUps: [] }));
+    const res = await chat(input("HB 9999"), { DB: db }, { router: r.llm, composer: c.llm, bluesky: noPosts });
+    assertShape(res);
+    assert.equal(res.reply, LINE);
+    assert.equal(res.general, "A short background.");
+    assert.deepEqual(res.citations, []);
+  });
+});
+
+describe("M3: a passing mention does not turn an out-of-scope question into a California answer", () => {
+  let db: D1Like;
+  let dispose: () => Promise<void>;
+  before(async () => {
+    ({ db, dispose } = await openTestDb());
+    await seed(db);
+  });
+  after(() => dispose());
+  silenceWarnings();
+
+  test("one passage of one record that does not name the question stays out of scope, with general knowledge and no citations", async () => {
+    const r = router({ intent: "out-of-scope", standalone: "What is consent in medical research?", search: "consent" });
+    const c = citingComposer();
+    const res = await chat(input("What is consent in medical research?"), { DB: db }, { router: r.llm, composer: c.llm, bluesky: noPosts });
+    assert.equal(res.mode, "out-of-scope");
+    assert.deepEqual(res.citations, []);
+    assert.equal(res.general, "Background in the model's own words.");
+  });
+});
+
+describe("M9: an error after the snapshot date is known keeps it", () => {
+  let db: D1Like;
+  let dispose: () => Promise<void>;
+  before(async () => {
+    ({ db, dispose } = await openTestDb());
+    await seed(db);
+  });
+  after(() => dispose());
+  silenceWarnings();
+
+  /** A D1 that answers the first `ok` statements and fails every one after. */
+  function failingAfter(ok: number): D1Like {
+    let used = 0;
+    return {
+      batch: (statements) => db.batch(statements),
+      prepare(sql) {
+        if (used++ >= ok) throw new Error("D1 went away");
+        return db.prepare(sql);
+      },
+    };
+  }
+
+  test("a failure after the manifest was read still says what the data is as of", async () => {
+    const res = await chat(input("What is going on?"), { DB: failingAfter(1) }, { router: router().llm, composer: citingComposer().llm, bluesky: noPosts });
+    assertShape(res);
+    assert.equal(res.mode, "fallback");
+    assert.equal(res.reply, FAIL_REPLY);
+    assert.equal(res.asOf, "2026-10-01");
+    assert.deepEqual(res.citations, []);
+    assert.equal(warnings().filter((l) => l.includes("answer")).length, 1);
+  });
+
+  test("a failure before the manifest was read has no date", async () => {
+    const res = await chat(input("What is going on?"), { DB: failingAfter(0) }, { router: router().llm, composer: citingComposer().llm, bluesky: noPosts });
+    assert.equal(res.reply, FAIL_REPLY);
+    assert.equal(res.asOf, "");
+  });
+});
+
+describe("I5: a fact deep in a long passage reaches the composer and the card", () => {
+  let db: D1Like;
+  let dispose: () => Promise<void>;
+  const FILLER = "The agency reviews routine administrative matters in the ordinary course of its work. ";
+  const FACT = "The zebra registry must be audited every year by the regulator.";
+  const deep = `${FILLER.repeat(23)}${FACT} ${FILLER.repeat(7)}`.slice(0, 2600);
+  before(async () => {
+    ({ db, dispose } = await openTestDb());
+    const base = policies.find((p) => p.id === "ca-sb-53-2025")!;
+    const record: PolicyRecord = { ...base, id: "ca-deep-2026", title: "Deep Registry Act", shortTitle: "Deep Act", summary: { value: "A registry law.", support: ["ca-deep-2026#1"] }, status: { value: "enacted", support: ["ca-deep-2026#1"] }, provisions: [], affected: [], timeline: [{ date: "2026-09-01", event: "Signed", support: ["ca-deep-2026#1"] }] };
+    const passage: Passage = { id: "ca-deep-2026#1", recordId: "ca-deep-2026", seq: 1, heading: "Registry duties", text: deep };
+    await db.batch(snapshotStatements([record], [passage], manifest).map((x) => db.prepare(x.sql).bind(...x.params)));
+  });
+  after(() => dispose());
+  silenceWarnings();
+
+  test("the passage is 2,600 characters with the fact past character 2,000", () => {
+    assert.equal(deep.length, 2600);
+    assert.ok(deep.indexOf(FACT) > 1900);
+  });
+
+  test("the composer's window holds the fact (<= 900 characters), and so does the card's quote (<= 280)", async () => {
+    const r = router({ intent: "explain", standalone: "Who audits the zebra registry?", search: "zebra registry", recordHints: [] });
+    const c = fakeLlm((req) => {
+      assert.ok(req.user.includes(FACT), "the composer sees the fact");
+      const block = /<sources>\n([\s\S]*)\n<\/sources>/.exec(req.user)![1]!;
+      assert.ok(block.length < 1100, `the source block is small: ${block.length}`);
+      return { answer: "**The regulator audits the zebra registry every year [1].**", general: null, followUps: [] };
+    });
+    const res = await chat(input("Who audits the zebra registry?"), { DB: db }, { router: r.llm, composer: c.llm, bluesky: noPosts });
+    assertShape(res);
+    assert.equal(res.citations.length, 1);
+    const quote = res.citations[0]!.quote;
+    assert.ok(quote.includes("zebra registry must be audited every year"), quote);
+    assert.ok(quote.length <= 280);
+    assert.equal(res.citations[0]!.passageId, "ca-deep-2026#1");
   });
 });

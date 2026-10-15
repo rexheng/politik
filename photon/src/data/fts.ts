@@ -16,19 +16,25 @@ export const STOP_WORDS: ReadonlySet<string> = new Set(
   ).split(" "),
 );
 
-/**
- * `'"frontier" "ai"'` for "frontier AI", or `null` when nothing searchable is left.
- * `match` is "all" (every term must be in the passage, the default) or "any" (`'"frontier" OR "ai"'`).
- */
-export function toFtsQuery(text: string, match: "all" | "any" = "all"): string | null {
+/** The distinct search terms of `text`, lowercased, in order, without stop words: `["frontier", "ai"]` for "frontier AI". */
+export function ftsTerms(text: string): string[] {
   const terms: string[] = [];
   const seen = new Set<string>();
   for (const found of text.normalize("NFKC").toLowerCase().matchAll(TERM)) {
     const term = found[0];
     if (STOP_WORDS.has(term) || seen.has(term)) continue;
     seen.add(term);
-    terms.push(`"${term}"`);
+    terms.push(term);
     if (terms.length === MAX_TERMS) break;
   }
+  return terms;
+}
+
+/**
+ * `'"frontier" "ai"'` for "frontier AI", or `null` when nothing searchable is left.
+ * `match` is "all" (every term must be in the passage, the default) or "any" (`'"frontier" OR "ai"'`).
+ */
+export function toFtsQuery(text: string, match: "all" | "any" = "all"): string | null {
+  const terms = ftsTerms(text).map((term) => `"${term}"`);
   return terms.length ? terms.join(match === "any" ? " OR " : " ") : null;
 }

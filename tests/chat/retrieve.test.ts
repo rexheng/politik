@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { MAX_PASSAGE_CHARS, MAX_SOURCES, retrieve } from "../../photon/src/chat/retrieve.ts";
+import { MAX_PASSAGE_CHARS, MAX_SOURCES, normaliseBill, retrieve } from "../../photon/src/chat/retrieve.ts";
 import type { Route, Source } from "../../photon/src/chat/types.ts";
 import type { SourceItem } from "../../photon/src/contracts.ts";
 import type { D1Like, D1StatementLike } from "../../photon/src/data/d1.ts";
@@ -165,13 +165,21 @@ describe("retrieve on the fixture", () => {
       assert.deepEqual(idsOf(sources), ["ca-cppa-admt-2025", "sg-pdpa-2012"]);
     });
 
-    test("a record's passage is the one that best matches the standalone question, else its first", async () => {
-      const consent = await retrieve(mk({ jurisdiction: "SG", standalone: "consent" }), db, deps);
+    test("a record's passage is the one that best matches the search, else the one its summary cites first (M2)", async () => {
+      const consent = await retrieve(mk({ jurisdiction: "SG", search: "consent", standalone: "consent" }), db, deps);
       assert.equal(consent.sources.find((s) => s.record!.id === "sg-pdpa-2012")!.passage!.id, "sg-pdpa-2012#1");
-      const breach = await retrieve(mk({ jurisdiction: "SG", standalone: "breach notification" }), db, deps);
+      const breach = await retrieve(mk({ jurisdiction: "SG", search: "breach notification", standalone: "breach notification" }), db, deps);
       assert.equal(breach.sources.find((s) => s.record!.id === "sg-pdpa-2012")!.passage!.id, "sg-pdpa-2012#2");
-      const nothing = await retrieve(mk({ jurisdiction: "SG", standalone: "zzzz" }), db, deps);
+      const nothing = await retrieve(mk({ jurisdiction: "SG", search: "zzzz", standalone: "zzzz" }), db, deps);
       assert.deepEqual(passageIds(nothing.sources), ["sg-gebiz-dc-2025#1", "sg-mgf-genai-2024#1", "sg-pdpa-2012#1"]);
+    });
+
+    test("M2: the raw standalone question is not searched for the best passage, only route.search is", async () => {
+      const spy = spyOn(db);
+      // The standalone question has words ("breach notification") that would pick PDPA #2; with no search they are ignored.
+      const { sources } = await retrieve(mk({ jurisdiction: "SG", search: "", standalone: "breach notification" }), spy.db, deps);
+      assert.deepEqual(spy.matches, [], "no full-text search ran at all");
+      assert.equal(sources.find((s) => s.record!.id === "sg-pdpa-2012")!.passage!.id, "sg-pdpa-2012#1");
     });
 
     test("scope words left in search (the rule-based router keeps them) still give a brief, each record once", async () => {
@@ -498,7 +506,7 @@ describe("retrieve on the fixture", () => {
     });
 
     test("a question the corpus does match is promoted, with the matching passages", async () => {
-      const { sources, promoted } = await retrieve(mk({ intent: "out-of-scope", search: "frontier AI" }), db, deps);
+      const { sources, promoted } = await retrieve(mk({ intent: "out-of-scope", search: "frontier" }), db, deps);
       assert.equal(promoted, true);
       assert.ok(sources.length >= 1 && sources.length <= 3);
       assert.ok(sources.every((s) => s.kind === "policy" && s.record && s.passage));
@@ -511,11 +519,34 @@ describe("retrieve on the fixture", () => {
       assert.deepEqual(spy.matches, ['"eu" "ai" "act"']);
     });
 
-    test("one matching passage is enough, however weak", async () => {
-      // "consent" is in one passage only. No score threshold is applied.
+    test("M3: one passage of one record that does not name the question is not enough: a passing mention stays out of scope", async () => {
+      // "consent" is in one PDPA passage only, and no title or short title says "consent".
       const { promoted, sources } = await retrieve(mk({ intent: "out-of-scope", search: "consent" }), db, deps);
+      assert.deepEqual({ promoted, sources }, { promoted: false, sources: [] });
+    });
+
+    test("M3: a question that names a record's title or short title is promoted on one passage", async () => {
+      for (const search of ["personal data protection act", "Personal Data Protection Act 2012"]) {
+        const { promoted, sources } = await retrieve(mk({ intent: "out-of-scope", search }), db, deps);
+        assert.equal(promoted, true, search);
+        assert.ok(sources.length >= 1 && sources.every((s) => s.record!.id === "sg-pdpa-2012"), search);
+      }
+    });
+
+    test("M3: two distinct records matching every term is enough, with no title match", async () => {
+      // "developer" is in SB 53, SB 1047 and the MGF for GenAI, and no title or short title says it.
+      const { promoted, sources } = await retrieve(mk({ intent: "out-of-scope", search: "developer" }), db, deps);
       assert.equal(promoted, true);
-      assert.deepEqual(passageIds(sources), ["sg-pdpa-2012#1"]);
+      assert.ok(new Set(idsOf(sources)).size >= 2);
+    });
+
+    test("M3: several passages of one record are still one record", async () => {
+      // A term in two passages of one record ("fiduciary") is not two records, however many passages say it.
+      const a = bulk(1, "2026-09-01", "A passage about fiduciary duty.");
+      const b: Passage = { id: "ca-bulk-1#2", recordId: "ca-bulk-1", seq: 2, text: "A second passage about fiduciary duty." };
+      await seed(scratch, [a.record], [a.passage, b]);
+      const { promoted } = await retrieve(mk({ intent: "out-of-scope", search: "fiduciary" }), scratch, deps);
+      assert.equal(promoted, false);
     });
 
     test("an empty search is not promoted", async () => {
@@ -541,20 +572,26 @@ describe("retrieve limits", () => {
   });
   after(() => dispose());
 
-  test("a source's passage text is cut to 1,200 characters", async () => {
-    const long = bulk(1, "2026-09-01", `${"A long passage about widgets. ".repeat(200)}END`);
-    await seed(db, [long.record], [long.passage]);
-    assert.ok(long.passage.text.length > 5000);
+  test("a source's passage text is cut to MAX_PASSAGE_CHARS (900) characters", async () => {
+    const text = `${"A long passage about widgets. ".repeat(200)}END`;
+    const long = [bulk(1, "2026-09-01", text), bulk(2, "2026-09-02", text)];
+    await seed(db, long.map((x) => x.record), long.map((x) => x.passage));
+    assert.ok(text.length > 5000);
+    // Two records say "widgets", so even an out-of-scope question is covered (M3).
     for (const route of [mk({ intent: "brief" }), mk({ intent: "explain", recordHints: ["BULK 1"] }), mk({ intent: "explain", search: "widgets" }), mk({ intent: "out-of-scope", search: "widgets" })]) {
       const { sources } = await retrieve(route, db, deps);
       assert.ok(sources.length > 0, route.intent);
       for (const s of sources) {
-        assert.ok(s.passage!.text.length <= 1200, `${route.intent}: ${s.passage!.text.length}`);
+        assert.ok(s.passage!.text.length <= MAX_PASSAGE_CHARS, `${route.intent}: ${s.passage!.text.length}`);
         assert.ok(s.passage!.text.startsWith("A long passage about widgets."));
         assert.ok(!s.passage!.text.includes("END"));
-        assert.equal(s.passage!.id, "ca-bulk-1#1", "only the text is cut");
+        assert.match(s.passage!.id, /^ca-bulk-[12]#1$/, "only the text is cut");
       }
     }
+  });
+
+  test("I1: the passage window is 900 characters, one constant the eval imports", () => {
+    assert.equal(MAX_PASSAGE_CHARS, 900);
   });
 
   test("a passage under the limit is returned whole", async () => {
@@ -565,11 +602,11 @@ describe("retrieve limits", () => {
   });
 
   test("a cut never splits a surrogate pair", async () => {
-    const emoji = bulk(1, "2026-09-01", `${"x".repeat(1198)}${"😀".repeat(5)}`);
+    const emoji = bulk(1, "2026-09-01", `${"x".repeat(MAX_PASSAGE_CHARS - 2)}${"😀".repeat(5)}`);
     await seed(db, [emoji.record], [emoji.passage]);
     const { sources } = await retrieve(mk({ intent: "brief" }), db, deps);
     const text = sources[0]!.passage!.text;
-    assert.ok(text.length <= 1200);
+    assert.ok(text.length <= MAX_PASSAGE_CHARS);
     assert.doesNotMatch(text, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/, "a high surrogate with no low one after it");
     assert.doesNotMatch(text, /(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, "a low surrogate with no high one before it");
   });
@@ -667,6 +704,165 @@ describe("retrieve limits", () => {
     await seed(db, x.map((v) => v.record), x.map((v) => v.passage));
     const { sources } = await retrieve(mk({ intent: "explain", recordHints: ["BULK 1"] }), db, deps);
     assert.deepEqual([...new Set(idsOf(sources))], ["ca-bulk-1"]);
+  });
+});
+
+/** A 2,600-character passage whose only mention of the zebra registry sits near character 2,000. */
+const DEEP_FACT = "The zebra registry must be audited every year by the regulator.";
+const deepText = () => {
+  const filler = (n: number) => "The agency reviews routine administrative matters in the ordinary course of its work. ".repeat(40).slice(0, n);
+  return `${filler(2000)}${DEEP_FACT} ${filler(2600 - 2000 - DEEP_FACT.length - 1)}`;
+};
+
+describe("I5: a search hit shows the part of the passage that matched", () => {
+  let db: D1Like;
+  let dispose: () => Promise<void>;
+  before(async () => {
+    ({ db, dispose } = await openTestDb());
+    const deep = bulk(1, "2026-09-01", deepText());
+    const near = bulk(2, "2026-09-02", `The widget registry is kept by the regulator. ${"Filler about administration. ".repeat(60)}`);
+    const middle = bulk(3, "2026-09-03", `${"Filler about administration. ".repeat(90)}The quokka sanctuary is funded annually. ${"More filler about administration. ".repeat(90)}`);
+    await seed(db, [deep.record, near.record, middle.record], [deep.passage, near.passage, middle.passage]);
+  });
+  after(() => dispose());
+
+  test("the fixture passage is 2,600 characters with the fact deep inside it", () => {
+    const text = deepText();
+    assert.equal(text.length, 2600);
+    assert.ok(text.indexOf("zebra registry") > 1900 && text.indexOf("zebra registry") < 2100);
+  });
+
+  test("explain: a search hit is the window around the match, at most 900 characters, and says it is cut at both ends", async () => {
+    const { sources } = await retrieve(mk({ intent: "explain", search: "zebra registry" }), db, deps);
+    const hit = sources.find((s) => s.record!.id === "ca-bulk-1")!;
+    assert.ok(hit.passage!.text.includes(DEEP_FACT), hit.passage!.text);
+    assert.ok(hit.passage!.text.length <= MAX_PASSAGE_CHARS);
+    assert.ok(hit.passage!.text.startsWith("…"), "cut at the start; the passage runs to its end, so no trailing ellipsis");
+    assert.equal(hit.passage!.id, "ca-bulk-1#1");
+    assert.equal(hit.passage!.heading, "Heading 1");
+  });
+
+  test("a match in the middle of a long passage is cut at both ends", async () => {
+    const { sources } = await retrieve(mk({ intent: "explain", search: "quokka sanctuary" }), db, deps);
+    const hit = sources.find((s) => s.record!.id === "ca-bulk-3")!;
+    assert.ok(hit.passage!.text.includes("quokka sanctuary"));
+    assert.ok(hit.passage!.text.startsWith("…") && hit.passage!.text.endsWith("…"));
+    assert.ok(hit.passage!.text.length <= MAX_PASSAGE_CHARS);
+  });
+
+  test("brief: the passage its search found is windowed the same way", async () => {
+    const { sources } = await retrieve(mk({ intent: "brief", search: "zebra registry" }), db, deps);
+    assert.ok(sources.find((s) => s.record!.id === "ca-bulk-1")!.passage!.text.includes(DEEP_FACT));
+  });
+
+  test("sentiment: the policy context passages are windowed the same way", async () => {
+    const { sources } = await retrieve(mk({ intent: "sentiment", search: "zebra registry" }), db, { manifest, bluesky: async () => [] });
+    assert.ok(sources.find((s) => s.record?.id === "ca-bulk-1")!.passage!.text.includes(DEEP_FACT));
+  });
+
+  test("a match inside the first 900 characters keeps the start of the passage, with no leading ellipsis", async () => {
+    const { sources } = await retrieve(mk({ intent: "explain", search: "widget registry" }), db, deps);
+    const hit = sources.find((s) => s.record!.id === "ca-bulk-2")!;
+    assert.ok(hit.passage!.text.startsWith("The widget registry is kept"));
+    assert.ok(hit.passage!.text.length <= MAX_PASSAGE_CHARS);
+  });
+
+  test("a passage the record itself cites (not a search hit) keeps its start", async () => {
+    const { sources } = await retrieve(mk({ intent: "explain", recordHints: ["BULK 1"] }), db, deps);
+    const own = sources.find((s) => s.passage!.id === "ca-bulk-1#1")!;
+    assert.ok(own.passage!.text.startsWith("The agency reviews routine"));
+    assert.ok(!own.passage!.text.includes(DEEP_FACT));
+  });
+
+  test("a term that only the stemmer matches (regulators for regulator) still finds the window", async () => {
+    const { sources } = await retrieve(mk({ intent: "explain", search: "zebra registries regulators" }), db, deps);
+    const hit = sources.find((s) => s.record!.id === "ca-bulk-1");
+    assert.ok(hit, "found by the full-text search");
+    assert.ok(hit.passage!.text.includes("zebra registry"));
+  });
+
+  test("a hit whose terms sit only in the title or heading falls back to the start", async () => {
+    const { sources } = await retrieve(mk({ intent: "explain", search: "bulk record 1" }), db, deps);
+    const hit = sources.find((s) => s.record!.id === "ca-bulk-1")!;
+    assert.ok(hit.passage!.text.startsWith("The agency reviews routine"));
+  });
+});
+
+describe("M2: a record the search missed shows the passage its summary cites first", () => {
+  let db: D1Like;
+  let dispose: () => Promise<void>;
+  before(async () => {
+    ({ db, dispose } = await openTestDb());
+  });
+  after(() => dispose());
+
+  test("not #1, when the summary's first citation is another passage", async () => {
+    const x = bulk(1, "2026-09-01", "First passage, about nothing in particular.");
+    const second: Passage = { id: "ca-bulk-1#2", recordId: "ca-bulk-1", seq: 2, heading: "The point", text: "The second passage is what the summary rests on." };
+    const record: PolicyRecord = { ...x.record, summary: { value: "Summary", support: ["ca-bulk-1#2", "ca-bulk-1#1"] } };
+    await seed(db, [record], [x.passage, second]);
+    const { sources } = await retrieve(mk({ intent: "brief", search: "", standalone: "What is going on?" }), db, deps);
+    assert.deepEqual(passageIds(sources), ["ca-bulk-1#2"]);
+  });
+
+  test("a summary that cites nothing that exists falls back to #1", async () => {
+    const x = bulk(1, "2026-09-01", "First passage.");
+    const record: PolicyRecord = { ...x.record, summary: { value: "Summary", support: ["ca-bulk-1#9"] } };
+    await seed(db, [record], [x.passage]);
+    const { sources } = await retrieve(mk({ intent: "brief" }), db, deps);
+    assert.deepEqual(passageIds(sources), ["ca-bulk-1#1"]);
+  });
+});
+
+describe("I6: bill numbers are the same however they are written", () => {
+  test("normaliseBill gives the sb 53 form for every spelling", () => {
+    for (const text of ["SB53", "SB-53", "sb 53", "SB 53", "Senate Bill 53", "senate bill no. 53", "Senate Bill No 53", "S B 53".replace("S B", "SB"), "sb.53", "SB 053"]) {
+      assert.equal(normaliseBill(text), "sb 53", text);
+    }
+    for (const text of ["AB 2013", "ab2013", "Assembly Bill 2013", "Assembly Bill No. 2013", "AB-2013"]) assert.equal(normaliseBill(text), "ab 2013", text);
+  });
+
+  test("it only rewrites a bill number, and leaves the rest of the text and other words alone", () => {
+    assert.equal(normaliseBill("California SB53 (2025) Transparency"), "California sb 53 (2025) Transparency");
+    assert.equal(normaliseBill("lab 5 and tab 12 and absorb 7"), "lab 5 and tab 12 and absorb 7");
+    assert.equal(normaliseBill("SB 5 and AB 7"), "sb 5 and ab 7");
+    assert.equal(normaliseBill("SB"), "SB");
+    assert.equal(normaliseBill(""), "");
+  });
+});
+
+describe("I6: the router's hints resolve the bill, whatever the spelling", () => {
+  let db: D1Like;
+  let dispose: () => Promise<void>;
+  before(async () => {
+    ({ db, dispose } = await openTestDb());
+    await seed(db, policies, passages);
+  });
+  after(() => dispose());
+
+  const first = async (hint: string) => idsOf((await retrieve(mk({ intent: "explain", recordHints: [hint] }), db, deps)).sources)[0];
+
+  test("SB53, SB-53, Senate Bill 53, sb 53 and SB 53 all resolve to ca-sb-53-2025", async () => {
+    for (const hint of ["SB53", "SB-53", "Senate Bill 53", "sb 53", "SB 53", "Senate Bill No. 53", "California SB53"]) {
+      assert.equal(await first(hint), "ca-sb-53-2025", hint);
+    }
+  });
+
+  test("a different number is still a different bill", async () => {
+    assert.equal(await first("SB5"), undefined);
+    assert.equal(await first("SB530"), undefined);
+    assert.equal(await first("Senate Bill 5"), undefined);
+    assert.equal(await first("SB1047"), "ca-sb-1047-2024");
+  });
+
+  test("a record whose title or short title spells the bill differently still matches", async () => {
+    const x = bulk(1, "2026-09-01");
+    const record: PolicyRecord = { ...x.record, shortTitle: "Assembly Bill No. 2013", title: "AB-2013 Generative AI training data transparency" };
+    await seed(db, [record], [x.passage]);
+    assert.equal(await first("AB2013"), "ca-bulk-1");
+    assert.equal(await first("ab 2013"), "ca-bulk-1");
+    assert.equal(await first("Assembly Bill 2013"), "ca-bulk-1");
+    await seed(db, policies, passages);
   });
 });
 

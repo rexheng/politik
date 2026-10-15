@@ -15,6 +15,33 @@ export const COMPOSE_TIMEOUT_MS = 8000;
 export const MAX_FOLLOW_UPS = 3;
 
 /**
+ * The most sources the compose model is shown. Retrieval and ranking may hold up to 12, but a 12-source prompt is about
+ * 4.7K tokens before the model thinks, too much for Groq's free tier (8,000 tokens a minute), so the best 8 go in.
+ */
+export const MAX_COMPOSE_SOURCES = 8;
+
+/** The bold first sentence of a sentiment answer when there are no posts to report. */
+export const NO_POSTS_SENTENCE = "Politik only tracks public posts about data centres right now.";
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "2026-10-15" as "15 Oct 2026" (the footer's format), or "" when `iso` is not a real date. */
+export function formatDay(iso: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso.trim());
+  if (!match) return "";
+  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return "";
+  return `${day} ${MONTHS[month - 1]} ${year}`;
+}
+
+/** What an in-scope question with no sources is told: Politik's data has nothing on it yet (M1). */
+export function coverageLine(asOf: string): string {
+  const day = formatDay(asOf);
+  return `Nothing in Politik's data${day ? ` (as of ${day})` : ""} matches this yet.`;
+}
+
+/**
  * What the model is asked for. Every key is required and `general` may be null, because Groq's strict structured-output
  * mode needs closed objects with every property required (see `strictCompatible` in groq.ts). That mode also rules
  * out `maxItems`, so the cap of three follow-ups is applied after the reply is read (`overwrite` leaves the JSON Schema alone).
@@ -89,20 +116,37 @@ If the sources say nothing for a section, write one sentence saying what is miss
 };
 
 const SENTIMENT_WITH_POSTS = "This question asks what people are saying. Lead with what the posts say, each attributed, as opinion and never as fact; use the policy sources only for context.";
-const SENTIMENT_WITHOUT_POSTS = "This question asks what people are saying. No public posts are available right now: say so in the bold first sentence, then give what the policy sources say.";
+const SENTIMENT_WITHOUT_POSTS = `This question asks what people are saying. There are no relevant public posts. Make the bold first sentence exactly **${NO_POSTS_SENTENCE}** and then give what the policy sources say.`;
 
 const OUTPUT_WITH_SOURCES = `Output: one JSON object with these keys and nothing else.
 - "answer": the reply, in a small markdown subset: **bold**, "- " bullets, "### " headings and [n] markers. No tables, links, code or HTML.
 - "general": null
 - "followUps": up to 3 short questions the user might ask next, written as the user would ask them and answerable from Politik's coverage; [] if none.`;
 
-const NO_SOURCES = `There are no sources for this question: either it is outside Politik's coverage, or nothing in the dataset matches it. So there is nothing to cite, and the output is different from a normal answer. Output one JSON object with these keys and nothing else.
+/** Out of scope: the model writes the coverage notice and a labelled general-knowledge answer. */
+const NO_SOURCES_OUT_OF_SCOPE = `There are no sources for this question: it is outside Politik's coverage. So there is nothing to cite, and the output is different from a normal answer. Output one JSON object with these keys and nothing else.
 - "answer": a notice of one or two sentences, with no markers, saying that Politik covers technology policy in California and Singapore and has nothing on this question. State no facts about the subject here.
 - "general": a helpful general-knowledge answer of 120 words or fewer, in plain prose with no markers and no markdown. Do not invent specifics; say so if you are unsure. It is shown to the user labelled as unverified.
 - "followUps": up to 3 short questions inside Politik's coverage that the user could ask instead.`;
 
+/** In scope, but nothing in the dataset matches yet. Explain and implications questions may carry general knowledge; a brief or a sentiment question may not. */
+function noSourcesInScope(route: Route, asOf: string): string {
+  const line = coverageLine(asOf);
+  const general =
+    route.intent === "explain" || route.intent === "implications"
+      ? `- "general": a helpful general-knowledge answer of 120 words or fewer, in plain prose with no markers and no markdown. Do not invent specifics; say so if you are unsure. It is shown to the user labelled as unverified.`
+      : `- "general": null`;
+  return `There are no sources for this question: nothing in Politik's dataset matches it yet. So there is nothing to cite, and the output is different from a normal answer. Output one JSON object with these keys and nothing else.
+- "answer": exactly this one sentence, with no markers: ${line}
+${general}
+- "followUps": up to 3 short questions inside Politik's coverage that the user could ask instead.`;
+}
+
 function systemPrompt(route: Route, citable: Source[], asOf: string): string {
-  if (citable.length === 0) return `${introduction(asOf)}\n\n${RULES}\n\n${NO_SOURCES}`;
+  if (citable.length === 0) {
+    const rest = route.intent === "out-of-scope" ? NO_SOURCES_OUT_OF_SCOPE : noSourcesInScope(route, asOf);
+    return `${introduction(asOf)}\n\n${RULES}\n\n${rest}`;
+  }
   const sentiment =
     route.intent !== "sentiment" ? [] : [citable.some((s) => s.kind === "post") ? SENTIMENT_WITH_POSTS : SENTIMENT_WITHOUT_POSTS];
   return [introduction(asOf), RULES, FORMATS[shapeOf(route)], ...sentiment, OUTPUT_WITH_SOURCES].join("\n\n");
@@ -141,7 +185,10 @@ function sourceBlock(source: Source, n: number): string {
  * `finalize` reads it); one that cannot be cited (no usable link) is left out and its number skipped.
  */
 export function buildComposePrompt(route: Route, sources: Source[], asOf: string): { system: string; user: string } {
-  const shown = sources.map((source, i) => ({ source, n: i + 1 })).filter(({ source }) => isCitable(source));
+  const shown = sources
+    .slice(0, MAX_COMPOSE_SOURCES)
+    .map((source, i) => ({ source, n: i + 1 }))
+    .filter(({ source }) => isCitable(source));
   const blocks = shown.length ? shown.map(({ source, n }) => sourceBlock(source, n)).join("\n\n") : "(none)";
   return {
     system: systemPrompt(route, shown.map(({ source }) => source), asOf),
@@ -151,11 +198,24 @@ export function buildComposePrompt(route: Route, sources: Source[], asOf: string
 
 // ---- compose -------------------------------------------------------------------------------------------------
 
-/** The model's reply tidied: follow-ups without markers, trimmed and capped, and general knowledge kept only for an answer with no sources, without markers. */
-function tidy(reply: ComposeOut, cited: boolean): ComposeOut {
-  const general = cited ? "" : stripMarkers(reply.general ?? "").trim();
+/** Whether the question may carry labelled general knowledge when there are no sources: out of scope, or an explain or implications question the data does not cover. */
+const mayHaveGeneral = (route: Route) => route.intent === "out-of-scope" || route.intent === "explain" || route.intent === "implications";
+
+/**
+ * The model's reply tidied: follow-ups without markers, trimmed and capped; general knowledge kept only for an answer
+ * with no sources and only for the intents that may have it, without markers; an in-scope question with no sources
+ * gets exactly the coverage line (M1); a sentiment answer with no posts starts with the sentence that says so (M5).
+ */
+function tidy(reply: ComposeOut, route: Route, shown: Source[], asOf: string): ComposeOut {
+  const citable = shown.filter(isCitable);
+  const general = citable.length > 0 || !mayHaveGeneral(route) ? "" : stripMarkers(reply.general ?? "").trim();
+  let answer = reply.answer;
+  if (citable.length === 0 && route.intent !== "out-of-scope") answer = coverageLine(asOf);
+  else if (citable.length > 0 && route.intent === "sentiment" && !citable.some((s) => s.kind === "post") && !answer.includes(NO_POSTS_SENTENCE)) {
+    answer = `**${NO_POSTS_SENTENCE}**\n\n${answer}`;
+  }
   return {
-    answer: reply.answer,
+    answer,
     general: general || null,
     followUps: reply.followUps.map((q) => stripMarkers(q).trim()).filter(Boolean).slice(0, MAX_FOLLOW_UPS),
   };
@@ -163,7 +223,8 @@ function tidy(reply: ComposeOut, cited: boolean): ComposeOut {
 
 /**
  * Asks the compose model for the answer. It throws on a model error or when there is no answer inside
- * `timeoutMs`; the caller turns that into the fallback reply. The reply still has to go through `finalize`.
+ * `timeoutMs`; the caller turns that into the fallback reply. The reply still has to go through `finalize`. Only the first
+ * MAX_COMPOSE_SOURCES sources are shown, so a marker n always means `sources[n - 1]`.
  */
 export async function compose(route: Route, sources: Source[], llm: Llm, asOf: string, opts: { timeoutMs?: number } = {}): Promise<ComposeOut> {
   const timeoutMs = opts.timeoutMs ?? COMPOSE_TIMEOUT_MS;
@@ -174,7 +235,7 @@ export async function compose(route: Route, sources: Source[], llm: Llm, asOf: s
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error(`The compose model did not answer within ${timeoutMs} ms`)), timeoutMs);
     });
-    return tidy(await Promise.race([answer, deadline]), sources.some(isCitable));
+    return tidy(await Promise.race([answer, deadline]), route, sources.slice(0, MAX_COMPOSE_SOURCES), asOf);
   } finally {
     clearTimeout(timer);
   }

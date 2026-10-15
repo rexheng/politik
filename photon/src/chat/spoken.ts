@@ -1,6 +1,6 @@
 // A reply as speech, for the voice route and anywhere else the text is read aloud (design §4): no [n] markers and no
 // markdown, each bullet or heading a sentence of its own, and no more than `max` characters, cut at a sentence end.
-import { stripMarkers } from "./cite.ts";
+import { ABBREVIATION, stripMarkers } from "./cite.ts";
 
 /** The most characters a spoken reply has by default. */
 export const SPOKEN_MAX_CHARS = 600;
@@ -11,9 +11,6 @@ const SENTENCE_END = /[.!?]["')\]”’]*(?=\s|$)/g;
 const ENDS_LINE = /[.!?:]["')\]”’]*$/;
 /** The start of a heading or a bullet. */
 const LINE_MARK = /^(?:#{1,6}\s+|[-*•]\s+)/;
-/** A full stop that belongs to an abbreviation, not the end of a sentence: one letter ("U.S.", "e.g.") or a common short word ("Sec.", "No."). */
-const ABBREVIATION = /(?:^|[^\p{L}])(?:\p{L}|nos?|secs?|sect|art|arts|para|ch|pt|vol|fig|st|dr|mr|mrs|ms|vs|inc|ltd|corp|co|gov|dept|approx|cf)\.$/iu;
-
 /** The reply as plain sentences; see the header. A reply with nothing to say gives "". */
 export function toSpoken(reply: string, max = SPOKEN_MAX_CHARS): string {
   const sentences = stripMarkers(reply)

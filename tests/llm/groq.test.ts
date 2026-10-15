@@ -38,13 +38,14 @@ function fakeFetch(...script: Array<Response | Error | ((i: number) => Response)
   return { impl, calls };
 }
 
-function client(fake: ReturnType<typeof fakeFetch>, opts: { model?: string; maxRetries?: number } = {}) {
+function client(fake: ReturnType<typeof fakeFetch>, opts: { model?: string; maxRetries?: number; reasoningEffort?: "low" | "medium" | "high" } = {}) {
   const sleeps: number[] = [];
   const llm = groqLlm({
     apiKey: "gsk_test_key",
     model: opts.model ?? "openai/gpt-oss-120b",
     fetchImpl: fake.impl,
     maxRetries: opts.maxRetries,
+    reasoningEffort: opts.reasoningEffort,
     sleep: async (ms) => void sleeps.push(ms),
   });
   const ask = () => llm({ system: "Be brief.", user: "Question?", schema: Answer, name: "answer" });
@@ -80,6 +81,27 @@ test("the request body has temperature 0, the model, the messages and a json_sch
   assert.equal(sent.type, "object");
   assert.deepEqual(Object.keys(sent.properties).sort(), ["answer", "score"]);
   assert.equal(sent.$schema, undefined, "the $schema keyword is not sent");
+});
+
+test("I1: reasoningEffort is sent as reasoning_effort on every request, and left out when it is not set", async () => {
+  for (const effort of ["low", "medium", "high"] as const) {
+    const fake = fakeFetch(ok(goodReply));
+    await client(fake, { reasoningEffort: effort }).ask();
+    assert.equal(fake.calls[0]!.body.reasoning_effort, effort);
+  }
+  const unset = fakeFetch(ok(goodReply));
+  await client(unset).ask();
+  assert.equal("reasoning_effort" in unset.calls[0]!.body, false, "no field when unset, so a model without it is not sent one");
+});
+
+test("I1: reasoning_effort also rides on the json_object fallback and the repair call", async () => {
+  const fake = fakeFetch(error(400, "response_format json_schema is not supported by this model"), ok({ answer: 1 }), ok(goodReply));
+  assert.deepEqual(await client(fake, { model: "llama-3.3-70b-versatile", reasoningEffort: "low" }).ask(), goodReply);
+  assert.equal(fake.calls.length, 3, "json_schema refused, json_object bad, then the repair");
+  assert.deepEqual(
+    fake.calls.map((c) => c.body.reasoning_effort),
+    ["low", "low", "low"],
+  );
 });
 
 test("two 429s then 200 resolves after 3 fetches, backing off 2s then 4s", async () => {

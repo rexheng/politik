@@ -4,6 +4,7 @@
 // Spec §3.3; the call follows `judgeWithJev` in ../categoriser.ts and .agents/skills/typesafe-ai/SKILL.md.
 import { score, TypeSafeClient } from "@typesafe-ai/sdk";
 import type { Route, Source } from "./types.ts";
+import { warnFailure } from "./warn.ts";
 
 /** The 2,500 ms rank budget. */
 export const RANK_TIMEOUT_MS = 2500;
@@ -153,7 +154,8 @@ export async function rank(route: Route, sources: Source[], scorer?: Scorer, tim
       .map((source, index) => ({ source, index, value: valueOf(candidates[index]!.id) }))
       .sort((a, b) => (a.value === b.value ? a.index - b.index : b.value - a.value))
       .map((entry) => entry.source);
-  } catch {
+  } catch (error) {
+    warnFailure("rank", error);
     return sources;
   } finally {
     clearTimeout(timer);

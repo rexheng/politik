@@ -6,8 +6,10 @@ import { STOP_WORDS as FTS_STOP_WORDS } from "../data/fts.ts";
 import { JurisdictionSchema, TOPICS, TopicSchema } from "../data/schema.ts";
 import type { Jurisdiction, Topic } from "../data/schema.ts";
 import type { Llm } from "../llm/groq.ts";
+import { normaliseBill } from "./bills.ts";
 import { INTENTS } from "./types.ts";
 import type { ChatTurn, Route } from "./types.ts";
+import { warnFailure } from "./warn.ts";
 
 /** The router gets this long to answer before the rule-based route is used (the 3,000 ms router budget). */
 export const ROUTER_TIMEOUT_MS = 3000;
@@ -106,7 +108,8 @@ export async function route(message: string, history: ChatTurn[], llm: Llm, opts
       timer = setTimeout(() => reject(new Error(`The router did not answer within ${timeoutMs} ms`)), timeoutMs);
     });
     return toRoute(ReplySchema.parse(await Promise.race([answer, deadline])), message);
-  } catch {
+  } catch (error) {
+    warnFailure("router", error);
     return fallbackRoute(message, history);
   } finally {
     clearTimeout(timer);
@@ -120,7 +123,7 @@ const PRONOUNS = new Set("it that this they those".split(" "));
 const DETAIL = /in detail|walk me through|deep dive|explain fully/i;
 /** Asking what is going on, rather than about a particular record. */
 const CATCH_UP = /going on|what['’]?s new|latest|update|changed|happening/i;
-const BILL_NUMBER = /\b(AB|SB)\s?(\d+)\b/gi;
+const BILL_NUMBER = /\b(AB|SB)[\s-]?(\d+)\b/gi;
 const ACRONYM = /\b[A-Z]{3,}\b/g;
 const WORD = /[\p{L}\p{N}][\p{L}\p{N}\p{M}]*(?:['’][\p{L}\p{N}\p{M}]+)*/gu;
 
@@ -181,10 +184,10 @@ function scopeOf(message: string): { jurisdiction?: Jurisdiction; topics?: Topic
   };
 }
 
-/** "SB 53" and "AB 2013" (however spaced or cased), then acronyms of three or more capitals such as "PDPA". */
+/** "SB 53" and "AB 2013" (however spaced, dashed, cased or spelled out: "SB-53", "Senate Bill 53"), then acronyms of three or more capitals such as "PDPA". */
 function recordHintsOf(message: string): string[] {
   const hints = new Set<string>();
-  for (const m of message.matchAll(BILL_NUMBER)) hints.add(`${m[1]!.toUpperCase()} ${m[2]}`);
+  for (const m of normaliseBill(message).matchAll(BILL_NUMBER)) hints.add(`${m[1]!.toUpperCase()} ${m[2]}`);
   for (const m of message.matchAll(ACRONYM)) if (!STOP_WORDS.has(m[0].toLowerCase())) hints.add(m[0]);
   return [...hints];
 }

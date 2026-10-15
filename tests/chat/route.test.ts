@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { describe, test } from "node:test";
+import { afterEach, beforeEach, describe, mock, test } from "node:test";
 
 import type { ChatTurn, Route } from "../../photon/src/chat/types.ts";
 import { fallbackRoute, route, ROUTER_TIMEOUT_MS, RouteSchema } from "../../photon/src/chat/route.ts";
 import { TOPICS } from "../../photon/src/data/schema.ts";
-import { groqLlm } from "../../photon/src/llm/groq.ts";
+import { groqLlm, LlmError } from "../../photon/src/llm/groq.ts";
 import type { Llm } from "../../photon/src/llm/groq.ts";
 
 type Req = Parameters<Llm>[0];
@@ -94,6 +94,14 @@ describe("fallbackRoute", () => {
     assert.deepEqual(fallbackRoute("What does the PDPA require?", []).recordHints, ["PDPA"]);
     assert.deepEqual(fallbackRoute("PDPA and SB 53", []).recordHints, ["SB 53", "PDPA"]);
     assert.deepEqual(fallbackRoute("SB 53 vs SB 53 and the PDPA, PDPA", []).recordHints, ["SB 53", "PDPA"]);
+  });
+
+  test("I6: SB53, SB-53, sb.53 and Senate Bill 53 are all the hint SB 53; Assembly Bill 2013 is AB 2013", () => {
+    for (const m of ["Explain SB53", "Explain SB-53", "Explain sb.53", "explain senate bill 53", "Explain Senate Bill No. 53", "what is SB  53"]) {
+      assert.deepEqual(fallbackRoute(m, []).recordHints, ["SB 53"], m);
+    }
+    assert.deepEqual(fallbackRoute("What is Assembly Bill 2013?", []).recordHints, ["AB 2013"]);
+    assert.deepEqual(fallbackRoute("absb 12 and sb", []).recordHints, [], "a word that merely ends in sb or ab is not a bill");
   });
 
   test("record hints: two-letter caps, ordinary words and plain numbers are not hints", () => {
@@ -517,5 +525,44 @@ describe("route through the real Groq client", () => {
     const got = await route("What is going on?", [], client(fetchImpl));
     assert.equal(bodies.length, 2); // the first call and the client's one repair call
     assert.deepEqual(got, fallbackRoute("What is going on?", []));
+  });
+});
+
+describe("M4: a router that fails says why in the log, once", () => {
+  beforeEach(() => {
+    mock.method(console, "warn", () => {});
+  });
+  afterEach(() => {
+    mock.restoreAll();
+  });
+  const lines = () => (console.warn as unknown as { mock: { calls: { arguments: unknown[] }[] } }).mock.calls.map((c) => c.arguments.map(String).join(" "));
+
+  test("a 429 from Groq is logged with its status and kind, the key is not, and the rule-based route is used", async () => {
+    const key = "gsk_secretkey123456789";
+    const failing = (async () => {
+      const error = new LlmError(`Groq API error 429: slow down ${key}`, 429);
+      error.kind = "http";
+      throw error;
+    }) as unknown as Llm;
+    const got = await route("What is going on?", [], failing);
+    assert.deepEqual(got, fallbackRoute("What is going on?", []));
+    assert.equal(lines().length, 1);
+    assert.match(lines()[0]!, /router/);
+    assert.match(lines()[0]!, /status=429 kind=http/);
+    assert.ok(!lines()[0]!.includes(key));
+  });
+
+  test("a router that is too slow is logged too, with no status", async () => {
+    const slow = (() => new Promise(() => {})) as unknown as Llm;
+    await route("What is going on?", [], slow, { timeoutMs: 20 });
+    assert.equal(lines().length, 1);
+    assert.match(lines()[0]!, /status=none/);
+    assert.match(lines()[0]!, /did not answer within 20 ms/);
+  });
+
+  test("a router that works logs nothing", async () => {
+    const { llm } = fakeLlm({ intent: "brief", detail: false, standalone: "q", search: "", recordHints: [], jurisdiction: null, topics: [], sinceDays: null });
+    await route("What is going on?", [], llm);
+    assert.deepEqual(lines(), []);
   });
 });

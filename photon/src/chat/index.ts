@@ -10,12 +10,13 @@ import type { Llm } from "../llm/groq.ts";
 import { searchPublicBluesky } from "../sources/bsky-search.ts";
 import type { PublicBskyPost } from "../sources/bsky-search.ts";
 import { citationOf, finalize, stripMarkers } from "./cite.ts";
-import { compose, COMPOSE_TIMEOUT_MS, shapeOf } from "./compose.ts";
+import { compose, COMPOSE_TIMEOUT_MS, MAX_COMPOSE_SOURCES, shapeOf } from "./compose.ts";
 import { rank, typesafeScorer } from "./rank.ts";
 import type { Scorer } from "./rank.ts";
 import { retrieve } from "./retrieve.ts";
 import { fallbackRoute, route as routeQuestion, ROUTER_TIMEOUT_MS } from "./route.ts";
 import type { ChatInput, ChatResponse, ChatTurn, Citation, Mode, Route, Source } from "./types.ts";
+import { warnFailure } from "./warn.ts";
 
 // ---- fixed copy ----------------------------------------------------------------------------------------------
 
@@ -157,16 +158,18 @@ export async function publicBlueskyItems(query: string, search: () => Promise<{ 
 
 /**
  * The Worker's dependencies from its environment. The Groq client's own defaults (60 s, 5 attempts) are for batch
- * builds, so the router gets 3 s and no retry and compose 8 s and one retry. With no GROQ_API_KEY there are no
- * models (the rule-based route and the fallback reply are used); with no TYPESAFE_API_KEY there is no ranking.
+ * builds, so the router gets 3 s and no retry and compose 8 s and one retry. Both think at `low` effort: routing and
+ * writing a cited brief from numbered sources need little reasoning, and on Groq's free tier (8,000 tokens a minute)
+ * the default medium effort spends the budget on thinking. With no GROQ_API_KEY there are no models (the rule-based
+ * route and the fallback reply are used); with no TYPESAFE_API_KEY there is no ranking.
  */
 export function chatDepsFromEnv(env: ChatEnv, make: typeof groqLlm = groqLlm): ChatDeps {
   const deps: ChatDeps = { bluesky: (q) => publicBlueskyItems(q) };
   const groqKey = env.GROQ_API_KEY?.trim();
   if (groqKey) {
     const models = resolveChatModels({ GROQ_CHAT_MODEL: env.GROQ_CHAT_MODEL, GROQ_ROUTER_MODEL: env.GROQ_ROUTER_MODEL });
-    deps.router = make({ apiKey: groqKey, model: models.router, timeoutMs: ROUTER_TIMEOUT_MS, maxRetries: 0 });
-    deps.composer = make({ apiKey: groqKey, model: models.compose, timeoutMs: COMPOSE_TIMEOUT_MS, maxRetries: 1 });
+    deps.router = make({ apiKey: groqKey, model: models.router, timeoutMs: ROUTER_TIMEOUT_MS, maxRetries: 0, reasoningEffort: "low" });
+    deps.composer = make({ apiKey: groqKey, model: models.compose, timeoutMs: COMPOSE_TIMEOUT_MS, maxRetries: 1, reasoningEffort: "low" });
   }
   const typesafeKey = env.TYPESAFE_API_KEY?.trim();
   if (typesafeKey) deps.scorer = typesafeScorer(typesafeKey);
@@ -180,9 +183,9 @@ function notAnAnswer(reply: string, asOf: string): ChatResponse {
   return { reply, mode: "fallback", citations: [], followUps: [], asOf };
 }
 
-/** The response when the answer could not be built at all (an unexpected error). */
-export function failureResponse(): ChatResponse {
-  return notAnAnswer(FAIL_REPLY, "");
+/** The response when the answer could not be built at all (an unexpected error). `asOf` is the snapshot date if it was already read. */
+export function failureResponse(asOf = ""): ChatResponse {
+  return notAnAnswer(FAIL_REPLY, asOf);
 }
 
 const greeting = (asOf: string): ChatResponse => ({ reply: GREETING, mode: "greeting", citations: [], followUps: [...GREETING_FOLLOW_UPS], asOf });
@@ -264,26 +267,34 @@ async function fallback(sources: Source[], asOf: string, db: D1Like): Promise<Ch
  * unexpected error is a plain failure reply. `deps` overrides what `chatDepsFromEnv(env)` builds.
  */
 export async function chat(input: ChatInput, env: ChatEnv, deps: ChatDeps = {}): Promise<ChatResponse> {
+  // The snapshot date, once it has been read, so that an error after that still says what the data is as of (M9).
+  const known = { asOf: "" };
   try {
     const req = normalizeChatRequest(input);
     const built = chatDepsFromEnv(env);
-    return await respond(req, env.DB, {
-      router: deps.router ?? built.router,
-      composer: deps.composer ?? built.composer,
-      scorer: deps.scorer ?? built.scorer,
-      bluesky: deps.bluesky ?? built.bluesky,
-      composeTimeoutMs: deps.composeTimeoutMs,
-    });
+    return await respond(
+      req,
+      env.DB,
+      {
+        router: deps.router ?? built.router,
+        composer: deps.composer ?? built.composer,
+        scorer: deps.scorer ?? built.scorer,
+        bluesky: deps.bluesky ?? built.bluesky,
+        composeTimeoutMs: deps.composeTimeoutMs,
+      },
+      known,
+    );
   } catch (error) {
-    console.warn("chat: could not answer", error);
-    return failureResponse();
+    warnFailure("answer", error);
+    return failureResponse(known.asOf);
   }
 }
 
-async function respond(req: ChatInput, db: D1Like, deps: ChatDeps): Promise<ChatResponse> {
+async function respond(req: ChatInput, db: D1Like, deps: ChatDeps, known: { asOf: string }): Promise<ChatResponse> {
   const manifest = await getManifest(db);
   if (!manifest) return notAnAnswer(EMPTY_REPLY, "");
   const asOf = manifest.snapshotDate;
+  known.asOf = asOf;
 
   // A blank message has nothing to ask; it gets the greeting without a model call.
   if (!req.message) return greeting(asOf);
@@ -294,7 +305,8 @@ async function respond(req: ChatInput, db: D1Like, deps: ChatDeps): Promise<Chat
   const retrieved = await retrieve(decided, db, { manifest, bluesky: deps.bluesky, knowledge: req.knowledge });
   // An out-of-scope question the dataset does cover is answered as an explain.
   const route: Route = retrieved.promoted ? { ...decided, intent: "explain" } : decided;
-  const sources = await rank(route, retrieved.sources, deps.scorer);
+  // Retrieval and ranking may hold up to 12 sources; only the best 8 go to the model and into the answer's numbering.
+  const sources = (await rank(route, retrieved.sources, deps.scorer)).slice(0, MAX_COMPOSE_SOURCES);
 
   if (!deps.composer) return fallback(sources, asOf, db);
   try {
@@ -312,7 +324,7 @@ async function respond(req: ChatInput, db: D1Like, deps: ChatDeps): Promise<Chat
       };
     }
   } catch (error) {
-    console.warn("chat: compose failed", error);
+    warnFailure("compose", error);
   }
   return fallback(sources, asOf, db);
 }
