@@ -153,6 +153,139 @@ describe("fallbackRoute", () => {
     }
   });
 
+  describe("a catch-up question is a brief, scoped by the place and topic it names", () => {
+    test("what's going on in California AI policy", () => {
+      const r = fallbackRoute("What's going on in California AI policy?", []);
+      assert.equal(r.intent, "brief");
+      assert.equal(r.jurisdiction, "US-CA");
+      assert.ok(r.topics?.includes("ai-governance"));
+      assert.equal(r.detail, false);
+      assert.deepEqual(r.recordHints, []);
+    });
+
+    test("each catch-up phrase works, in any case and with a curly apostrophe", () => {
+      for (const m of [
+        "What is going on with AI in California?",
+        "WHAT'S NEW in Singapore privacy",
+        "what’s new in Singapore privacy",
+        "whats new in California cybersecurity",
+        "the latest on Singapore data centres",
+        "any update on California online safety?",
+        "what changed in Singapore procurement this year?",
+        "what is happening with California AI",
+      ]) {
+        assert.equal(fallbackRoute(m, []).intent, "brief", m);
+      }
+    });
+
+    test("a named instrument makes it an explain, however it is asked", () => {
+      const r = fallbackRoute("What's new on SB 53?", []);
+      assert.equal(r.intent, "explain");
+      assert.deepEqual(r.recordHints, ["SB 53"]);
+      assert.ok(!("jurisdiction" in r) && !("topics" in r));
+      assert.equal(fallbackRoute("What's the latest on the PDPA?", []).intent, "explain");
+      assert.equal(fallbackRoute("any update on AB 2013", []).intent, "explain");
+    });
+
+    test("an ordinary question about a place and topic is still an explain, with no scope set", () => {
+      for (const m of ["What does California require of data centres?", "How does Singapore regulate AI?", "Explain Singapore privacy rules"]) {
+        const r = fallbackRoute(m, []);
+        assert.equal(r.intent, "explain", m);
+        assert.ok(!("jurisdiction" in r) && !("topics" in r), m);
+      }
+    });
+
+    test("California, CA, Singapore and SG name the jurisdiction as whole words", () => {
+      const jurisdictionOf = (m: string) => fallbackRoute(m, []).jurisdiction;
+      assert.equal(jurisdictionOf("what's going on in California"), "US-CA");
+      assert.equal(jurisdictionOf("what's going on in CA"), "US-CA");
+      assert.equal(jurisdictionOf("what's going on in Singapore"), "SG");
+      assert.equal(jurisdictionOf("what's going on in SG"), "SG");
+      assert.equal(jurisdictionOf("what's going on in Sgt Pepper"), undefined);
+      assert.equal(jurisdictionOf("what's going on in Californian schools"), undefined);
+    });
+
+    test("two places, or none, leave the jurisdiction out", () => {
+      assert.ok(!("jurisdiction" in fallbackRoute("what's going on in California and Singapore AI policy?", [])));
+      assert.ok(!("jurisdiction" in fallbackRoute("what's going on in AI policy?", [])));
+      assert.ok(!("topics" in fallbackRoute("what's going on in Singapore?", [])));
+    });
+
+    test("every topic can be named", () => {
+      const cases: [string, string][] = [
+        ["AI", "ai-governance"],
+        ["artificial intelligence", "ai-governance"],
+        ["data centres", "data-centres"],
+        ["data centers", "data-centres"],
+        ["privacy", "privacy-data"],
+        ["data protection", "privacy-data"],
+        ["cybersecurity", "cybersecurity"],
+        ["cyber incidents", "cybersecurity"],
+        ["online safety", "online-safety"],
+        ["procurement", "gov-tech-procurement"],
+        ["tenders", "gov-tech-procurement"],
+        ["digital infrastructure", "digital-infrastructure"],
+        ["broadband", "digital-infrastructure"],
+      ];
+      for (const [words, topic] of cases) {
+        const r = fallbackRoute(`what's going on with ${words}?`, []);
+        assert.equal(r.intent, "brief", words);
+        assert.deepEqual(r.topics, [topic], words);
+      }
+    });
+
+    test("several topics are all kept, once each, in the order of the topic list", () => {
+      const r = fallbackRoute("what's the latest on cybersecurity, AI and AI safety, plus privacy?", []);
+      assert.deepEqual(r.topics, ["ai-governance", "privacy-data", "cybersecurity"]);
+    });
+
+    test("'AI' is a whole word", () => {
+      assert.ok(!("topics" in fallbackRoute("what's going on in Hainan, Taiwan and Spain?", [])));
+    });
+
+    test("a plain Route again: no undefined keys, and it survives JSON", () => {
+      const r = fallbackRoute("What's going on in California AI policy?", []);
+      assert.deepEqual(Object.keys(r).sort(), ["detail", "intent", "jurisdiction", "recordHints", "search", "standalone", "topics"]);
+      assert.deepEqual(JSON.parse(JSON.stringify(r)), r);
+    });
+  });
+
+  describe("a follow-up keeps the records named in the user's previous question", () => {
+    test("a pronoun and history: the hints of the last user turn are added", () => {
+      const r = fallbackRoute("what does that mean for agencies", sb53History);
+      assert.ok(r.recordHints.includes("SB 53"));
+      assert.deepEqual(r.recordHints, ["SB 53"]);
+    });
+
+    test("the message's own hints come first, and a hint found twice is kept once", () => {
+      const history: ChatTurn[] = [{ role: "user", text: "Compare SB 53 with the PDPA" }, { role: "assistant", text: "Here is how they differ." }];
+      assert.deepEqual(fallbackRoute("does it apply to AB 2013 as well as SB 53", history).recordHints, ["AB 2013", "SB 53", "PDPA"]);
+    });
+
+    test("only the last user turn is used, and the assistant's turns are not", () => {
+      const history: ChatTurn[] = [
+        { role: "user", text: "Tell me about the PDPA" },
+        { role: "assistant", text: "The PDPA is Singapore's law. SB 53 is California's." },
+        { role: "user", text: "And SB 53?" },
+        { role: "assistant", text: "Here is SB 53 and the CCPA." },
+      ];
+      assert.deepEqual(fallbackRoute("what does that mean for agencies", history).recordHints, ["SB 53"]);
+    });
+
+    test("without a pronoun, without history or without a user turn, only the message's hints are used", () => {
+      assert.deepEqual(fallbackRoute("what about agencies", sb53History).recordHints, []);
+      assert.deepEqual(fallbackRoute("what does that mean for agencies", []).recordHints, []);
+      assert.deepEqual(fallbackRoute("what does that mean for agencies", [{ role: "assistant", text: "SB 53" }]).recordHints, []);
+    });
+
+    test("a catch-up follow-up that names no record but relies on history becomes an explain about that record", () => {
+      const r = fallbackRoute("is there an update on it for agencies?", sb53History);
+      assert.equal(r.intent, "explain");
+      assert.deepEqual(r.recordHints, ["SB 53"]);
+      assert.ok(!("jurisdiction" in r) && !("topics" in r));
+    });
+  });
+
   test("hostile and odd input never throws", () => {
     for (const m of ["", "\0", "'; DROP TABLE records; --", "a".repeat(5000), "🙂🙂🙂", "SB ".repeat(300), "<script>alert(1)</script>", "NEAR(a b) * AND OR NOT"]) {
       const r = fallbackRoute(m, sb53History);
@@ -285,6 +418,51 @@ describe("route", () => {
     for (const junk of [null, undefined, "explain", 42, [], {}, { intent: "explain" }, { ...valid, intent: "dance" }]) {
       assert.deepEqual(await route("What is going on?", [], fakeLlm(junk).llm), fallbackRoute("What is going on?", []), JSON.stringify(junk));
     }
+  });
+
+  test("an empty or blank standalone becomes the original message; a real one is kept as it is", async () => {
+    const reply = { intent: "explain", detail: false, search: "sb 53", jurisdiction: null, topics: [], recordHints: ["SB 53"], sinceDays: null };
+    const message = "What does that mean for a state agency?";
+    for (const blank of ["", "   ", "\n\t "]) {
+      const got = await route(message, sb53History, fakeLlm({ ...reply, standalone: blank }).llm);
+      assert.equal(got.standalone, message, JSON.stringify(blank));
+      assert.equal(got.intent, "explain");
+      assert.equal(got.search, "sb 53");
+    }
+    const kept = await route(message, sb53History, fakeLlm({ ...reply, standalone: "What does SB 53 mean for a state agency?" }).llm);
+    assert.equal(kept.standalone, "What does SB 53 mean for a state agency?");
+    assert.equal(
+      (await route(message, sb53History, fakeLlm({ ...reply, standalone: "  padded  " }).llm)).standalone,
+      "  padded  ",
+    );
+  });
+
+  test("a blank standalone from a reply that left out the optional fields is also filled in", async () => {
+    const got = await route("What is going on?", [], fakeLlm({ intent: "brief", detail: false, standalone: "", search: "", recordHints: [] }).llm);
+    assert.equal(got.standalone, "What is going on?");
+  });
+
+  test("the prompt separates a brief (what's going on, scoped by place or topic) from an explain (a named record)", async () => {
+    const { llm, calls } = fakeLlm(valid);
+    await route("hello", [], llm);
+    const lines = calls[0]!.system.split("\n");
+    const line = (start: string) => lines.find((l) => l.startsWith(start))!;
+    const brief = line("- brief:");
+    assert.match(brief, /what is going on/);
+    assert.match(brief, /what changed/);
+    assert.match(brief, /the latest/);
+    assert.match(brief, /optionally narrowed to a place and\/or topic/);
+    assert.match(brief, /what's going on in California AI policy\?/);
+    assert.match(brief, /jurisdiction/);
+    assert.match(brief, /topics/);
+    assert.ok(!/no particular subject/.test(calls[0]!.system));
+    const explain = line("- explain:");
+    assert.match(explain, /specific named bill, law, regulation, framework or tender/);
+    assert.match(explain, /no "what's new" angle/);
+    const search = line("- search:");
+    assert.match(search, /brief/);
+    assert.match(search, /place or topic/);
+    assert.match(search, /jurisdiction and topics/);
   });
 
   test("the default deadline is the 3,000 ms router budget", () => {

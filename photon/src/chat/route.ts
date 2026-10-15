@@ -4,6 +4,7 @@
 import { z } from "zod/v4";
 import { STOP_WORDS as FTS_STOP_WORDS } from "../data/fts.ts";
 import { JurisdictionSchema, TOPICS, TopicSchema } from "../data/schema.ts";
+import type { Jurisdiction, Topic } from "../data/schema.ts";
 import type { Llm } from "../llm/groq.ts";
 import { INTENTS } from "./types.ts";
 import type { ChatTurn, Route } from "./types.ts";
@@ -41,13 +42,16 @@ const ReplySchema = z.object({
   sinceDays: z.number().nullish(),
 });
 
-/** A checked reply as a Route: "not given" (null or missing) becomes an absent key. */
-function toRoute(reply: z.infer<typeof ReplySchema>): Route {
+/**
+ * A checked reply as a Route: "not given" (null or missing) becomes an absent key, and a blank `standalone` becomes the
+ * message the user typed (the retriever and the ranker both read it).
+ */
+function toRoute(reply: z.infer<typeof ReplySchema>, message: string): Route {
   const days = reply.sinceDays;
   return {
     intent: reply.intent,
     detail: reply.detail,
-    standalone: reply.standalone,
+    standalone: reply.standalone.trim() ? reply.standalone : message,
     search: reply.search,
     ...(reply.jurisdiction ? { jurisdiction: reply.jurisdiction } : {}),
     ...(reply.topics?.length ? { topics: reply.topics } : {}),
@@ -65,8 +69,8 @@ Read the latest message. Use the earlier conversation only to work out what "it"
 
 intent (pick exactly one):
 - greeting: a greeting or thanks, with nothing to look up.
-- brief: asks what is new or going on, with no particular subject ("what's going on?", "anything new in Singapore?").
-- explain: asks what a specific bill, law, rule, tender or topic says or does, including "explain X in detail".
+- brief: asks what is going on, what changed or what the latest is, optionally narrowed to a place and/or topic ("what's going on?", "what's going on in California AI policy?", "what changed in Singapore data centre rules?"). Put the place in jurisdiction and the topic in topics.
+- explain: asks about a specific named bill, law, regulation, framework or tender, or what the rules on a topic say, with no "what's new" angle ("what does SB 53 require?", "explain the PDPA in detail").
 - implications: asks what something means for a role or organisation, or what to do about it ("what does this mean for a state agency?").
 - sentiment: asks what people, the public or industry are saying about something.
 - out-of-scope: not about California or Singapore technology policy (other places, other fields, general chat).
@@ -75,7 +79,7 @@ intent (pick exactly one):
 Other fields:
 - detail: true only if the user asks for depth ("in detail", "walk me through", "deep dive").
 - standalone: the message rewritten as one self-contained question, with every "it", "that" or "this" replaced by what it refers to. For clarify, the question to ask the user instead.
-- search: two to six keywords that would appear in the policy text itself, separated by spaces, with no filler words. "" when the message has no subject.
+- search: two to six keywords that would appear in the policy text itself, separated by spaces, with no filler words. "" when the message has no subject, and "" for a brief that names only a place or topic (those go in jurisdiction and topics).
 - jurisdiction: "US-CA" or "SG" if the user names or clearly implies one place, else null.
 - topics: the topic ids that clearly apply, or [] if none.
 - recordHints: names or numbers of specific records the user mentions or means, such as "SB 53" or "PDPA", or [] if none.
@@ -101,7 +105,7 @@ export async function route(message: string, history: ChatTurn[], llm: Llm, opts
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error(`The router did not answer within ${timeoutMs} ms`)), timeoutMs);
     });
-    return toRoute(ReplySchema.parse(await Promise.race([answer, deadline])));
+    return toRoute(ReplySchema.parse(await Promise.race([answer, deadline])), message);
   } catch {
     return fallbackRoute(message, history);
   } finally {
@@ -114,6 +118,8 @@ export async function route(message: string, history: ChatTurn[], llm: Llm, opts
 const GREETING_WORDS = new Set("hi hello hey thanks thank yo morning".split(" "));
 const PRONOUNS = new Set("it that this they those".split(" "));
 const DETAIL = /in detail|walk me through|deep dive|explain fully/i;
+/** Asking what is going on, rather than about a particular record. */
+const CATCH_UP = /going on|what['’]?s new|latest|update|changed|happening/i;
 const BILL_NUMBER = /\b(AB|SB)\s?(\d+)\b/gi;
 const ACRONYM = /\b[A-Z]{3,}\b/g;
 const WORD = /[\p{L}\p{N}][\p{L}\p{N}\p{M}]*(?:['’][\p{L}\p{N}\p{M}]+)*/gu;
@@ -149,6 +155,32 @@ function keywordsOf(text: string): string[] {
   return [...keywords];
 }
 
+const PLACES: [Jurisdiction, RegExp][] = [
+  ["US-CA", /\b(?:california|ca)\b/i],
+  ["SG", /\b(?:singapore|sg)\b/i],
+];
+
+/** In the order of TOPICS, so a message that names several gives them in that order. */
+const TOPIC_WORDS: [Topic, RegExp][] = [
+  ["ai-governance", /\bai\b|artificial intelligence/i],
+  ["data-centres", /\bdata ?cent(?:re|er)s?\b/i],
+  ["privacy-data", /\bprivacy\b|data protection/i],
+  ["cybersecurity", /\bcyber/i],
+  ["online-safety", /\bonline safety\b/i],
+  ["gov-tech-procurement", /\bprocurement\b|\btenders?\b/i],
+  ["digital-infrastructure", /\bdigital infrastructure\b|\bbroadband\b/i],
+];
+
+/** The place and topics a message names. A message naming both places names neither. */
+function scopeOf(message: string): { jurisdiction?: Jurisdiction; topics?: Topic[] } {
+  const places = PLACES.filter(([, pattern]) => pattern.test(message)).map(([place]) => place);
+  const topics = TOPIC_WORDS.filter(([, pattern]) => pattern.test(message)).map(([topic]) => topic);
+  return {
+    ...(places.length === 1 ? { jurisdiction: places[0]! } : {}),
+    ...(topics.length ? { topics } : {}),
+  };
+}
+
 /** "SB 53" and "AB 2013" (however spaced or cased), then acronyms of three or more capitals such as "PDPA". */
 function recordHintsOf(message: string): string[] {
   const hints = new Set<string>();
@@ -159,9 +191,10 @@ function recordHintsOf(message: string): string[] {
 
 /**
  * A guess from the words alone, for when the router model cannot be used:
- * a short greeting is a `greeting`; a message with nothing to search for ("what is going on") is a `brief`;
- * anything else is an `explain`. A message that says "it", "that" or "this" in a conversation also searches for
- * the keywords of the user's previous question, so a follow-up still finds the record it is about.
+ * a short greeting is a `greeting`; a message that asks what is going on (or has nothing to search for) and names no
+ * record is a `brief`, scoped to the place and topics it names; anything else is an `explain`.
+ * A message that says "it", "that" or "this" in a conversation also takes the keywords and the record hints of the
+ * user's previous question, so a follow-up still finds the record it is about.
  */
 export function fallbackRoute(message: string, history: ChatTurn[]): Route {
   const words = wordsOf(message);
@@ -172,16 +205,22 @@ export function fallbackRoute(message: string, history: ChatTurn[]): Route {
 
   const keywords = keywordsOf(message);
   const search = new Set(keywords);
+  const recordHints = new Set(recordHintsOf(message));
   if (words.some((word) => PRONOUNS.has(baseWord(word)))) {
     const lastUserTurn = [...history].reverse().find((turn) => turn.role === "user");
-    for (const keyword of lastUserTurn ? keywordsOf(lastUserTurn.text) : []) search.add(keyword);
+    if (lastUserTurn) {
+      for (const keyword of keywordsOf(lastUserTurn.text)) search.add(keyword);
+      for (const hint of recordHintsOf(lastUserTurn.text)) recordHints.add(hint);
+    }
   }
 
+  const catchUp = CATCH_UP.test(message) && recordHints.size === 0;
   return {
-    intent: keywords.length === 0 ? "brief" : "explain",
+    intent: keywords.length === 0 || catchUp ? "brief" : "explain",
     detail: DETAIL.test(message),
     standalone,
     search: [...search].join(" "),
-    recordHints: recordHintsOf(message),
+    ...(catchUp ? scopeOf(message) : {}),
+    recordHints: [...recordHints],
   };
 }
