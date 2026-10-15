@@ -166,6 +166,20 @@ const body = (text: string) => inert(text).replace(/\r\n?|\u2028|\u2029/g, "\n")
 
 const isoDay = (date: string | undefined) => (date && /^\d{4}-\d{2}-\d{2}/.test(date) ? date.slice(0, 10) : "");
 
+/** The fields of a record that its source header shows. A `RecordSummary` has them; so does a record read from the snapshot (see scripts/eval-chat.ts). */
+export type HeaderRecord = { title: string; shortTitle?: string; jurisdiction: string; status: string; statusDate?: string; published?: string; lastActivity?: string };
+
+/**
+ * The header line of a policy source as the compose model reads it, after its number: "Title (Short) — US-CA · enacted ·
+ * 2025-09-29" (title, then place, status and the newest of its status date, publication date and last activity). The
+ * eval's judge is shown this same line, so it can check the facts the header states (a status, a date) and not only the passage.
+ */
+export function sourceHeader(r: HeaderRecord): string {
+  const title = r.shortTitle && r.shortTitle !== r.title ? `${r.title} (${r.shortTitle})` : r.title;
+  const meta = [r.jurisdiction, r.status, r.statusDate || r.published || r.lastActivity].filter(Boolean).join(" · ");
+  return meta ? `${oneLine(title)} — ${meta}` : oneLine(title);
+}
+
 function sourceBlock(source: Source, n: number): string {
   if (source.kind === "post") {
     const post = source.post!;
@@ -174,10 +188,8 @@ function sourceBlock(source: Source, n: number): string {
   }
   const { record, passage } = source;
   const r = record!;
-  const title = r.shortTitle && r.shortTitle !== r.title ? `${r.title} (${r.shortTitle})` : r.title;
-  const meta = [r.jurisdiction, r.status, r.statusDate || r.published || r.lastActivity].filter(Boolean).join(" · ");
   const text = passage ? (passage.heading ? `${passage.heading}: ${passage.text}` : passage.text) : r.summary;
-  return `[${n}] (policy) ${oneLine(title)} — ${meta}\n${body(text)}`;
+  return `[${n}] (policy) ${sourceHeader(r)}\n${body(text)}`;
 }
 
 /**

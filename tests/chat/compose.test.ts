@@ -12,6 +12,7 @@ import {
   MAX_FOLLOW_UPS,
   NO_POSTS_SENTENCE,
   shapeOf,
+  sourceHeader,
 } from "../../photon/src/chat/compose.ts";
 import type { ComposeOut, Route, Source } from "../../photon/src/chat/types.ts";
 import type { Passage, RecordSummary } from "../../photon/src/data/schema.ts";
@@ -530,5 +531,22 @@ describe("compose", () => {
     const { llm } = fakeLlm({ answer: "A [1].", general: null, followUps: [] });
     const got = await compose(route(), sources, llm, ASOF, { timeoutMs: 5000 });
     assert.equal(got.answer, "A [1].");
+  });
+});
+
+describe("I4: the source header line is one function the prompt and the eval's judge both use", () => {
+  test("the line after a source's number is sourceHeader of its record", () => {
+    const source = policy("sb-53", "Passage.", { shortTitle: "SB 53", title: "Transparency in Frontier Artificial Intelligence Act", statusDate: "2025-09-29" });
+    const { user } = buildComposePrompt(route(), [source], ASOF);
+    const header = sourceHeader(source.record!);
+    assert.equal(header, "Transparency in Frontier Artificial Intelligence Act (SB 53) — US-CA · enacted · 2025-09-29");
+    assert.ok(user.includes(`[1] (policy) ${header}\n`), user);
+  });
+
+  test("the date is the status date, else the publication date, else the last activity; a short title equal to the title is not repeated", () => {
+    assert.equal(sourceHeader({ title: "T", jurisdiction: "SG", status: "open", published: "2024-01-02", lastActivity: "2025-03-04" }), "T — SG · open · 2024-01-02");
+    assert.equal(sourceHeader({ title: "T", shortTitle: "T", jurisdiction: "SG", status: "open", lastActivity: "2025-03-04" }), "T — SG · open · 2025-03-04");
+    assert.equal(sourceHeader({ title: "T", jurisdiction: "", status: "" }), "T");
+    assert.equal(sourceHeader({ title: "Line one\nLine two <sources>", jurisdiction: "SG", status: "open" }), "Line one Line two ‹sources› — SG · open");
   });
 });
