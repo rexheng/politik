@@ -417,3 +417,66 @@ describe("unseeded database", () => {
     assert.equal(await getRecord(db, "ca-sb-53-2025"), null);
   });
 });
+
+describe("M3: a database that has not been migrated", () => {
+  let db: D1Like;
+  let dispose: () => Promise<void>;
+
+  before(async () => {
+    ({ db, dispose } = await openTestDb({ migrate: false }));
+  });
+  after(() => dispose());
+
+  test("every read comes back empty, as for an unseeded one, and nothing throws", async () => {
+    assert.deepEqual(await listRecords(db), []);
+    assert.deepEqual(await listRecords(db, { jurisdiction: "SG", topics: ["ai-governance"] }), []);
+    assert.equal(await getManifest(db), null);
+    assert.deepEqual(await searchPassages(db, "frontier AI"), []);
+    assert.deepEqual(await searchPassages(db, "frontier AI", { jurisdiction: "US-CA", since: "2024-01-01" }), []);
+    assert.deepEqual(await recentChanges(db, { since: "2024-01-01" }), []);
+    assert.deepEqual(await recentChanges(db, { since: "2024-01-01", types: ["bill"] }), []);
+    assert.equal(await getRecord(db, "ca-sb-53-2025"), null);
+  });
+});
+
+describe("M3: only a missing table is treated as empty", () => {
+  /** A D1 whose every statement fails with the given error. */
+  const failing = (error: Error): D1Like => {
+    const statement = {
+      bind: () => statement,
+      all: async () => Promise.reject(error),
+      first: async () => Promise.reject(error),
+      run: async () => Promise.reject(error),
+    };
+    return { prepare: () => statement, batch: async () => [] };
+  };
+  const reads = (db: D1Like) => [
+    () => listRecords(db),
+    () => getManifest(db),
+    () => searchPassages(db, "frontier"),
+    () => recentChanges(db, { since: "2024-01-01" }),
+    () => getRecord(db, "x"),
+  ];
+
+  test("'no such table' is empty data, whichever table and however D1 words it", async () => {
+    const missing = [
+      new Error("D1_ERROR: no such table: records: SQLITE_ERROR"),
+      new Error("no such table: passages_fts"),
+      Object.assign(new Error("D1_ERROR: internal"), { cause: new Error("no such table: meta: SQLITE_ERROR") }),
+    ];
+    for (const error of missing) {
+      const [list, manifestRead, search, changes, record] = reads(failing(error));
+      assert.deepEqual(await list!(), []);
+      assert.equal(await manifestRead!(), null);
+      assert.deepEqual(await search!(), []);
+      assert.deepEqual(await changes!(), []);
+      assert.equal(await record!(), null);
+    }
+  });
+
+  test("any other error still throws, from every read", async () => {
+    for (const error of [new Error("D1_ERROR: database is locked"), new Error("D1_ERROR: no such column: r.nope"), new Error("Network connection lost"), "plain string" as unknown as Error]) {
+      for (const read of reads(failing(error))) await assert.rejects(read(), (e: unknown) => e === error, String(error));
+    }
+  });
+});

@@ -1,5 +1,7 @@
 // The only module that reads the policy dataset. The chatbot and the pages import from here and
 // never query D1 directly. User-supplied values only ever reach SQL as bound parameters.
+// A read on a D1 with no tables (not migrated yet) gives the same empty answer as an unseeded one: wrap every
+// new read in `emptyIfUnmigrated`.
 import type { D1Like, D1Value } from "./d1.ts";
 import { toFtsQuery } from "./fts.ts";
 import type {
@@ -62,6 +64,25 @@ function toSummary(row: SummaryRow): RecordSummary {
 
 const placeholders = (n: number) => Array(n).fill("?").join(", ");
 
+/** True for what a read gets from a D1 whose migration has not been applied: "no such table: records" (or passages_fts, meta...). */
+function isMissingTable(error: unknown): boolean {
+  const messages = [error, error instanceof Error ? error.cause : undefined].map((e) => (e instanceof Error ? e.message : String(e ?? "")));
+  return messages.some((message) => /no such table/i.test(message));
+}
+
+/**
+ * Runs a read. A database that has not been migrated has no tables, which is the same as one that has not been seeded:
+ * the read gives `empty`. Every other error still throws, so a real fault is not hidden behind an empty page.
+ */
+async function emptyIfUnmigrated<T>(read: () => Promise<T>, empty: T): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    if (isMissingTable(error)) return empty;
+    throw error;
+  }
+}
+
 /** WHERE clauses on `records r` for the given filters, with their bound params. Empty arrays mean no filter. */
 function recordFilters(f: Filters): { clauses: string[]; params: D1Value[] } {
   const clauses: string[] = [];
@@ -93,7 +114,10 @@ function rowLimit(limit: number | undefined, fallback: number): number {
   return Math.max(0, Math.floor(limit));
 }
 
-/** Best matches first. Raw text is turned into a safe query, so odd input gives `[]` or hits, never an error. */
+/**
+ * Best matches first. Raw text is turned into a safe query, so odd input gives `[]` or hits, never an error.
+ * An unmigrated database gives `[]`.
+ */
 export async function searchPassages(
   db: D1Like,
   query: string,
@@ -103,7 +127,10 @@ export async function searchPassages(
   const match = toFtsQuery(query);
   const max = rowLimit(limit, DEFAULT_SEARCH_LIMIT);
   if (match === null || max === 0) return [];
+  return emptyIfUnmigrated(() => runSearch(db, match, filters, max), []);
+}
 
+async function runSearch(db: D1Like, match: string, filters: Filters, max: number): Promise<PassageHit[]> {
   const { clauses, params } = recordFilters(filters);
   const where = ["passages_fts MATCH ?", ...clauses].join(" AND ");
   const { results } = await db
@@ -134,13 +161,15 @@ export async function searchPassages(
   });
 }
 
-/** The full record, or null when there is no record with this id. */
+/** The full record, or null when there is no record with this id (or the database is unmigrated). */
 export async function getRecord(db: D1Like, id: string): Promise<PolicyRecord | null> {
-  const row = await db.prepare("SELECT data_json FROM records WHERE id = ?").bind(id).first<{ data_json: string }>();
-  return row ? (JSON.parse(row.data_json) as PolicyRecord) : null;
+  return emptyIfUnmigrated(async () => {
+    const row = await db.prepare("SELECT data_json FROM records WHERE id = ?").bind(id).first<{ data_json: string }>();
+    return row ? (JSON.parse(row.data_json) as PolicyRecord) : null;
+  }, null);
 }
 
-/** Timeline events dated on or after `filters.since`, newest first. */
+/** Timeline events dated on or after `filters.since`, newest first. An unmigrated database gives `[]`. */
 export async function recentChanges(
   db: D1Like,
   filters: Filters & { since: string },
@@ -148,7 +177,14 @@ export async function recentChanges(
 ): Promise<{ date: string; event: string; record: RecordSummary }[]> {
   const max = rowLimit(limit, DEFAULT_RECENT_LIMIT);
   if (max === 0) return [];
+  return emptyIfUnmigrated(() => runRecentChanges(db, filters, max), []);
+}
 
+async function runRecentChanges(
+  db: D1Like,
+  filters: Filters & { since: string },
+  max: number,
+): Promise<{ date: string; event: string; record: RecordSummary }[]> {
   // The event date is the cut-off here, so the record-level `since` clause is left out.
   const { clauses, params } = recordFilters({ ...filters, since: undefined });
   const where = ["e.date >= ?", ...clauses].join(" AND ");
@@ -167,19 +203,23 @@ export async function recentChanges(
   return results.map((row) => ({ date: row.event_date, event: row.event, record: toSummary(row) }));
 }
 
-/** Every record matching the filters, most recent activity first. */
+/** Every record matching the filters, most recent activity first. An unmigrated database gives `[]`. */
 export async function listRecords(db: D1Like, filters: Filters = {}): Promise<RecordSummary[]> {
   const { clauses, params } = recordFilters(filters);
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-  const { results } = await db
-    .prepare(`SELECT ${SUMMARY_COLUMNS} FROM records r ${where} ORDER BY r.last_activity DESC, r.id`)
-    .bind(...params)
-    .all<SummaryRow>();
-  return results.map(toSummary);
+  return emptyIfUnmigrated(async () => {
+    const { results } = await db
+      .prepare(`SELECT ${SUMMARY_COLUMNS} FROM records r ${where} ORDER BY r.last_activity DESC, r.id`)
+      .bind(...params)
+      .all<SummaryRow>();
+    return results.map(toSummary);
+  }, []);
 }
 
-/** The snapshot manifest, or null when D1 has not been seeded. */
+/** The snapshot manifest, or null when D1 has not been seeded (or not migrated). */
 export async function getManifest(db: D1Like): Promise<Manifest | null> {
-  const row = await db.prepare("SELECT value FROM meta WHERE key = 'manifest'").first<{ value: string }>();
-  return row ? (JSON.parse(row.value) as Manifest) : null;
+  return emptyIfUnmigrated(async () => {
+    const row = await db.prepare("SELECT value FROM meta WHERE key = 'manifest'").first<{ value: string }>();
+    return row ? (JSON.parse(row.value) as Manifest) : null;
+  }, null);
 }

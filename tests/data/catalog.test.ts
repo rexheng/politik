@@ -181,7 +181,7 @@ describe("loadCatalog without data", () => {
   test("a D1 that was never migrated gives empty lists instead of throwing", async () => {
     const { db, dispose } = await openTestDb({ migrate: false });
     try {
-      await assert.rejects(listRecords(db), /no such table/);
+      assert.deepEqual(await listRecords(db), [], "the store treats a missing table as empty (M3)");
       assert.deepEqual(await loadCatalog(db), EMPTY);
     } finally {
       await dispose();

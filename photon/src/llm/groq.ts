@@ -2,6 +2,10 @@
 // Worker-safe by design (the chatbot reuses it): only `fetch` and zod. No node: imports, no dotenv, no env reads;
 // callers pass the key and model in.
 //
+// The defaults suit batch builds (the snapshot script): up to 4 retries with a 2 s backoff that doubles, and a 60 s
+// timeout on each HTTP exchange, so one call can run for several minutes before it gives up. A Worker request cannot
+// wait that long: Worker callers must pass a tight `timeoutMs` and `maxRetries` (and `baseDelayMs`) of their own.
+//
 // Groq docs this follows (checked 2026-10-15):
 //   https://console.groq.com/docs/structured-outputs  (json_schema modes, supported models, schema subset)
 //   https://console.groq.com/docs/models              (production vs preview models)
