@@ -29,7 +29,7 @@ import {
 import { groqLlm, LlmError, resolveModels, type Llm } from "../../src/llm/groq.ts";
 import { parseCandidates, type Candidate } from "./candidates.ts";
 import { enrichRecord, EnrichedSchema, type Enriched } from "./enrich.ts";
-import { fetchGebizTenders, GEBIZ_RULE, type GebizRule } from "./gebiz.ts";
+import { DEFAULT_GEBIZ_MAX, fetchGebizTenders, GEBIZ_RULE, selectTenders, type GebizRule, type GebizTender } from "./gebiz.ts";
 import { loadSource } from "./fetch.ts";
 import { sha256Hex, splitPassages, wordCount } from "./passages.ts";
 import { publisherFor } from "./publishers.ts";
@@ -38,8 +38,7 @@ import { verifyRecord } from "./verify.ts";
 
 /** Enrichment is sent the first passages up to this many words. Groq's free tier rejects larger requests (HTTP 413). */
 export const DEFAULT_ENRICH_MAX_WORDS = 6000;
-/** Tenders kept when the GeBIZ rule has no `max`. */
-export const DEFAULT_GEBIZ_MAX = 40;
+export { DEFAULT_GEBIZ_MAX };
 /** A built document with fewer words than this (tenders aside) is flagged in the summary: it may be a contents page. */
 const SHORT_WORDS = 300;
 const MAX_REASON = 300;
@@ -212,26 +211,36 @@ const CandidateSchema = z.object({
   urlConfidence: z.enum(["seen", "constructed"]),
   why: z.string(),
 });
-const TendersSchema = z.array(z.object({ candidate: CandidateSchema, text: z.string().min(1) }));
-type Tender = { candidate: Candidate; text: string };
+const TendersSchema = z.array(z.object({ candidate: CandidateSchema, text: z.string().min(1), matched: z.array(z.string()).default([]) }));
+type Tender = GebizTender;
 /** The GeBIZ cache file: every tender the rule matched, and which rule that was. */
 const TenderCacheSchema = z.object({ fingerprint: z.string(), tenders: TendersSchema });
 
 /**
- * What decides which tenders match: the dataset, the keywords, the earliest award date and the smallest award.
- * `max` is not part of it. The cache holds every match, and `max` only says how many to keep.
+ * What decides which tenders match, and in what order: the dataset, the keywords (flat or by group), the exclude patterns,
+ * the agency priority, the earliest award date and the smallest award. The quotas, the group topics and `max` are not
+ * part of it. The cache holds every match, and they only say how many to keep.
  */
 function ruleFingerprint(rule: GebizRule): string {
   return sha256Hex(
-    JSON.stringify({ datasetId: rule.datasetId, keywords: [...rule.keywords].sort(), since: rule.since, minAwardSgd: rule.minAwardSgd }),
+    JSON.stringify({
+      datasetId: rule.datasetId,
+      keywords: rule.keywords && [...rule.keywords].sort(),
+      groups: rule.groups?.map((g) => ({ name: g.name, keywords: [...g.keywords].sort() })),
+      exclude: rule.exclude && [...rule.exclude].sort(),
+      agencyPriority: rule.agencyPriority,
+      since: rule.since,
+      minAwardSgd: rule.minAwardSgd,
+    }),
   );
 }
 
 /**
- * The GeBIZ tenders to build, largest award first, at most `rule.max ?? 40`. Every tender the rule matches is cached in
- * `${rawDir}/gebiz-tenders.json` on the first fetch, together with a fingerprint of the rule, and read from there while
- * the rule is unchanged, so the output stays the same even though the live dataset grows. A changed rule fetches again;
- * a changed `max` does not, because it only cuts the cached list. Delete the file to take a fresh selection.
+ * The GeBIZ tenders to build: the rule's selection (see `selectTenders`), largest award first, at most `rule.max ?? 40`.
+ * Every tender the rule matches is cached in `${rawDir}/gebiz-tenders.json` on the first fetch, together with a fingerprint
+ * of the rule, and read from there while the rule is unchanged, so the output stays the same even though the live dataset
+ * grows. A changed rule fetches again; a changed `max` or quota does not, because they only cut the cached list.
+ * Delete the file to take a fresh selection.
  */
 async function loadTenders(opts: BuildOptions): Promise<Tender[]> {
   const rule = opts.gebizRule ?? GEBIZ_RULE;
@@ -241,7 +250,7 @@ async function loadTenders(opts: BuildOptions): Promise<Tender[]> {
   const fingerprint = ruleFingerprint(rule);
 
   const cached = TenderCacheSchema.safeParse(await readJsonOrUndefined(cachePath));
-  if (cached.success && cached.data.fingerprint === fingerprint) return cached.data.tenders.slice(0, max);
+  if (cached.success && cached.data.fingerprint === fingerprint) return selectTenders(rule, cached.data.tenders);
 
   let tenders: Tender[];
   try {
@@ -250,7 +259,7 @@ async function loadTenders(opts: BuildOptions): Promise<Tender[]> {
     throw new Error(`GeBIZ tenders could not be fetched: ${errorMessage(e)}. Run with --no-gebiz to build without them.`);
   }
   await writeAtomic(cachePath, jsonText({ fingerprint, tenders }));
-  return tenders.slice(0, max);
+  return selectTenders(rule, tenders);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

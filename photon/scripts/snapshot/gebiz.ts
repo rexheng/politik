@@ -2,13 +2,39 @@
 // Node-only build code: never import this from photon/src.
 import { z } from "zod/v4";
 
+import type { Topic } from "../../src/data/schema.ts";
 import type { Candidate } from "./candidates.ts";
+
+/** Tenders kept when the GeBIZ rule has no `max`. */
+export const DEFAULT_GEBIZ_MAX = 40;
+
+/** One topic group of the selection rule: its own keywords, and the most tenders it may contribute. */
+export interface GebizGroup {
+  name: string;
+  /** Keywords as in `GebizRule.keywords`. */
+  keywords: string[];
+  /** Most tenders this group contributes to the selection. */
+  quota: number;
+  /** The topic given, with gov-tech-procurement, to a tender selected through this group. */
+  topic: Topic;
+}
 
 export interface GebizRule {
   /** The data.gov.sg dataset (resource) id. */
   datasetId: string;
-  /** Case-insensitive regular-expression sources; a tender is kept if any one matches its description. */
-  keywords: string[];
+  /**
+   * What a tender's description must contain, as a flat list. A plain keyword matches whole words only, ignoring case
+   * (`server` does not match "Observer"); regular-expression characters in it are matched literally. A keyword that
+   * contains `\b` is taken as a regular-expression source exactly as written, so it can have alternatives (`cent(?:re|er)`).
+   * Give either `keywords` or `groups`.
+   */
+  keywords?: string[];
+  /** The same, split into topic groups with a quota each. A tender needs a keyword of at least one group. */
+  groups?: GebizGroup[];
+  /** Patterns (same syntax as keywords) matched against the description: a match drops the tender, whatever else matched. */
+  exclude?: string[];
+  /** Agencies in priority order, as names or parts of names. Breaks ties between tenders awarded the same amount. */
+  agencyPriority?: string[];
   /** Earliest award date to keep, as YYYY-MM-DD. */
   since: string;
   /** Smallest award to keep, in Singapore dollars. */
@@ -17,19 +43,82 @@ export interface GebizRule {
   max?: number;
 }
 
-// provisional — set from owner-approved candidates.md in Task 7
+// Tuned on 2026-10-15 against the live dataset (18,464 rows; 2,423 tenders awarded since 2023 for S$1M or more).
+//
+// This implements the approved rule in photon/data/snapshot/candidates.md ("GeBIZ tender selection rule"):
+// - Keywords are whole words (see GebizRule). The bare words the first draft used (network, hosting, server, cyber, co-location)
+//   matched sewerage, road and cycling-path "networks", server-room air handling, a cybersecurity agency's office renovation
+//   and a school's "co-location", so each is now a phrase that names an ICT thing.
+// - The four groups and quotas are the approved ones: about 12 AI/analytics, 10 cloud/data-centre, 10 cybersecurity and
+//   8 digital-infrastructure. A tender goes to the first group it matches that has room, largest award first, so no one
+//   topic fills the list.
+// - The approved exclusions (guarding, cleaning, manpower, CCTV maintenance) are in `exclude`. "Unless an ICT keyword also
+//   matches" is a lookahead for the strong ICT words, because a pattern cannot see the keyword groups.
+// - The agency priority breaks ties between equal awards. It rarely decides anything, which is what a tie-break should do.
 export const GEBIZ_RULE: GebizRule = {
   datasetId: "d_acde1106003906a75c3fa052592f2fcb", // "Government Procurement via GeBIZ"
-  keywords: [
-    // AI and analytics
-    "artificial intelligence", "\\bAI\\b", "machine learning", "generative", "large language model", "\\bLLM\\b",
-    "chatbot", "computer vision", "video analytics", "data analytics", "data science",
-    // cloud and data centres
-    "cloud", "\\bGCC\\b", "\\bSaaS\\b", "data cent(?:re|er)", "co-location", "hosting", "server",
-    // cybersecurity
-    "cyber", "security operations cent(?:re|er)", "\\bSOC\\b", "penetration test", "vulnerability", "managed security", "threat",
-    // digital infrastructure
-    "network", "\\b5G\\b", "broadband", "fibre", "submarine cable", "wi-?fi",
+  groups: [
+    {
+      name: "ai-analytics",
+      quota: 12,
+      topic: "ai-governance",
+      keywords: [
+        "artificial intelligence", "AI", "machine learning", "generative", "large language model", "LLM", "chatbot", "chatbots",
+        "computer vision", "video analytics", "data analytics", "analytics", "data science", "data platform", "data lake", "big data",
+      ],
+    },
+    {
+      name: "cloud-data-centre",
+      quota: 10,
+      topic: "data-centres",
+      keywords: [
+        "cloud", "GCC", "SaaS", "\\bsoftware[- ]as[- ]a[- ]service\\b", "\\bdata cent(?:re|er)s?\\b",
+        "\\b(?:application|infrastructure|web|website|disaster recovery) hosting\\b", "\\bhosting (?:services?|and operations)\\b",
+        "\\bservers? (?:and|&) (?:storage|network)\\b", "server hardware", "server infrastructure", "\\b(?:rack[- ]?mount|on-premise|x86|unix|virtual) servers?\\b",
+        "IT infrastructure", "ICT infrastructure",
+      ],
+    },
+    {
+      name: "cybersecurity",
+      quota: 10,
+      topic: "cybersecurity",
+      keywords: [
+        "cybersecurity", "cyber security", "cyber threat", "cyber defence", "SIEM", "SOC", "\\bsecurity operations? cent(?:re|er)s?\\b",
+        "penetration test", "penetration testing", "managed security", "network security", "information security",
+        "identity and access management", "endpoint management", "endpoint security", "vulnerability management",
+        "threat intelligence", "threat detection", "firewall", "zero trust",
+      ],
+    },
+    {
+      name: "digital-infrastructure",
+      quota: 8,
+      topic: "digital-infrastructure",
+      keywords: [
+        "5G", "broadband", "fibre optic", "optical fibre", "submarine cable", "subsea cable", "\\bwi-?fi\\b", "SD-WAN", "telecommunications",
+        "satellite communications", "internet of things", "IoT",
+        "\\bnetwork (?:and|&) security\\b", "\\bnetwork (?:infrastructure|equipment|devices?|hardware|connectivity|refresh|segmentation|services|switch(?:es)?|operations|upgrade)\\b",
+        "\\b(?:campus|wireless|managed|enterprise|global|storage area|wide area|local area) network\\b",
+      ],
+    },
+  ],
+  exclude: [
+    // Guarding, cleaning and manpower contracts. IT security officers and managed security services stay.
+    "\\b(?<!technology )security (?:officers?|guards?)\\b",
+    "\\b(?<!managed |cyber |cybersecurity |information |network |it |ict )security services\\b",
+    "\\b(?<!data )cleaning\\b",
+    "^(?!.*\\b(?:cyber|cybersecurity|managed security|cloud|software|data platform)\\b).*\\bmanpower\\b",
+    // CCTV maintenance, unless the tender is about analytics or AI.
+    "^(?=.*\\bCCTV\\b)(?=.*\\bmaintenance\\b)(?!.*\\b(?:analytics|AI|artificial intelligence)\\b)",
+    // Building works and courses that only mention a technology.
+    "\\b(?:renovation|air handling units?|co-location of|weather stations?)\\b",
+    "\\b(?:leadership|olympians?|training|talent|youth) programmes?\\b",
+  ],
+  agencyPriority: [
+    "Government Technology Agency",
+    "Cyber Security Agency",
+    "Info-communications Media Development Authority",
+    "Ministry of Digital Development and Information",
+    "Smart Nation",
   ],
   since: "2023-01-01",
   minAwardSgd: 1_000_000,
@@ -101,7 +190,10 @@ const sgd = (n: number) => `S$${n.toLocaleString("en-US", { maximumFractionDigit
 type Award = { supplier: string; amount: number };
 type Tender = { tenderNo: string; description: string; agency: string; date: string; awards: Award[] };
 
-function describe(rule: GebizRule, t: Tender): { candidate: Candidate; text: string } {
+/** A matched tender: the candidate row, the text the build enriches, and the groups whose keywords matched (in rule order). */
+export type GebizTender = { candidate: Candidate; text: string; matched: string[] };
+
+function describe(rule: GebizRule, t: Tender, matched: string[]): GebizTender {
   const awards = [...t.awards].sort((a, b) => b.amount - a.amount || a.supplier.localeCompare(b.supplier));
   const largest = awards[0]!.amount;
   const lines = [
@@ -129,27 +221,60 @@ function describe(rule: GebizRule, t: Tender): { candidate: Candidate; text: str
       why: `Selected by the GeBIZ keyword rule (largest award ${sgd(largest)}, awarded ${t.date})`,
     },
     text: lines.join("\n"),
+    matched,
   };
+}
+
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * A plain term becomes a whole-word, case-insensitive pattern: its regular-expression characters are matched literally,
+ * and `\b` is put at each end that is a letter or digit (an end like the `)` in "wi-fi (v6)" has no word edge to anchor).
+ * A term that contains `\b` is a pattern source, used as written.
+ */
+function compileTerm(term: string, what: string): RegExp {
+  const source = term.includes("\\b") ? term : `${/^\w/.test(term) ? "\\b" : ""}${escapeRegExp(term)}${/\w$/.test(term) ? "\\b" : ""}`;
+  try {
+    return new RegExp(source, "i");
+  } catch {
+    throw new Error(`GeBIZ ${what} "${term}" is not a valid pattern`);
+  }
+}
+
+/** The keyword sets a rule matches against: its groups, or one unnamed group for a flat keyword list. */
+function keywordSets(rule: GebizRule): { name: string; patterns: RegExp[] }[] {
+  if (rule.groups && rule.keywords) throw new Error("A GeBIZ rule has either keywords or groups, not both");
+  if (rule.groups) {
+    const names = new Set<string>();
+    return rule.groups.map((group) => {
+      if (!group.name || names.has(group.name)) throw new Error(`GeBIZ group names must be unique and not empty, got "${group.name}"`);
+      names.add(group.name);
+      if (!Number.isInteger(group.quota) || group.quota < 0) throw new Error(`GeBIZ group "${group.name}": quota must be a whole number of at least 0`);
+      return { name: group.name, patterns: group.keywords.map((kw) => compileTerm(kw, "keyword")) };
+    });
+  }
+  return [{ name: "", patterns: (rule.keywords ?? []).map((kw) => compileTerm(kw, "keyword")) }];
+}
+
+/** How early the tender's agency is in `rule.agencyPriority` (the list's length when it is not there). */
+function agencyRank(rule: GebizRule, agency: string): number {
+  const list = rule.agencyPriority ?? [];
+  const at = list.findIndex((name) => agency.toLowerCase().includes(name.toLowerCase()));
+  return at === -1 ? list.length : at;
 }
 
 /**
  * Pages through the data.gov.sg GeBIZ dataset and returns one tender candidate, with its text, per awarded tender whose
- * description matches a keyword, whose award date is on or after `since`, and whose largest single award is at least
- * `minAwardSgd`. A tender can have several award rows (one per supplier or item); they are merged by tender number and
- * listed individually, never summed, because a framework agreement repeats its ceiling value on every supplier's row.
- * Rows with no usable tender number, date or amount are skipped. Results are ordered by largest award, then id.
+ * description matches a keyword (of any group) and no `exclude` pattern, whose award date is on or after `since`, and
+ * whose largest single award is at least `minAwardSgd`. A tender can have several award rows (one per supplier or item);
+ * they are merged by tender number and listed individually, never summed, because a framework agreement repeats its
+ * ceiling value on every supplier's row. Rows with no usable tender number, date or amount are skipped.
+ * Results are ordered by largest award, then agency priority, then id. Every match is returned: `selectTenders` applies
+ * the group quotas and `max`.
  */
-export async function fetchGebizTenders(
-  rule: GebizRule,
-  fetchImpl: typeof fetch = fetch,
-): Promise<{ candidate: Candidate; text: string }[]> {
-  const keywords = rule.keywords.map((kw) => {
-    try {
-      return new RegExp(kw, "i");
-    } catch {
-      throw new Error(`GeBIZ keyword "${kw}" is not a valid pattern`);
-    }
-  });
+export async function fetchGebizTenders(rule: GebizRule, fetchImpl: typeof fetch = fetch): Promise<GebizTender[]> {
+  const sets = keywordSets(rule);
+  const excluded = (rule.exclude ?? []).map((pattern) => compileTerm(pattern, "exclude pattern"));
   if (!/^\d{4}-\d{2}-\d{2}$/.test(rule.since)) throw new Error(`GeBIZ since "${rule.since}" must be YYYY-MM-DD`);
 
   const tenders = new Map<string, Tender>();
@@ -174,7 +299,34 @@ export async function fetchGebizTenders(
 
   return [...tenders.entries()]
     .map(([id, t]) => ({ id, t, largest: Math.max(...t.awards.map((a) => a.amount)) }))
-    .filter(({ t, largest }) => t.date >= rule.since && largest >= rule.minAwardSgd && keywords.some((kw) => kw.test(t.description)))
-    .sort((a, b) => b.largest - a.largest || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-    .map(({ t }) => describe(rule, t));
+    .filter(({ t, largest }) => t.date >= rule.since && largest >= rule.minAwardSgd)
+    .filter(({ t }) => !excluded.some((pattern) => pattern.test(t.description)))
+    .flatMap((entry) => {
+      const hit = sets.filter((set) => set.patterns.some((pattern) => pattern.test(entry.t.description)));
+      return hit.length > 0 ? [{ ...entry, matched: hit.map((set) => set.name).filter(Boolean), rank: agencyRank(rule, entry.t.agency) }] : [];
+    })
+    .sort((a, b) => b.largest - a.largest || a.rank - b.rank || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map(({ t, matched }) => describe(rule, t, matched));
+}
+
+/**
+ * The tenders the build keeps from `tenders` (as `fetchGebizTenders` returns them, largest award first). With groups,
+ * each tender goes to the first group it matches that still has room under its quota, so no one topic can fill the
+ * list; a tender whose groups are all full is left out. The kept tenders then get that group's topic alongside
+ * gov-tech-procurement. At most `rule.max` (40 if unset) are kept, largest award first.
+ */
+export function selectTenders(rule: GebizRule, tenders: GebizTender[]): GebizTender[] {
+  const max = rule.max ?? DEFAULT_GEBIZ_MAX;
+  if (!rule.groups) return tenders.slice(0, max);
+  const left = new Map(rule.groups.map((g) => [g.name, g.quota]));
+  const topicOf = new Map(rule.groups.map((g) => [g.name, g.topic]));
+  const kept: GebizTender[] = [];
+  for (const tender of tenders) {
+    const group = tender.matched.find((name) => (left.get(name) ?? 0) > 0);
+    if (group === undefined) continue;
+    left.set(group, left.get(group)! - 1);
+    const topic = topicOf.get(group)!;
+    kept.push({ ...tender, candidate: { ...tender.candidate, topics: topic === "gov-tech-procurement" ? [topic] : [topic, "gov-tech-procurement"] } });
+  }
+  return kept.slice(0, max);
 }

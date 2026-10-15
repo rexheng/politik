@@ -1129,6 +1129,46 @@ test("R16: raising or lowering max reads the full cached list without asking dat
   assert.deepEqual((await env.readJson<PolicyRecord[]>("policies.json")).map((p) => p.id), [TENDER_IDS[0], TENDER_IDS[1]].sort());
 });
 
+test("I1: a changed exclude list fetches the tenders again, in any order of the same patterns", async () => {
+  const env = await makeEnv(candidatesMd());
+  const llms = fakeLlms();
+  const web = gebizWeb();
+  const build = (rule: GebizRule) => buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl, gebiz: true, gebizRule: rule }));
+  assert.equal((await build(gebizRule())).counts.total, 3);
+  assert.equal(web.urls.length, 1);
+
+  assert.equal((await build(gebizRule({ exclude: ["registry"] }))).counts.total, 2, "the exclude list drops the registry tender");
+  assert.equal(web.urls.length, 2, "the cache was for a rule with no exclusions");
+  await build(gebizRule({ exclude: ["registry"] }));
+  assert.equal(web.urls.length, 2, "the same exclusions read the cache");
+
+  await build(gebizRule({ exclude: ["registry", "analytics"] }));
+  assert.equal(web.urls.length, 3);
+  await build(gebizRule({ exclude: ["analytics", "registry"] }));
+  assert.equal(web.urls.length, 3, "the same patterns in another order are the same rule");
+});
+
+test("I1: a rule with groups caches every match and applies the quotas to the cached list, so a new quota needs no new request", async () => {
+  const env = await makeEnv(candidatesMd());
+  const llms = fakeLlms();
+  const web = gebizWeb();
+  const groups = (cloudQuota: number): GebizRule["groups"] => [
+    { name: "cloud", keywords: ["cloud", "registry"], quota: cloudQuota, topic: "data-centres" },
+    { name: "ai", keywords: ["analytics"], quota: 1, topic: "ai-governance" },
+  ];
+  const build = (cloudQuota: number) =>
+    buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl, gebiz: true, gebizRule: gebizRule({ keywords: undefined, groups: groups(cloudQuota) }) }));
+
+  assert.equal((await build(1)).counts.total, 2, "the cloud group takes only its largest tender (the registry one)");
+  assert.deepEqual((await env.readJson<PolicyRecord[]>("policies.json")).map((p) => p.id), [TENDER_IDS[0], TENDER_IDS[2]].sort());
+  const cached = JSON.parse(await readFile(join(env.paths.rawDir, "gebiz-tenders.json"), "utf8")) as { tenders: { candidate: { id: string }; matched: string[] }[] };
+  assert.deepEqual(cached.tenders.map((t) => [t.candidate.id, t.matched]), [[TENDER_IDS[0], ["cloud"]], [TENDER_IDS[1], ["cloud"]], [TENDER_IDS[2], ["ai"]]]);
+  assert.equal(web.urls.length, 1);
+
+  assert.equal((await build(2)).counts.total, 3);
+  assert.equal(web.urls.length, 1, "a changed quota only cuts the cached list");
+});
+
 test("R16: a cache in the old format (a bare list) is fetched again", async () => {
   const env = await makeEnv(candidatesMd());
   const web = gebizWeb();
