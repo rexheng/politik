@@ -94,7 +94,7 @@
     - It dedupes by record (one best passage per record for `brief`), caps at 12, and truncates passage text to 1,200 chars.
     - Every `searchPassages` call uses `match: "all"` first, then retries with `match: "any"` when it gets fewer than 3 hits (R7).
     - It never throws on Bluesky failure.
-    - For `out-of-scope`, if the top `searchPassages` hit has `score ≥ OOS_PROMOTE_SCORE` (a named constant; pick it from the fixture so `"frontier AI"` promotes and `"EU AI Act"` does not), it returns those hits with `promoted: true`, and the caller treats the question as `explain`. In every other case `promoted` is `false`.
+    - For `out-of-scope`, if `searchPassages(search, {}, 3, { match: "all" })` returns at least 1 hit, it returns those hits with `promoted: true`, and the caller treats the question as `explain`. Every query term must appear, so this signal doesn't depend on the corpus. A raw bm25 threshold is not portable from the 6-record fixture to the ~240-record snapshot (final-review M10). In every other case `promoted` is `false`.
   - `type Scorer = (question: string, candidates: { id: string; text: string }[]) => Promise<Record<string, number>>`.
   - `typesafeScorer(apiKey: string): Scorer`, using the `systemOne` pattern from `photon/src/orchestrate.ts:76-123` with the judgement text from spec §3.3.
   - `rank(route: Route, sources: Source[], scorer?: Scorer, timeoutMs = 2500): Promise<Source[]>`. It sorts by score descending (stable), and returns the input order when there is no scorer, a timeout or an error. It never adds or drops sources.
@@ -174,7 +174,7 @@
 - Produces:
   - `normalizeChatRequest(body: unknown): ChatInput`. It applies the limits from Global Constraints. Non-string or missing message → `""`.
   - `ChatEnv = { DB: D1Like; GROQ_API_KEY?: string; GROQ_CHAT_MODEL?: string; GROQ_ROUTER_MODEL?: string; TYPESAFE_API_KEY?: string }`.
-  - `ChatDeps = { router?: Llm; composer?: Llm; scorer?: Scorer; bluesky?: (q: string) => Promise<SourceItem[]> }`. Production builds them from env via `groqLlm` and `typesafeScorer`.
+  - `ChatDeps = { router?: Llm; composer?: Llm; scorer?: Scorer; bluesky?: (q: string) => Promise<SourceItem[]> }`. Production builds them from env via `groqLlm` and `typesafeScorer`. `groqLlm`'s defaults (60 s × 5 attempts) are for batch builds, so the Worker must pass `{ timeoutMs: 3000, maxRetries: 0 }` for the router and `{ timeoutMs: 8000, maxRetries: 1 }` for compose.
   - `chat(input: ChatInput, env: ChatEnv, deps?: ChatDeps): Promise<ChatResponse>`, following spec §3 and §5:
     - manifest null → empty-D1 reply.
     - `greeting`/`clarify` → no compose.
@@ -191,6 +191,8 @@
   - A compose fake that never resolves (inject a short timeout via deps or a constant override) → fallback.
   - No key and no deps → `mode` is `fallback` or `greeting`, no throw, and no `fetch` (stub `globalThis.fetch` to throw).
   - Unseeded D1 → the empty-D1 copy, `asOf ""`.
+  - Unmigrated D1 (`openTestDb({ migrate: false })`) → the empty-D1 copy, HTTP-safe, no throw.
+  - The production deps built from env pass the tight Groq options above. Assert this through an injected `groqLlm` factory, or by inspecting the options.
   - `"hi"` → the greeting copy, 0 citations, 3 `followUps`.
   - `out-of-scope` `"What is the EU AI Act?"` → `general` non-null, 0 policy citations.
   - `normalizeChatRequest` with a 5,000-char message and 30 turns → a 1,000-char message and 8 turns of ≤ 600 chars.
