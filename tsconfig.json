@@ -8,5 +8,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["scripts", "photon/src/data", "photon/scripts/snapshot", "tests"]
+  "include": ["scripts", "photon/src/data", "photon/src/llm", "photon/scripts/snapshot", "tests"]
 }

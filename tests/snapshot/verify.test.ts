@@ -1,0 +1,216 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import { groqLlm, type Llm } from "../../photon/src/llm/groq.ts";
+import type { Passage } from "../../photon/src/data/schema.ts";
+import type { Enriched } from "../../photon/scripts/snapshot/enrich.ts";
+import { verifyRecord } from "../../photon/scripts/snapshot/verify.ts";
+
+const passages: Passage[] = [
+  { id: "r#1", recordId: "r", seq: 1, heading: "Purpose", text: "This Act protects personal data held by organisations." },
+  { id: "r#2", recordId: "r", seq: 2, text: "Organisations must notify the Commission of a data breach within three days." },
+  { id: "r#3", recordId: "r", seq: 3, heading: "Penalties", text: "A financial penalty may be imposed on an organisation that breaches this Act." },
+];
+
+const enriched = (): Enriched => ({
+  issuer: "PDPC",
+  status: { value: "in-force", support: ["r#1"] },
+  statusDate: "2013-01-02",
+  timeline: [{ date: "2013-01-02", event: "The Act came into force.", support: ["r#1"] }],
+  summary: { value: "The Act protects personal data.", support: ["r#1"] },
+  provisions: [
+    { value: "Breaches must be notified within three days.", support: ["r#2"] },
+    { value: "Penalties may be imposed.", support: ["r#3"] },
+    { value: "Directors face prison.", support: ["r#3", "r#2"] },
+  ],
+  affected: [{ value: "Organisations that hold personal data.", support: ["r#1"] }],
+  topics: ["privacy-data"],
+  related: [],
+});
+
+type Req = Parameters<Llm>[0];
+/** A fake verifier: `unsupported` lists the claim ids to mark false; `omit` lists the ones to leave out of the answer. */
+function verifier(opts: { unsupported?: string[]; omit?: string[]; raw?: unknown } = {}) {
+  const calls: Req[] = [];
+  const llm = (async (req: Req) => {
+    calls.push(req);
+    if (opts.raw !== undefined) return opts.raw;
+    // The claim ids the prompt lists, e.g. "- provisions[1]: ..." or "provisions[1] |".
+    const ids = [...req.user.matchAll(/^CLAIM ([^\s:]+)/gm)].map((m) => m[1]!);
+    return {
+      results: ids
+        .filter((id) => !(opts.omit ?? []).includes(id))
+        .map((claimId) => ({ claimId, supported: !(opts.unsupported ?? []).includes(claimId) })),
+    };
+  }) as Llm;
+  return { llm, calls };
+}
+
+test("when every claim is supported, nothing is dropped and the result equals the input", async () => {
+  const e = enriched();
+  const { llm, calls } = verifier();
+  const out = await verifyRecord(e, passages, llm);
+  assert.deepEqual(out.kept, enriched());
+  assert.deepEqual(out.dropped, []);
+  assert.equal(out.fatal, undefined);
+  assert.equal(calls.length, 1, "one LLM call for all claims");
+});
+
+test("one provision marked unsupported is dropped and listed", async () => {
+  const { llm } = verifier({ unsupported: ["provisions[2]"] });
+  const out = await verifyRecord(enriched(), passages, llm);
+  assert.deepEqual(out.kept.provisions.map((p) => p.value), ["Breaches must be notified within three days.", "Penalties may be imposed."]);
+  assert.deepEqual(out.dropped, ["provisions[2]"]);
+  assert.equal(out.fatal, undefined);
+});
+
+test("unsupported affected groups and timeline events are dropped too", async () => {
+  const { llm } = verifier({ unsupported: ["affected[0]", "timeline[0]"] });
+  const out = await verifyRecord(enriched(), passages, llm);
+  assert.deepEqual(out.kept.affected, []);
+  assert.deepEqual(out.kept.timeline, []);
+  assert.deepEqual(out.dropped.sort(), ["affected[0]", "timeline[0]"]);
+  assert.equal(out.fatal, undefined);
+});
+
+test("an unsupported summary is fatal", async () => {
+  const { llm } = verifier({ unsupported: ["summary"] });
+  const out = await verifyRecord(enriched(), passages, llm);
+  assert.equal(out.fatal, "summary unsupported");
+  assert.deepEqual(out.dropped, ["summary"]);
+});
+
+test("an unsupported status is fatal", async () => {
+  const { llm } = verifier({ unsupported: ["status"] });
+  const out = await verifyRecord(enriched(), passages, llm);
+  assert.equal(out.fatal, "status unsupported");
+  assert.deepEqual(out.dropped, ["status"]);
+});
+
+test("when both the summary and the status fail, the summary is reported", async () => {
+  const { llm } = verifier({ unsupported: ["status", "summary"] });
+  const out = await verifyRecord(enriched(), passages, llm);
+  assert.equal(out.fatal, "summary unsupported");
+  assert.deepEqual(out.dropped.sort(), ["status", "summary"]);
+});
+
+test("an unsupported statusDate is dropped without failing the record", async () => {
+  const { llm } = verifier({ unsupported: ["statusDate"] });
+  const out = await verifyRecord(enriched(), passages, llm);
+  assert.equal("statusDate" in out.kept, false);
+  assert.deepEqual(out.dropped, ["statusDate"]);
+  assert.equal(out.fatal, undefined);
+  assert.equal(out.kept.status.value, "in-force");
+});
+
+test("a claim the model leaves out of its answer counts as unsupported", async () => {
+  const { llm } = verifier({ omit: ["provisions[1]"] });
+  const out = await verifyRecord(enriched(), passages, llm);
+  assert.deepEqual(out.kept.provisions.map((p) => p.value), ["Breaches must be notified within three days.", "Directors face prison."]);
+  assert.deepEqual(out.dropped, ["provisions[1]"]);
+});
+
+test("a summary the model leaves out of its answer is fatal", async () => {
+  const { llm } = verifier({ omit: ["summary"] });
+  const out = await verifyRecord(enriched(), passages, llm);
+  assert.equal(out.fatal, "summary unsupported");
+});
+
+test("an empty or unrelated answer drops everything and is fatal", async () => {
+  const { llm } = verifier({ raw: { results: [{ claimId: "made-up", supported: true }] } });
+  const out = await verifyRecord(enriched(), passages, llm);
+  assert.equal(out.fatal, "summary unsupported");
+  assert.deepEqual(out.kept.provisions, []);
+  assert.equal(out.dropped.length, 8);
+});
+
+test("if the model gives two verdicts for a claim, any 'unsupported' wins", async () => {
+  const { llm } = verifier({
+    raw: {
+      results: [
+        { claimId: "summary", supported: true },
+        { claimId: "status", supported: true },
+        { claimId: "statusDate", supported: true },
+        { claimId: "timeline[0]", supported: true },
+        { claimId: "provisions[0]", supported: true },
+        { claimId: "provisions[0]", supported: false },
+        { claimId: "provisions[1]", supported: true },
+        { claimId: "provisions[2]", supported: true },
+        { claimId: "affected[0]", supported: true },
+      ],
+    },
+  });
+  const out = await verifyRecord(enriched(), passages, llm);
+  assert.deepEqual(out.dropped, ["provisions[0]"]);
+});
+
+test("the prompt lists every claim with its id, text and the cited passage text", async () => {
+  const { llm, calls } = verifier();
+  await verifyRecord(enriched(), passages, llm);
+  const { user, system, name } = calls[0]!;
+  assert.ok(name.length > 0);
+  for (const id of ["summary", "status", "statusDate", "timeline[0]", "provisions[0]", "provisions[1]", "provisions[2]", "affected[0]"]) {
+    assert.ok(user.includes(`CLAIM ${id}`), id);
+  }
+  assert.ok(user.includes("The Act protects personal data."));
+  assert.ok(user.includes("Directors face prison."));
+  assert.ok(user.includes("2013-01-02"));
+  // Cited passages are shown, once each, as [id] heading + text blocks.
+  assert.ok(user.includes("[r#1] Purpose\nThis Act protects personal data held by organisations."));
+  assert.ok(user.includes("[r#2]\nOrganisations must notify the Commission"));
+  assert.equal(user.split("[r#3] Penalties").length, 2, "a passage cited by several claims appears once");
+  assert.match(system, /supported/i);
+  assert.match(system, /outside knowledge|only the/i);
+});
+
+test("a passage nobody cites is not sent", async () => {
+  const e = enriched();
+  e.provisions = [{ value: "Breaches must be notified.", support: ["r#2"] }];
+  e.affected = [];
+  const { llm, calls } = verifier();
+  await verifyRecord(e, passages, llm);
+  assert.ok(!calls[0]!.user.includes("[r#3]"));
+});
+
+test("a claim whose cited passages are unknown is unsupported without being sent", async () => {
+  const e = enriched();
+  e.provisions.push({ value: "Cites a ghost.", support: ["ghost#1"] });
+  const { llm, calls } = verifier();
+  const out = await verifyRecord(e, passages, llm);
+  assert.deepEqual(out.dropped, ["provisions[3]"]);
+  assert.ok(!calls[0]!.user.includes("CLAIM provisions[3]"));
+  assert.ok(!calls[0]!.user.includes("Cites a ghost."));
+});
+
+test("it does not mutate its input", async () => {
+  const e = enriched();
+  const { llm } = verifier({ unsupported: ["provisions[0]", "statusDate"] });
+  await verifyRecord(e, passages, llm);
+  assert.deepEqual(e, enriched());
+});
+
+test("the answer schema accepts a well-formed answer and rejects a malformed one", async () => {
+  const { llm, calls } = verifier();
+  await verifyRecord(enriched(), passages, llm);
+  const schema = calls[0]!.schema;
+  assert.equal(schema.safeParse({ results: [{ claimId: "summary", supported: true }] }).success, true);
+  assert.equal(schema.safeParse({ results: [{ claimId: "summary", supported: "yes" }] }).success, false);
+  assert.equal(schema.safeParse([{ claimId: "summary", supported: true }]).success, false);
+});
+
+/** The request body groqLlm would send for this call, with a strict-capable model. */
+async function sentFormat(call: (llm: Llm) => Promise<unknown>) {
+  let format: any;
+  const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+    format = JSON.parse(String(init?.body)).response_format;
+    return new Response(JSON.stringify({ choices: [{ message: { content: "{}" }, finish_reason: "stop" }] }), { status: 200 });
+  }) as typeof fetch;
+  await call(groqLlm({ apiKey: "k", model: "openai/gpt-oss-120b", fetchImpl, maxRetries: 0 })).catch(() => undefined);
+  return format;
+}
+
+test("the schema sent to Groq qualifies for strict mode", async () => {
+  const format = await sentFormat((llm) => verifyRecord(enriched(), passages, llm));
+  assert.equal(format.type, "json_schema");
+  assert.equal(format.json_schema.strict, true);
+});
