@@ -1,6 +1,6 @@
 // Step 2 of the chat pipeline: from the Route, gather the passages and posts an answer may cite.
 // What is gathered depends on the intent (docs/superpowers/specs/2026-10-15-chatbot-synthesis-design.md §3.2):
-//   brief         the records with recent events, newest first, one passage each, plus any search matches
+//   brief         the records with recent events, newest first, one passage each, plus any search matches (which keep their slots)
 //   explain       the named record's cited passages, then search matches
 //   implications  as explain, plus the passages behind `affected`
 //   sentiment     public posts (Bluesky and the client's saved ones), plus a few policy passages for context
@@ -187,10 +187,16 @@ async function briefSources(route: Route, db: D1Like, manifest: Manifest | null)
   // A quiet stretch still has a "latest": when the router named no window and nothing falls in the default one, look further back.
   const changes = events.length === 0 && asked === undefined ? await recentChanges(db, { ...scope, since: EARLIEST }, EVENT_POOL) : events;
 
+  // Slots: every record the search found (up to 6) is kept, whether or not it is also recent, and the newest of the
+  // other recent records fill what is left. Order: the recent ones newest event first (hits among them in their
+  // place), then the hits that are not recent, in match order.
   const recent = onePerRecord(changes.map((c) => c.record), (r) => r.id);
+  const hits = bestPerRecord(matches).map((hit) => hit.record);
+  const hitIds = new Set(hits.map((r) => r.id));
+  const fillers = recent.filter((r) => !hitIds.has(r.id)).slice(0, MAX_SOURCES - hits.length);
+  const keptIds = new Set([...hitIds, ...fillers.map((r) => r.id)]);
   const recentIds = new Set(recent.map((r) => r.id));
-  const added = bestPerRecord(matches).filter((hit) => !recentIds.has(hit.record.id));
-  const records = [...recent.slice(0, MAX_SOURCES - added.length), ...added.map((hit) => hit.record)];
+  const records = [...recent.filter((r) => keptIds.has(r.id)), ...hits.filter((r) => !recentIds.has(r.id))];
 
   // A record's passage: the one its search found, else the best for the question, else its first.
   const passages = new Map<string, Passage>();

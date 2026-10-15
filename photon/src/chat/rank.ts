@@ -8,11 +8,16 @@ import type { Route, Source } from "./types.ts";
 /** The 2,500 ms rank budget. */
 export const RANK_TIMEOUT_MS = 2500;
 
+/** Who a brief's candidates are judged to matter to. */
+const BRIEF_AUDIENCE = "a California or Singapore tech policymaker";
+
 /** What a brief's candidates are judged on. */
-export const BRIEF_JUDGEMENT = "significance to a California or Singapore tech policymaker";
+export const BRIEF_JUDGEMENT = `significance to ${BRIEF_AUDIENCE}`;
+
+const RELEVANCE_PREFIX = "relevance to: ";
 
 /** What every other intent's candidates are judged on. */
-export const relevanceJudgement = (standalone: string) => `relevance to: ${standalone}`;
+export const relevanceJudgement = (standalone: string) => `${RELEVANCE_PREFIX}${standalone}`;
 
 /** Scores candidates against a judgement: a higher number is a better fit. A candidate it leaves out sorts last. */
 export type Scorer = (question: string, candidates: { id: string; text: string }[]) => Promise<Record<string, number>>;
@@ -20,36 +25,72 @@ export type Scorer = (question: string, candidates: { id: string; text: string }
 /** The candidate's passage or post is cut to this many characters before it is scored, to keep the request small. */
 const CANDIDATE_CHARS = 600;
 
-/** The levels of one candidate's fit, from nothing to squarely. They describe any judgement, so the judgement itself rides in the state. */
-const LEVELS = [
-  "None: the candidate has nothing to do with the judgement.",
-  "Low: only loosely connected, or a minor side issue.",
-  "Medium: clearly connected, but not at the centre.",
-  "High: squarely what the judgement is about, and weighty.",
+/**
+ * The levels of a brief's "significance", from nothing to the most weighty. Each describes a concrete kind of event
+ * and stands on its own (TypeSafe reads the levels without the question's other context).
+ */
+export const SIGNIFICANCE_LEVELS = [
+  "A routine announcement or minor procedural step that changes nothing for policymakers, such as a meeting notice, a technical correction or a reprint of an existing text.",
+  "A development worth knowing about that does not yet change anyone's obligations, such as a bill introduced, a consultation opened, or a guidance note or report published.",
+  "A material step that moves a measure forward or sets its direction, such as a bill passing a chamber, a regulator proposing a rule, a non-binding framework released, or a large government contract awarded.",
+  "A new binding law, regulation or major ruling that changes obligations or powers in California or Singapore tech policy, such as a bill signed or vetoed, or a rule taking effect.",
 ] as const;
+
+/** The levels of how well a candidate answers the user's question, from unrelated to a direct answer. */
+export const RELEVANCE_LEVELS = [
+  "About something else: it has no bearing on what was asked, even if it is also California or Singapore tech policy.",
+  "The same general area but a different subject: another law, another place, or a side issue the question did not ask about.",
+  "Bears on the question: it covers part of what was asked, or the right subject without the specific point wanted.",
+  "Answers the question directly: it states the rule, status, date, effect or (for a public post) the view that the question asks about.",
+] as const;
+
+interface Plan {
+  /** What every question shares besides the candidates. */
+  state: Record<string, string>;
+  levels: readonly [string, string, ...string[]];
+  /** One candidate's question. */
+  ask(index: number): string;
+}
+
+/** What one TypeSafe call asks for, depending on the judgement. */
+function judgementPlan(judgement: string): Plan {
+  if (judgement === BRIEF_JUDGEMENT) {
+    return {
+      state: { audience: BRIEF_AUDIENCE },
+      levels: SIGNIFICANCE_LEVELS,
+      ask: (i: number) =>
+        `How significant is the item at \`candidates[${i}].text\` to \`audience\`? It is either policy text or a public social-media post; weigh what it changes or signals for them, not its length or tone.`,
+    };
+  }
+  return {
+    state: { question: judgement.startsWith(RELEVANCE_PREFIX) ? judgement.slice(RELEVANCE_PREFIX.length) : judgement },
+    levels: RELEVANCE_LEVELS,
+    ask: (i: number) =>
+      `How relevant is the item at \`candidates[${i}].text\` to \`question\`? It is either policy text or a public social-media post; weigh how directly it addresses what was asked, not its length or tone.`,
+  };
+}
 
 /** The part of TypeSafeClient the scorer uses, so a test can stand in for it. */
 export type SystemOne = Pick<TypeSafeClient, "systemOne">;
 
 /**
  * A scorer backed by TypeSafe's Jev model: one `systemOne` call with one score question per candidate, each judged
- * against the same `judgement`. The call has no retries and gives up after the rank budget. The client is made on first
- * use, so a bad key is an error at that point (which `rank` absorbs) rather than at construction.
+ * against the same `judgement`. A brief's significance and a question's relevance have their own wording and levels.
+ * The call has no retries and gives up after the rank budget. The client is made on first use, so a bad key is an
+ * error at that point (which `rank` absorbs) rather than at construction.
  */
 export function typesafeScorer(apiKey: string, client?: SystemOne): Scorer {
   let own: SystemOne | undefined;
   return async (judgement, candidates) => {
     if (candidates.length === 0) return {};
     const typesafe = client ?? (own ??= new TypeSafeClient({ apiKey }));
+    const plan = judgementPlan(judgement);
     const questions: Record<string, ReturnType<typeof score>> = {};
     candidates.forEach((_, i) => {
-      questions[`fit${i}`] = score(
-        `How well does the candidate at \`candidates[${i}].text\` meet the \`judgement\`? The text is either policy text or a public social-media post; read it with its title, place and status.`,
-        [...LEVELS],
-      );
+      questions[`fit${i}`] = score(plan.ask(i), [...plan.levels]);
     });
     const response = await typesafe.systemOne(
-      { state: { judgement, candidates: candidates.map((c) => ({ text: c.text })) }, questions },
+      { state: { ...plan.state, candidates: candidates.map((c) => ({ text: c.text })) }, questions },
       { timeout: RANK_TIMEOUT_MS, retry: { maxRetries: 0 } },
     );
     const answers = response.answers as Record<string, { score?: unknown } | undefined>;

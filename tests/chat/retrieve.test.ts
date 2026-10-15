@@ -9,6 +9,7 @@ import type { SourceItem } from "../../photon/src/contracts.ts";
 import type { D1Like, D1StatementLike } from "../../photon/src/data/d1.ts";
 import type { Manifest, Passage, PolicyRecord } from "../../photon/src/data/schema.ts";
 import { snapshotStatements } from "../../photon/src/data/seed.ts";
+import { searchPassages } from "../../photon/src/data/store.ts";
 import { openTestDb } from "../helpers/d1.ts";
 
 const fixtureDir = fileURLToPath(new URL("../fixtures/snapshot/", import.meta.url));
@@ -590,6 +591,52 @@ describe("retrieve limits", () => {
     assert.equal(new Set(ids).size, 12);
     assert.deepEqual(ids.slice(0, 9), Array.from({ length: 9 }, (_, i) => `ca-bulk-${20 - i}`));
     assert.deepEqual(new Set(ids.slice(9)), new Set(["ca-bulk-21", "ca-bulk-22", "ca-bulk-23"]));
+  });
+
+  test("the best search hit is kept even when it is also a recent record beyond the cut", async () => {
+    // 20 records fall in the window (newest is ca-bulk-20). ca-bulk-5 is old among them, so a plain 12-record cut drops it,
+    // yet it is the strongest match for "zebras"; ca-bulk-21 is an older, weaker match outside the window.
+    const recent = Array.from({ length: 20 }, (_, i) =>
+      bulk(i + 1, `2026-09-${String(i + 1).padStart(2, "0")}`, i + 1 === 5 ? "Zebras zebras zebras zebras zebras." : undefined),
+    );
+    const old = bulk(21, "2025-01-01", "A longer passage that mentions zebras only once among many other words about widgets and rules.");
+    const all = [...recent, old];
+    await seed(db, all.map((x) => x.record), all.map((x) => x.passage));
+
+    const hits = await searchPassages(db, "zebras", {}, 6, { match: "all" });
+    assert.equal(hits[0]!.record.id, "ca-bulk-5", "the probe is set up so ca-bulk-5 is the top hit");
+
+    const { sources } = await retrieve(mk({ intent: "brief", search: "zebras" }), db, deps);
+    const ids = idsOf(sources);
+    assert.equal(ids.length, 12);
+    assert.ok(ids.includes("ca-bulk-5"), "the top hit is included");
+    assert.ok(ids.includes("ca-bulk-21"), "the search-only hit is included");
+    // Recent records keep their newest-first order, hits among them in their place, then the hits outside the window.
+    assert.deepEqual(ids, [...Array.from({ length: 10 }, (_, i) => `ca-bulk-${20 - i}`), "ca-bulk-5", "ca-bulk-21"]);
+    assert.equal(sources.find((x) => x.record!.id === "ca-bulk-5")!.passage!.id, "ca-bulk-5#1");
+  });
+
+  test("when every search hit is a recent record, the hits fill their reserved slots and the newest records fill the rest", async () => {
+    // Records 1-8 mention zebras and are the oldest of 20 recent ones; the search returns six of them.
+    const recent = Array.from({ length: 20 }, (_, i) =>
+      bulk(i + 1, `2026-09-${String(i + 1).padStart(2, "0")}`, i + 1 <= 8 ? `Zebras everywhere in record ${i + 1}.` : undefined),
+    );
+    await seed(db, recent.map((x) => x.record), recent.map((x) => x.passage));
+
+    const expected = (await searchPassages(db, "zebras", {}, 6, { match: "all" })).map((h) => h.record.id);
+    assert.equal(expected.length, 6);
+    const { sources } = await retrieve(mk({ intent: "brief", search: "zebras" }), db, deps);
+    const ids = idsOf(sources) as string[];
+    assert.equal(ids.length, 12);
+    assert.equal(new Set(ids).size, 12);
+    for (const id of expected) assert.ok(ids.includes(id), `${id} is a search hit`);
+    // The other six slots go to the newest records that were not hits.
+    assert.deepEqual(
+      ids.filter((id) => !expected.includes(id)),
+      Array.from({ length: 6 }, (_, i) => `ca-bulk-${20 - i}`),
+    );
+    const number = (id: string) => Number(id.replace("ca-bulk-", ""));
+    for (let i = 1; i < ids.length; i++) assert.ok(number(ids[i - 1]!) > number(ids[i]!), "newest event first");
   });
 
   test("two long records share a budget of 8 passages, a search fills the rest, and the total stays within 12", async () => {

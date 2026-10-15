@@ -4,8 +4,10 @@ import { describe, test } from "node:test";
 import {
   BRIEF_JUDGEMENT,
   RANK_TIMEOUT_MS,
+  RELEVANCE_LEVELS,
   rank,
   relevanceJudgement,
+  SIGNIFICANCE_LEVELS,
   typesafeScorer,
 } from "../../photon/src/chat/rank.ts";
 import type { Scorer } from "../../photon/src/chat/rank.ts";
@@ -229,21 +231,72 @@ describe("typesafeScorer", () => {
       assert.equal(typeof q.instructions, "string");
     }
     assert.deepEqual(request.state, {
-      judgement: "relevance to: SB 53",
+      question: "SB 53",
       candidates: [{ text: "First candidate text." }, { text: "Second candidate text." }, { text: "Third candidate text." }],
     });
     assert.ok(options!.timeout! <= RANK_TIMEOUT_MS);
     assert.equal(options!.retry?.maxRetries, 0);
   });
 
-  test("each question points at its own candidate and names the judgement", async () => {
-    const { client, calls } = fakeClient(() => ({ type: "score", score: 1 }));
-    await typesafeScorer("key", client)(BRIEF_JUDGEMENT, candidates);
-    const instructions = Object.values(calls[0]!.request.questions).map((q) => String(q.instructions));
-    instructions.forEach((text, i) => {
-      assert.ok(text.includes(`candidates[${i}]`), text);
-      assert.ok(text.includes("judgement"), text);
+  test("each question points at its own candidate, and reads naturally for a brief and for a question", async () => {
+    const brief = fakeClient(() => ({ type: "score", score: 1 }));
+    await typesafeScorer("key", brief.client)(BRIEF_JUDGEMENT, candidates);
+    const relevance = fakeClient(() => ({ type: "score", score: 1 }));
+    await typesafeScorer("key", relevance.client)(relevanceJudgement("What does SB 53 require?"), candidates);
+    const instructions = (c: typeof brief) => Object.values(c.calls[0]!.request.questions).map((q) => String(q.instructions));
+    instructions(brief).forEach((text, i) => {
+      assert.ok(text.includes(`\`candidates[${i}].text\``), text);
+      assert.match(text, /^How significant is the item at .* to `audience`\?/);
     });
+    instructions(relevance).forEach((text, i) => {
+      assert.ok(text.includes(`\`candidates[${i}].text\``), text);
+      assert.match(text, /^How relevant is the item at .* to `question`\?/);
+    });
+  });
+
+  test("a brief is asked about its audience and a question about the question itself, each in the shared state", async () => {
+    const brief = fakeClient(() => ({ type: "score", score: 1 }));
+    await typesafeScorer("key", brief.client)(BRIEF_JUDGEMENT, candidates);
+    assert.deepEqual(brief.calls[0]!.request.state, {
+      audience: "a California or Singapore tech policymaker",
+      candidates: candidates.map((c) => ({ text: c.text })),
+    });
+    // rank hands the scorer relevanceJudgement(standalone); the question reaches the state without its label.
+    const asked = fakeClient(() => ({ type: "score", score: 1 }));
+    await rank(route({ standalone: "What does SB 53 mean for a state agency?" }), sources, typesafeScorer("key", asked.client));
+    assert.equal((asked.calls[0]!.request.state as { question: string }).question, "What does SB 53 mean for a state agency?");
+    const bare = fakeClient(() => ({ type: "score", score: 1 }));
+    await typesafeScorer("key", bare.client)("some other judgement", candidates);
+    assert.equal((bare.calls[0]!.request.state as { question: string }).question, "some other judgement");
+  });
+
+  test("significance and relevance have different level texts, and each set appears in its request", async () => {
+    const brief = fakeClient(() => ({ type: "score", score: 1 }));
+    await typesafeScorer("key", brief.client)(BRIEF_JUDGEMENT, candidates);
+    const relevance = fakeClient(() => ({ type: "score", score: 1 }));
+    await typesafeScorer("key", relevance.client)(relevanceJudgement("SB 53"), candidates);
+
+    assert.notDeepEqual([...SIGNIFICANCE_LEVELS], [...RELEVANCE_LEVELS]);
+    const shared = SIGNIFICANCE_LEVELS.filter((level) => (RELEVANCE_LEVELS as readonly string[]).includes(level));
+    assert.deepEqual(shared, [], "no level text is used by both judgements");
+    for (const q of Object.values(brief.calls[0]!.request.questions)) assert.deepEqual(q.criteria, [...SIGNIFICANCE_LEVELS]);
+    for (const q of Object.values(relevance.calls[0]!.request.questions)) assert.deepEqual(q.criteria, [...RELEVANCE_LEVELS]);
+  });
+
+  test("the levels are concrete situations that stand on their own, from least to most", () => {
+    for (const levels of [SIGNIFICANCE_LEVELS, RELEVANCE_LEVELS]) {
+      assert.ok(levels.length >= 3);
+      assert.equal(new Set(levels).size, levels.length);
+      for (const level of levels) {
+        assert.ok(level.length > 60, level);
+        assert.ok(!level.includes("`"), "no reference to a state path");
+        assert.ok(!/\bjudgement\b|\bcandidate\b/i.test(level), level);
+      }
+    }
+    assert.match(SIGNIFICANCE_LEVELS[0], /^A routine announcement or minor procedural step that changes nothing for policymakers/);
+    assert.match(SIGNIFICANCE_LEVELS.at(-1)!, /^A new binding law, regulation or major ruling that changes obligations or powers in California or Singapore tech policy/);
+    assert.match(RELEVANCE_LEVELS[0], /^About something else/);
+    assert.match(RELEVANCE_LEVELS.at(-1)!, /^Answers the question directly/);
   });
 
   test("an answer without a numeric score leaves that candidate out", async () => {
