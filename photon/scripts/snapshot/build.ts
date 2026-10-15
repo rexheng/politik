@@ -39,6 +39,12 @@ import { verifyRecord } from "./verify.ts";
 /** Enrichment is sent the first passages up to this many words. Groq's free tier rejects larger requests (HTTP 413). */
 export const DEFAULT_ENRICH_MAX_WORDS = 6000;
 export { DEFAULT_GEBIZ_MAX };
+/**
+ * The version of what the model steps ask and check: the prompts and the set of claims. It is stored with every cached
+ * enrich and verify answer, and an answer from another version is a miss. Raise it when a prompt or the claim set changes
+ * in a way that makes an old answer wrong or incomplete (2: the identity and published claims, and a cited `published`).
+ */
+export const PIPELINE_VERSION = 2;
 /** A built document with fewer words than this (tenders aside) is flagged in the summary: it may be a contents page. */
 const SHORT_WORDS = 300;
 const MAX_REASON = 300;
@@ -268,12 +274,13 @@ async function loadTenders(opts: BuildOptions): Promise<Tender[]> {
 const FetchedSchema = z.record(z.string(), z.object({ sha256: z.string(), fetched: z.string() }));
 // Both prompts are told today's date (it settles "enacted" versus "in-force"), so a cached answer is only good for the
 // snapshot date it was given. An answer for another date is a miss and is replaced.
-const EnrichEntrySchema = z.object({ model: z.string(), snapshotDate: z.string(), value: EnrichedSchema });
+const EnrichEntrySchema = z.object({ pipelineVersion: z.number(), model: z.string(), snapshotDate: z.string(), value: EnrichedSchema });
 const VerifyEntrySchema = z.object({
+  pipelineVersion: z.number(),
   model: z.string(),
   snapshotDate: z.string(),
-  /** Which enriched value this verdict is about. A different enrichment needs a new verdict. */
-  enrichedHash: z.string(),
+  /** Which enriched value, and which document title (the identity claim names it), this verdict is about. Either changing needs a new verdict. */
+  inputHash: z.string(),
   kept: EnrichedSchema,
   dropped: z.array(z.string()),
   fatal: z.string().optional(),
@@ -305,7 +312,8 @@ const TOO_LARGE_HINT = "HTTP 413 means a request was too large for the model: lo
  */
 function llmReason(e: LlmError): string {
   if (e.status !== undefined) return `HTTP ${e.status}`;
-  if (e.kind === "timeout" || e.kind === "network") return "timed out"; // no answer came back at all
+  if (e.kind === "timeout") return "timed out";
+  if (e.kind === "network") return "unreachable"; // the request never completed: DNS, a refused connection, a proxy
   return "invalid model output";
 }
 
@@ -424,7 +432,12 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       const enrichPath = join(enrichDir, `${sha}.json`);
       let enriched: Enriched;
       const cachedEnrich = await readEntry(enrichPath, c.id, EnrichEntrySchema);
-      if (cachedEnrich && cachedEnrich.model === opts.models.enrich && cachedEnrich.snapshotDate === opts.snapshotDate) {
+      if (
+        cachedEnrich &&
+        cachedEnrich.pipelineVersion === PIPELINE_VERSION &&
+        cachedEnrich.model === opts.models.enrich &&
+        cachedEnrich.snapshotDate === opts.snapshotDate
+      ) {
         enriched = cachedEnrich.value;
         stat.enrich = "cache";
       } else {
@@ -432,26 +445,32 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
           otherIds: allIds.filter((id) => id !== c.id),
           today: opts.snapshotDate,
         });
-        await writeEntry(enrichPath, c.id, { model: opts.models.enrich, snapshotDate: opts.snapshotDate, value: enriched });
+        await writeEntry(enrichPath, c.id, { pipelineVersion: PIPELINE_VERSION, model: opts.models.enrich, snapshotDate: opts.snapshotDate, value: enriched });
         stat.enrich = "llm";
       }
 
       stage = "verification";
       const verifyPath = join(verifyDir, `${sha}.json`);
-      const enrichedHash = sha256Hex(JSON.stringify(enriched));
+      // A tender's text is the row its title was made from, so there is no document to mistake it for.
+      const identityTitle = tenderText === undefined ? c.title : undefined;
+      const inputHash = sha256Hex(JSON.stringify([enriched, identityTitle ?? null]));
       let verdict: { kept: Enriched; dropped: string[]; fatal?: string };
       const cachedVerify = await readEntry(verifyPath, c.id, VerifyEntrySchema);
       if (
         cachedVerify &&
+        cachedVerify.pipelineVersion === PIPELINE_VERSION &&
         cachedVerify.model === opts.models.verify &&
         cachedVerify.snapshotDate === opts.snapshotDate &&
-        cachedVerify.enrichedHash === enrichedHash
+        cachedVerify.inputHash === inputHash
       ) {
         verdict = { kept: cachedVerify.kept, dropped: cachedVerify.dropped, ...(cachedVerify.fatal ? { fatal: cachedVerify.fatal } : {}) };
         stat.verify = "cache";
       } else {
-        verdict = await verifyRecord(enriched, passages, opts.llm.verify, { today: opts.snapshotDate });
-        await writeEntry(verifyPath, c.id, { model: opts.models.verify, snapshotDate: opts.snapshotDate, enrichedHash, ...verdict });
+        verdict = await verifyRecord(enriched, passages, opts.llm.verify, {
+          today: opts.snapshotDate,
+          ...(identityTitle !== undefined ? { title: identityTitle } : {}),
+        });
+        await writeEntry(verifyPath, c.id, { pipelineVersion: PIPELINE_VERSION, model: opts.models.verify, snapshotDate: opts.snapshotDate, inputHash, ...verdict });
         stat.verify = "llm";
       }
       stat.dropped = verdict.dropped;
@@ -480,7 +499,7 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
         related: kept.related,
         url: c.url,
         publisher: where.publisher,
-        ...(kept.published ? { published: kept.published } : {}),
+        ...(kept.published ? { published: kept.published.value } : {}),
         fetched,
         sha256: sha,
         attribution: where.attribution,

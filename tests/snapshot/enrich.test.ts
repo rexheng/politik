@@ -30,7 +30,7 @@ const passages: Passage[] = [
 const goodReply = () => ({
   shortTitle: "SB 53",
   issuer: "California State Legislature",
-  published: "2025-09-29",
+  published: { value: "2025-09-29", support: ["ca-sb-53-2025#2"] },
   status: { value: "enacted", support: ["ca-sb-53-2025#2"] },
   statusDate: "2025-09-29",
   timeline: [{ date: "2025-09-29", event: "Signed by the Governor.", support: ["ca-sb-53-2025#2"] }],
@@ -146,7 +146,7 @@ test("when no valid topic is left, the curator's topics from the candidate list 
 
 test("datetimes are normalised to YYYY-MM-DD and events with unparseable dates are dropped", async () => {
   const reply = goodReply() as any;
-  reply.published = "2025-09-29T00:00:00Z";
+  reply.published = { value: "2025-09-29T00:00:00Z", support: ["ca-sb-53-2025#2"] };
   reply.statusDate = "2025-09-29T23:30:00-08:00";
   reply.timeline = [
     { date: "2025-09-29T00:00:00.000Z", event: "Signed.", support: ["ca-sb-53-2025#2"] },
@@ -155,7 +155,7 @@ test("datetimes are normalised to YYYY-MM-DD and events with unparseable dates a
     { date: "", event: "No date.", support: ["ca-sb-53-2025#2"] },
   ];
   const out = await run(reply);
-  assert.equal(out.published, "2025-09-29");
+  assert.deepEqual(out.published, { value: "2025-09-29", support: ["ca-sb-53-2025#2"] });
   assert.equal(out.statusDate, "2025-09-29");
   assert.deepEqual(out.timeline, [{ date: "2025-09-29", event: "Signed.", support: ["ca-sb-53-2025#2"] }]);
   assert.equal(EnrichedSchema.safeParse(out).success, true);
@@ -163,7 +163,7 @@ test("datetimes are normalised to YYYY-MM-DD and events with unparseable dates a
 
 test("an unparseable published or statusDate is omitted rather than invented", async () => {
   const reply = goodReply() as any;
-  reply.published = "late 2025";
+  reply.published = { value: "late 2025", support: ["ca-sb-53-2025#2"] };
   reply.statusDate = "2025-13-01";
   const out = await run(reply);
   assert.equal("published" in out, false);
@@ -260,4 +260,37 @@ test("the schema sent to Groq qualifies for strict mode: closed objects, every f
   assert.equal(format.type, "json_schema");
   assert.equal(format.json_schema.strict, true);
   assert.deepEqual(format.json_schema.schema.required.sort(), Object.keys(format.json_schema.schema.properties).sort());
+});
+
+// --- I3: `published` is a cited claim ---
+
+test("I3: published is a claim with a value and the passages that state it, and the wire schema requires both", async () => {
+  const { llm, calls } = fakeLlm(goodReply());
+  const out = await enrichRecord(candidate, passages, llm, ctx);
+  assert.deepEqual(out.published, { value: "2025-09-29", support: ["ca-sb-53-2025#2"] });
+  const schema = calls[0]!.schema;
+  assert.equal(schema.safeParse({ ...goodReply(), published: null }).success, true);
+  assert.equal(schema.safeParse({ ...goodReply(), published: "2025-09-29" }).success, false, "a bare date is no longer accepted");
+  assert.equal(schema.safeParse({ ...goodReply(), published: { value: "2025-09-29" } }).success, false);
+  assert.match(calls[0]!.system, /- published:[^\n]*\bcitation\b/i, "the prompt asks for a citation");
+});
+
+test("I3: a published date with no support ids, or only ids that do not exist, is dropped before verification", async () => {
+  for (const support of [[], ["x#9"], ["ca-sb-53-2025#9", "nope#1"]]) {
+    const out = await run({ ...goodReply(), published: { value: "2025-09-29", support } });
+    assert.equal("published" in out, false, JSON.stringify(support));
+    assert.equal(EnrichedSchema.safeParse(out).success, true);
+  }
+});
+
+test("I3: unknown ids are stripped from published, which keeps its remaining valid ids", async () => {
+  const out = await run({ ...goodReply(), published: { value: "2025-09-29", support: ["x#9", "ca-sb-53-2025#1", "ca-sb-53-2025#1"] } });
+  assert.deepEqual(out.published, { value: "2025-09-29", support: ["ca-sb-53-2025#1"] });
+});
+
+test("I3: an Enriched whose published is a bare string no longer parses", () => {
+  const { published: _cited, ...rest } = goodReply();
+  assert.equal(EnrichedSchema.safeParse({ ...rest, published: "2025-09-29" }).success, false);
+  assert.equal(EnrichedSchema.safeParse({ ...rest, published: { value: "2025-09-29", support: [] } }).success, false);
+  assert.equal(EnrichedSchema.safeParse(rest).success, true, "published stays optional");
 });

@@ -13,6 +13,7 @@ import {
   main,
   parseArgs,
   runBuild,
+  PIPELINE_VERSION,
   SnapshotGuardError,
   type BuildOptions,
   type RunResult,
@@ -61,8 +62,12 @@ function fakeLlms(
     enrichThrows?: Record<string, Error>;
     verifyThrows?: Record<string, Error>;
     unsupported?: Record<string, string[]>;
+    /** Claim ids the checker leaves out of its answer, per record. */
+    omit?: Record<string, string[]>;
     related?: Record<string, Related>;
     issuer?: string;
+    /** Per record: the `published` the enricher returns (default: 2025-09-29 citing passage 1); null for none. */
+    published?: Record<string, { value: string; support: string[] } | null>;
   } = {},
 ) {
   const enrichCalls: Req[] = [];
@@ -76,7 +81,7 @@ function fakeLlms(
     return {
       shortTitle: null,
       issuer: opts.issuer ?? "Example Legislature",
-      published: "2025-09-29",
+      published: opts.published && id in opts.published ? opts.published[id] : { value: "2025-09-29", support: cite },
       status: { value: "enacted", support: cite },
       statusDate: "2025-09-29",
       timeline: [{ date: "2025-09-29", event: "Signed by the Governor.", support: cite }],
@@ -93,7 +98,11 @@ function fakeLlms(
     const thrown = opts.verifyThrows?.[id];
     if (thrown) throw thrown;
     const claimIds = [...req.user.matchAll(/^CLAIM ([^\s:]+)/gm)].map((m) => m[1]!);
-    return { results: claimIds.map((claimId) => ({ claimId, supported: !(opts.unsupported?.[id] ?? []).includes(claimId) })) };
+    return {
+      results: claimIds
+        .filter((claimId) => !(opts.omit?.[id] ?? []).includes(claimId))
+        .map((claimId) => ({ claimId, supported: !(opts.unsupported?.[id] ?? []).includes(claimId) })),
+    };
   }) as Llm;
   return {
     llm: { enrich, verify },
@@ -550,7 +559,8 @@ test("verification is sent only the passages that the claims cite", async () => 
   await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl, enrichMaxWords: 400 }));
   const user = llms.verifyCalls[0]!.user;
   assert.ok(user.includes("[ca-long-2025#1]"), "the passage the claims cite is sent");
-  assert.ok(!user.includes("[ca-long-2025#2]") && !user.includes("[ca-long-2025#3]"), "an uncited passage is not");
+  assert.ok(user.includes("[ca-long-2025#2]"), "so is the second, which the identity claim cites with the first");
+  assert.ok(!user.includes("[ca-long-2025#3]"), "an uncited passage is not");
 });
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -797,7 +807,7 @@ test("R17: a 429 LlmError is recorded as exactly 'enrichment failed: HTTP 429', 
   for (const name of OUTPUTS) assert.ok(!(await env.read(name)).includes("org_01hxyzsecret"), name);
 });
 
-test("R17: the reason is one of six fixed phrases, whatever the provider said", async () => {
+test("R17: the reason is one of a few fixed phrases, whatever the provider said", async () => {
   const cases: Array<{ stage: "enrich" | "verify"; error: LlmError; reason: string }> = [];
   const make = (message: string, status?: number, kind?: LlmError["kind"]) => {
     const e = new LlmError(message, status);
@@ -809,7 +819,8 @@ test("R17: the reason is one of six fixed phrases, whatever the provider said", 
     { stage: "verify", error: make("Groq API error 503: org_01hxyzsecret overloaded", 503), reason: "verification failed: HTTP 503" },
     { stage: "enrich", error: make("Groq request failed: timed out after 60000ms", undefined, "timeout"), reason: "enrichment failed: timed out" },
     { stage: "verify", error: make("Groq request failed: timed out after 60000ms", undefined, "timeout"), reason: "verification failed: timed out" },
-    { stage: "enrich", error: make("Groq request failed: getaddrinfo ENOTFOUND api.groq.com", undefined, "network"), reason: "enrichment failed: timed out" },
+    { stage: "enrich", error: make("Groq request failed: getaddrinfo ENOTFOUND api.groq.com", undefined, "network"), reason: "enrichment failed: unreachable" },
+    { stage: "verify", error: make("Groq request failed: connect ECONNREFUSED 127.0.0.1:443", undefined, "network"), reason: "verification failed: unreachable" },
     { stage: "enrich", error: make('Groq output for "policy_enrichment" was still invalid after one repair. {"x": "org_01hxyzsecret"}', undefined, "invalid-output"), reason: "enrichment failed: invalid model output" },
     { stage: "verify", error: make("Groq output for \"claim_verification\" was still invalid after one repair.", undefined, "invalid-output"), reason: "verification failed: invalid model output" },
   );
@@ -866,6 +877,144 @@ test("R17: the summary says to lower ENRICH_MAX_WORDS when any record failed wit
   const text = formatSummary(result);
   assert.match(text, /lower ENRICH_MAX_WORDS/);
   assert.match(text, /ca-c-2025 \(US-CA\): enrichment failed: HTTP 413/);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// I2: the fetched document must be the one the title names
+
+const IDENTITY_REASON = "source does not match the listed document";
+
+test("I2: a document whose identity the checker does not support is excluded with the fixed reason", async () => {
+  const env = await makeEnv(three());
+  const llms = fakeLlms({ unsupported: { "ca-b-2025": ["identity"] } });
+  const manifest = await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: threeWeb().impl }));
+  assert.deepEqual(manifest.excluded.map((e) => [e.id, e.reason]), [["ca-b-2025", IDENTITY_REASON]]);
+  assert.deepEqual((await env.readJson<PolicyRecord[]>("policies.json")).map((p) => p.id), ["ca-a-2025", "ca-c-2025"]);
+});
+
+test("I2: an identity the checker leaves out of its answer excludes the record too", async () => {
+  const env = await makeEnv(three());
+  const llms = fakeLlms({ omit: { "ca-c-2025": ["identity"] } });
+  const manifest = await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: threeWeb().impl }));
+  assert.deepEqual(manifest.excluded.map((e) => [e.id, e.reason]), [["ca-c-2025", IDENTITY_REASON]]);
+});
+
+test("I2: the identity claim names the candidate's title and rides in the one verify call", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025", { title: "The Example Act 2025" })));
+  const llms = fakeLlms();
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: fakeWeb(siteFor("ca-a-2025")).impl }));
+  assert.equal(llms.verifyCalls.length, 1);
+  assert.ok(llms.verifyCalls[0]!.user.includes('CLAIM identity: These passages are from the document named "The Example Act 2025"'));
+});
+
+test("I2: a verdict is cached with the title it was given, so a changed title is checked again (without enriching again)", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025", { title: "The Example Act 2025" })));
+  const web = fakeWeb(siteFor("ca-a-2025"));
+  const llms = fakeLlms();
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
+  assert.equal(llms.total(), 2, "the same title re-runs from the cache");
+
+  await writeFile(env.paths.candidatesPath, candidatesMd(row("ca-a-2025", { title: "A Different Act 2025" })));
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
+  assert.equal(llms.enrichCalls.length, 1);
+  assert.equal(llms.verifyCalls.length, 2);
+});
+
+test("I2: a GeBIZ tender, whose text is the row its title came from, gets no identity claim", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025")));
+  const llms = fakeLlms();
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: gebizWeb(siteFor("ca-a-2025")).impl, gebiz: true, gebizRule: gebizRule({ max: 1 }) }));
+  const tender = llms.verifyCalls.find((c) => c.user.includes("sg-gebiz-"))!;
+  const listed = llms.verifyCalls.find((c) => c.user.includes("[ca-a-2025#"))!;
+  assert.ok(!tender.user.includes("CLAIM identity"));
+  assert.ok(listed.user.includes("CLAIM identity"));
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// I3: `published` is kept only when it is cited and the checker supports it
+
+test("I3: a supported published date is kept on the record as a plain date", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025")));
+  const llms = fakeLlms();
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: fakeWeb(siteFor("ca-a-2025")).impl }));
+  assert.ok(llms.verifyCalls[0]!.user.includes("CLAIM published: The document was published, issued or enacted on 2025-09-29."));
+  const [record] = await env.readJson<PolicyRecord[]>("policies.json");
+  assert.equal(record!.published, "2025-09-29");
+});
+
+test("I3: an unsupported published date is dropped, and the record is still built", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025")));
+  const llms = fakeLlms({ unsupported: { "ca-a-2025": ["published"] } });
+  const { manifest, stats } = await runBuild(env.opts({ llm: llms.llm, fetchImpl: fakeWeb(siteFor("ca-a-2025")).impl }));
+  assert.equal(manifest.counts.total, 1);
+  const [record] = await env.readJson<PolicyRecord[]>("policies.json");
+  assert.equal("published" in record!, false);
+  assert.deepEqual(stats[0]!.dropped, ["published"]);
+});
+
+test("I3: a published date with no support is dropped before verification, so it is never checked", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025"), row("ca-b-2025")));
+  const llms = fakeLlms({ published: { "ca-a-2025": { value: "2025-09-29", support: [] }, "ca-b-2025": null } });
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: fakeWeb(siteFor("ca-a-2025", "ca-b-2025")).impl }));
+  assert.ok(llms.verifyCalls.every((c) => !c.user.includes("CLAIM published")));
+  for (const record of await env.readJson<PolicyRecord[]>("policies.json")) assert.equal("published" in record, false, record.id);
+});
+
+test("I3: a record with no published date does not enter the latest ordering or lastActivity", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025")));
+  await buildSnapshot(env.opts({ llm: fakeLlms({ published: { "ca-a-2025": null } }).llm, fetchImpl: fakeWeb(siteFor("ca-a-2025")).impl }));
+  assert.deepEqual(checkSnapshot({ policies: await env.readJson("policies.json"), passages: await env.readJson("passages.json"), manifest: await env.readJson("manifest.json") }), []);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M5: the pipeline version is part of the model caches
+
+test("M5: cached enrich and verify answers carry the pipeline version, and an answer from another version is a miss", async () => {
+  assert.equal(PIPELINE_VERSION, 2);
+  const env = await makeEnv(candidatesMd(row("ca-a-2025")));
+  const web = fakeWeb(siteFor("ca-a-2025"));
+  const llms = fakeLlms();
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
+  const sha = sha256Hex(htmlToText(page("ca-a-2025")));
+  const enrichFile = join(env.paths.cacheDir, "enrich", `${sha}.json`);
+  const verifyFile = join(env.paths.cacheDir, "verify", `${sha}.json`);
+  const entry = async (file: string) => JSON.parse(await readFile(file, "utf8"))["ca-a-2025"];
+  assert.equal((await entry(enrichFile)).pipelineVersion, PIPELINE_VERSION);
+  assert.equal((await entry(verifyFile)).pipelineVersion, PIPELINE_VERSION);
+
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
+  assert.equal(llms.total(), 2, "the same version is a hit");
+
+  const stale = async (file: string) => {
+    const all = JSON.parse(await readFile(file, "utf8"));
+    all["ca-a-2025"].pipelineVersion = PIPELINE_VERSION - 1;
+    await writeFile(file, JSON.stringify(all));
+  };
+  await stale(verifyFile);
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
+  assert.equal(llms.enrichCalls.length, 1, "an old verdict is asked again");
+  assert.equal(llms.verifyCalls.length, 2);
+
+  await stale(enrichFile);
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
+  assert.equal(llms.enrichCalls.length, 2, "an old enrichment is asked again");
+});
+
+test("M5: an entry with no pipeline version (written before it existed) is a miss", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025")));
+  const web = fakeWeb(siteFor("ca-a-2025"));
+  const llms = fakeLlms();
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
+  const sha = sha256Hex(htmlToText(page("ca-a-2025")));
+  for (const dir of ["enrich", "verify"]) {
+    const file = join(env.paths.cacheDir, dir, `${sha}.json`);
+    const all = JSON.parse(await readFile(file, "utf8"));
+    delete all["ca-a-2025"].pipelineVersion;
+    await writeFile(file, JSON.stringify(all));
+  }
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl }));
+  assert.equal(llms.total(), 4);
 });
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -253,3 +253,104 @@ test("passing the context does not change which claims are checked or how verdic
   assert.deepEqual(out.dropped, ["provisions[2]"]);
   assert.equal(out.fatal, undefined);
 });
+
+// --- I2: identity, I3: published, M4: untrusted claims ---
+
+const withPublished = (): Enriched => ({ ...enriched(), published: { value: "2013-01-02", support: ["r#2"] } });
+const TITLE = "Personal Data Protection Act 2012";
+
+test("I2: with a title, one extra claim `identity` is checked in the same single call", async () => {
+  const { llm, calls } = verifier();
+  const out = await verifyRecord(enriched(), passages, llm, { title: TITLE });
+  assert.equal(calls.length, 1, "still one LLM call");
+  const { user } = calls[0]!;
+  assert.ok(user.includes(`CLAIM identity: These passages are from the document named "${TITLE}" (wording may differ; a later amended version of the same bill/instrument counts).`));
+  assert.deepEqual(out.dropped, []);
+  assert.equal(out.fatal, undefined);
+  assert.deepEqual(out.kept, enriched());
+});
+
+test("I2: the identity claim cites the first passages, and only those are added to the passages sent", async () => {
+  const e = enriched();
+  e.provisions = [];
+  e.affected = [];
+  e.timeline = [];
+  e.status.support = ["r#1"];
+  e.summary.support = ["r#1"];
+  const { llm, calls } = verifier();
+  await verifyRecord(e, passages, llm, { title: TITLE });
+  const { user } = calls[0]!;
+  assert.match(user, /CLAIM identity:[^\n]*\nCited passages: r#1, r#2\n/);
+  assert.ok(user.includes("[r#1] Purpose") && user.includes("[r#2]"));
+  assert.ok(!user.includes("[r#3]"), "the third passage is not needed for identity");
+});
+
+test("I2: an unsupported identity is fatal with exactly 'source does not match the listed document'", async () => {
+  const { llm } = verifier({ unsupported: ["identity"] });
+  const out = await verifyRecord(enriched(), passages, llm, { title: TITLE });
+  assert.equal(out.fatal, "source does not match the listed document");
+  assert.deepEqual(out.dropped, ["identity"]);
+});
+
+test("I2: an identity the model leaves out of its answer is fatal too", async () => {
+  const { llm } = verifier({ omit: ["identity"] });
+  const out = await verifyRecord(enriched(), passages, llm, { title: TITLE });
+  assert.equal(out.fatal, "source does not match the listed document");
+});
+
+test("I2: a wrong document is reported as such even when the summary also fails", async () => {
+  const { llm } = verifier({ unsupported: ["identity", "summary", "status"] });
+  const out = await verifyRecord(enriched(), passages, llm, { title: TITLE });
+  assert.equal(out.fatal, "source does not match the listed document");
+});
+
+test("I2: without a title there is no identity claim (a tender's text is the row its title came from)", async () => {
+  const { llm, calls } = verifier();
+  const out = await verifyRecord(enriched(), passages, llm, { today: "2026-10-15" });
+  assert.ok(!calls[0]!.user.includes("CLAIM identity"));
+  assert.equal(out.fatal, undefined);
+});
+
+test("I2: the system prompt says what the identity claim means", async () => {
+  const { llm, calls } = verifier();
+  await verifyRecord(enriched(), passages, llm, { title: TITLE });
+  assert.match(calls[0]!.system, /identity/);
+  assert.match(calls[0]!.system, /later amended version|another publication/i);
+});
+
+test("I3: a published date is checked as the claim `published`, and kept when supported", async () => {
+  const { llm, calls } = verifier();
+  const out = await verifyRecord(withPublished(), passages, llm);
+  assert.ok(calls[0]!.user.includes("CLAIM published: The document was published, issued or enacted on 2013-01-02.\nCited passages: r#2"));
+  assert.deepEqual(out.kept.published, { value: "2013-01-02", support: ["r#2"] });
+  assert.deepEqual(out.dropped, []);
+});
+
+test("I3: an unsupported published date is dropped and does not fail the record", async () => {
+  const { llm } = verifier({ unsupported: ["published"] });
+  const out = await verifyRecord(withPublished(), passages, llm);
+  assert.equal("published" in out.kept, false);
+  assert.deepEqual(out.dropped, ["published"]);
+  assert.equal(out.fatal, undefined);
+  assert.equal(out.kept.summary.value, "The Act protects personal data.");
+});
+
+test("I3: a published date the model leaves out of its answer is dropped", async () => {
+  const { llm } = verifier({ omit: ["published"] });
+  const out = await verifyRecord(withPublished(), passages, llm);
+  assert.equal("published" in out.kept, false);
+  assert.deepEqual(out.dropped, ["published"]);
+});
+
+test("I3: a record with no published date has no published claim", async () => {
+  const { llm, calls } = verifier();
+  await verifyRecord(enriched(), passages, llm);
+  assert.ok(!calls[0]!.user.includes("CLAIM published"));
+});
+
+test("M4: the system prompt says the claims are model-written and untrusted, as the passages are", async () => {
+  const { llm, calls } = verifier();
+  await verifyRecord(enriched(), passages, llm);
+  assert.match(calls[0]!.system, /claims are written by (?:another|a) model and are untrusted/i);
+  assert.match(calls[0]!.system, /never as instructions/i);
+});
