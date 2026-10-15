@@ -50,19 +50,13 @@ export async function handleTelegram(request: Request, env: Env): Promise<Respon
   const text = update.message?.text?.trim();
   if (chatId == null || !text || text.startsWith("/")) {
     if (chatId != null && text?.startsWith("/")) {
-      await sendMessage(token, chatId, "Ask what is going on.");
+      await sendQuietly(token, chatId, "Ask what is going on.", "the command reply");
     }
     return new Response("ok");
   }
 
   if (await overLimit(env, telegramLimitKey(request, chatId))) {
-    try {
-      await sendMessage(token, chatId, BUSY_REPLY);
-    } catch (error) {
-      // Telegram sends an update again when it gets an error back, so a busy reply that cannot be sent is not an error.
-      // Only the error's name is logged: the request URL holds the bot token.
-      console.warn("telegram: could not send the busy reply", error instanceof Error ? error.name : "");
-    }
+    await sendQuietly(token, chatId, BUSY_REPLY, "the busy reply");
     return new Response("ok");
   }
 
@@ -70,9 +64,22 @@ export async function handleTelegram(request: Request, env: Env): Promise<Respon
     const result = await ask(text, env, undefined, []);
     await sendMessage(token, chatId, formatTelegramReply(result));
   } catch {
-    await sendMessage(token, chatId, "I could not check that just now.");
+    await sendQuietly(token, chatId, "I could not check that just now.", "the apology");
   }
   return new Response("ok");
+}
+
+/**
+ * `sendMessage`, except that a failure is logged and not thrown. Telegram sends an update again when it gets an error
+ * back, so a reply that cannot be sent must not become one. Only the error's name is logged: the request URL holds the
+ * bot token.
+ */
+async function sendQuietly(token: string, chatId: number, text: string, what: string): Promise<void> {
+  try {
+    await sendMessage(token, chatId, text);
+  } catch (error) {
+    console.warn(`telegram: could not send ${what}`, error instanceof Error ? error.name : "");
+  }
 }
 
 async function sendMessage(token: string, chatId: number, text: string): Promise<void> {

@@ -22,10 +22,11 @@ type Format = {
   isVoiceSocketUrl(url: string, base?: string): boolean;
   tapVoiceAnswers(target: { WebSocket?: unknown }, base: string, onAnswer: (question: string, response: Record<string, unknown>) => void, onFailed?: (socketUrl: string) => void): boolean;
   voiceBusyLine(socketUrl: string, doFetch: (url: string, init?: object) => Promise<{ status: number; json(): Promise<unknown> }>): Promise<string>;
+  busyLineOf(res: { status: number; json(): Promise<unknown> }): Promise<string>;
   BUSY_LINE: string;
   VOICE_ANSWER_TYPE: string;
 };
-const { parseAnswer, formatAsOf, historyTurn, spokenText, formatDay, spokenReply, voiceAnswerOf, isVoiceSocketUrl, tapVoiceAnswers, voiceBusyLine, BUSY_LINE, VOICE_ANSWER_TYPE } = (await import(new URL("../../photon/public/format.js", import.meta.url).href)) as Format;
+const { parseAnswer, formatAsOf, historyTurn, spokenText, formatDay, spokenReply, voiceAnswerOf, isVoiceSocketUrl, tapVoiceAnswers, voiceBusyLine, busyLineOf, BUSY_LINE, VOICE_ANSWER_TYPE } = (await import(new URL("../../photon/public/format.js", import.meta.url).href)) as Format;
 
 const text = (t: string): Inline => ({ type: "text", text: t });
 const bold = (t: string): Inline => ({ type: "bold", text: t });
@@ -443,5 +444,21 @@ describe("voiceBusyLine: was the voice session refused because Politik is busy?"
     for (const status of [426, 503, 502, 200, 500]) assert.equal(await voiceBusyLine(agent, async () => reply(status, { error: "x" })), "", String(status));
     assert.equal(await voiceBusyLine(agent, async () => Promise.reject(new TypeError("offline"))), "");
     assert.equal(await voiceBusyLine("not a url", async () => reply(429)), "", "an address that cannot be read");
+  });
+});
+
+describe("busyLineOf: is this answer the Worker's 'Politik is busy' refusal?", () => {
+  const reply = (status: number, body?: unknown) => ({ status, json: async () => (body === undefined ? Promise.reject(new SyntaxError("no body")) : body) });
+
+  test("a 429 gives the line from its JSON error, or the fixed busy line when the body says nothing usable", async () => {
+    assert.equal(await busyLineOf(reply(429, { error: "Politik is busy — try later." })), "Politik is busy — try later.");
+    assert.equal(await busyLineOf(reply(429)), BUSY_LINE);
+    assert.equal(await busyLineOf(reply(429, { error: "  " })), BUSY_LINE);
+    assert.equal(await busyLineOf(reply(429, null)), BUSY_LINE);
+  });
+
+  test("any other status is not a refusal", async () => {
+    for (const status of [200, 400, 426, 500, 502, 503]) assert.equal(await busyLineOf(reply(status, { error: "x" })), "", String(status));
+    assert.equal(await busyLineOf(undefined as unknown as { status: number; json(): Promise<unknown> }), "");
   });
 });

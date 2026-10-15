@@ -267,7 +267,21 @@ export function tapVoiceAnswers(target, base, onAnswer, onFailed) {
 }
 
 /**
- * The line to show when the Worker refused to open the voice session `socketUrl` because Politik is busy, else "". The
+ * The line to show when `res` (a fetch response) is the Worker's refusal because Politik is busy, else "": a 429 gives the
+ * `error` of its JSON body, or the fixed busy line when the body says nothing usable. Any other answer is not a refusal.
+ */
+export async function busyLineOf(res) {
+  if (!res || res.status !== 429) return "";
+  let line = "";
+  try {
+    const body = await res.json();
+    if (body && typeof body.error === "string") line = body.error.trim();
+  } catch (err) {}
+  return line || BUSY_LINE;
+}
+
+/**
+ * The line to show when the Worker refused to open the voice socket `socketUrl` because Politik is busy, else "". The
  * Worker answers an over-limit caller with a 429 and a JSON `error` to any request for that address, so a plain GET
  * (`doFetch`, the page's fetch) finds out what the socket's failed handshake cannot say. Any other answer, or none, is "".
  */
@@ -275,14 +289,7 @@ export async function voiceBusyLine(socketUrl, doFetch) {
   try {
     const url = new URL(String(socketUrl));
     url.protocol = url.protocol === "wss:" ? "https:" : url.protocol === "ws:" ? "http:" : url.protocol;
-    const res = await doFetch(url.href, { cache: "no-store" });
-    if (!res || res.status !== 429) return "";
-    let line = "";
-    try {
-      const body = await res.json();
-      if (body && typeof body.error === "string") line = body.error.trim();
-    } catch (err) {}
-    return line || BUSY_LINE;
+    return await busyLineOf(await doFetch(url.href, { cache: "no-store" }));
   } catch (err) {
     return "";
   }

@@ -103,10 +103,27 @@ function knowledgeFromPrompt(prompt: string): unknown {
 }
 
 /**
- * The page's message that sets the agent's think section, rewritten so that the agent only ever calls the Worker (see
- * `pinThink`), with the session notes from its prompt. That is `Settings` and also `UpdateThink`, which replaces the whole
- * think section (model, prompt, endpoint, functions) in the middle of a session and would otherwise undo the pin. Null for
- * any other message, which goes on unchanged. `origin` is the Worker's own origin, taken from the request that opened the socket.
+ * The sections of a `think` or `speak` setting as a list of objects, which are the ones that can carry an endpoint: the
+ * setting itself when it is an object, or the objects in it when it is a list. A list is cut down to those objects in
+ * place, so an entry that is not an object (or a list inside the list) cannot carry one past the pin. Null when the
+ * setting is neither.
+ */
+function sectionsOf(holder: Record<string, unknown>, key: string): Record<string, unknown>[] | null {
+  const value = holder[key];
+  if (isRecord(value)) return [value];
+  if (!Array.isArray(value)) return null;
+  const objects = value.filter(isRecord);
+  holder[key] = objects;
+  return objects;
+}
+
+/**
+ * The page's messages that set the agent's think or speak section, rewritten so that the agent only calls the Worker or
+ * Deepgram's own voices, with the session notes from the think prompt. A think section is pinned by `pinThink`. A speak
+ * section loses its `endpoint`: Deepgram would send every spoken line to the URL it names, and the Worker has no speech
+ * endpoint of its own to put there. These are `Settings`, and also `UpdateThink` and `UpdateSpeak`, which replace one
+ * section in the middle of a session and would otherwise undo the pin. Null for any other message, or one with neither
+ * section, which goes on unchanged. `origin` is the Worker's own origin, taken from the request that opened the socket.
  */
 export function tuneSettings(raw: string, origin: string): { text: string; knowledge: unknown } | null {
   let parsed: unknown;
@@ -116,13 +133,20 @@ export function tuneSettings(raw: string, origin: string): { text: string; knowl
     return null;
   }
   if (!isRecord(parsed)) return null;
-  let holder: Record<string, unknown> | null = null;
-  if (parsed.type === "Settings") holder = isRecord(parsed.agent) ? parsed.agent : null;
-  else if (parsed.type === "UpdateThink") holder = parsed;
-  if (!holder) return null;
-  const sections = Array.isArray(holder.think) ? holder.think : [holder.think];
-  if (sections.length === 0 || !sections.every(isRecord)) return null;
-  const notes = sections.map((section) => pinThink(section, origin)); // every section is pinned, not just the first
+  let think: Record<string, unknown>[] | null = null;
+  let speak: Record<string, unknown>[] | null = null;
+  if (parsed.type === "Settings") {
+    if (!isRecord(parsed.agent)) return null;
+    think = sectionsOf(parsed.agent, "think");
+    speak = sectionsOf(parsed.agent, "speak");
+  } else if (parsed.type === "UpdateThink") {
+    think = sectionsOf(parsed, "think");
+  } else if (parsed.type === "UpdateSpeak") {
+    speak = sectionsOf(parsed, "speak");
+  }
+  if (!think && !speak) return null;
+  const notes = (think ?? []).map((section) => pinThink(section, origin)); // every section is pinned, not just the first
+  for (const section of speak ?? []) delete section.endpoint;
   return { text: JSON.stringify(parsed), knowledge: notes.find((found) => found !== undefined) };
 }
 

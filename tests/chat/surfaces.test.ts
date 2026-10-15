@@ -498,6 +498,113 @@ describe("surfaces", () => {
       });
     });
 
+    describe("the voice listen socket and the spoken reply cost the Deepgram key too", () => {
+      const LISTEN = "https://politik.test/api/voice/listen";
+      const SPEAK = "https://politik.test/api/voice/speak";
+      const DEEPGRAM_LISTEN = /^https:\/\/api\.deepgram\.com\/v1\/listen\?/;
+      const DEEPGRAM_SPEAK = /^https:\/\/api\.deepgram\.com\/v1\/speak\?/;
+      const upgrade = (ip: string | undefined, url = LISTEN) =>
+        new Request(url, { headers: { Upgrade: "websocket", Connection: "Upgrade", ...(ip ? { "CF-Connecting-IP": ip } : {}) } });
+      const speakRequest = (ip: string | undefined, url = SPEAK, text: unknown = "Hello there") =>
+        new Request(url, { method: "POST", headers: { "content-type": "application/json", ...(ip ? { "CF-Connecting-IP": ip } : {}) }, body: JSON.stringify({ text }) });
+      /** Deepgram answers with audio; the listen socket cannot be opened in Node, so that one ends in 502. */
+      const run = (request: Request, e: Env) =>
+        withFetch((url) => (DEEPGRAM_SPEAK.test(url) ? new Response("audio-bytes", { headers: { "content-type": "audio/mpeg" } }) : Promise.reject(new TypeError("no network in tests"))), () => worker.fetch(request, e));
+
+      test("/api/voice/listen over the limit: HTTP 429 with the JSON error, no Deepgram connection, keyed on CF-Connecting-IP", async () => {
+        const { binding, keys } = limiter(false);
+        const { result, urls } = await run(upgrade("203.0.113.7"), env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
+        assert.equal(result.status, 429);
+        assert.match(result.headers.get("content-type") ?? "", /^application\/json/);
+        assert.deepEqual(await result.json(), { error: BUSY_REPLY });
+        assert.deepEqual(urls, []);
+        assert.deepEqual(keys, ["203.0.113.7"]);
+      });
+
+      test("/api/voice/listen under the limit opens one Deepgram connection as before", async () => {
+        const { binding, keys } = limiter(true);
+        const { result, urls } = await run(upgrade("198.51.100.4"), env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
+        assert.equal(urls.length, 1);
+        assert.match(urls[0]!, DEEPGRAM_LISTEN);
+        assert.equal(result.status, 502, "Deepgram is not reachable in tests");
+        assert.deepEqual(keys, ["198.51.100.4"]);
+      });
+
+      test("/api/voice/listen: a plain GET (how the page finds out why a socket was refused) gets the same 429", async () => {
+        const plain = new Request(LISTEN, { headers: { "CF-Connecting-IP": "203.0.113.7" } });
+        const { result, urls } = await run(plain, env({ ASK_LIMITER: limiter(false).binding, DEEPGRAM_API_KEY: "dg-test" }));
+        assert.equal(result.status, 429);
+        assert.deepEqual(urls, []);
+      });
+
+      test("/api/voice/speak over the limit: HTTP 429 with the JSON error and no call to Deepgram", async () => {
+        const { binding, keys } = limiter(false);
+        const { result, urls } = await run(speakRequest("203.0.113.7"), env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
+        assert.equal(result.status, 429);
+        assert.match(result.headers.get("content-type") ?? "", /^application\/json/);
+        assert.deepEqual(await result.json(), { error: BUSY_REPLY });
+        assert.deepEqual(urls, []);
+        assert.deepEqual(keys, ["203.0.113.7"]);
+      });
+
+      test("/api/voice/speak over the limit does not even read the body", async () => {
+        const { binding } = limiter(false);
+        const request = new Request(SPEAK, { method: "POST", headers: { "CF-Connecting-IP": "203.0.113.7" }, body: "this is not JSON" });
+        const { result } = await run(request, env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
+        assert.equal(result.status, 429);
+      });
+
+      test("/api/voice/speak under the limit speaks as before, after one check on the caller's IP", async () => {
+        const { binding, keys } = limiter(true);
+        const { result, urls } = await run(speakRequest("198.51.100.4"), env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" }));
+        assert.equal(result.status, 200);
+        assert.equal(await result.text(), "audio-bytes");
+        assert.equal(urls.length, 1);
+        assert.match(urls[0]!, DEEPGRAM_SPEAK);
+        assert.deepEqual(keys, ["198.51.100.4"]);
+      });
+
+      test("the limit is per caller on both: one address over its allowance does not stop another", async () => {
+        const { binding } = limiter((key) => key !== "203.0.113.7");
+        const e = env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" });
+        assert.equal((await run(upgrade("203.0.113.7"), e)).result.status, 429);
+        assert.equal((await run(upgrade("203.0.113.8"), e)).result.status, 502);
+        assert.equal((await run(speakRequest("203.0.113.7"), e)).result.status, 429);
+        assert.equal((await run(speakRequest("203.0.113.8"), e)).result.status, 200);
+      });
+
+      test("the same skip rules as the questions: no binding, no address, a local request, a failing limiter", async () => {
+        const broken: RateLimiter = {
+          limit: async () => {
+            throw new Error("limiter down");
+          },
+        };
+        const { binding, keys } = limiter(false);
+        const cases: [string, Env][] = [
+          ["no binding", env({ DEEPGRAM_API_KEY: "dg-test" })],
+          ["a failing limiter", env({ ASK_LIMITER: broken, DEEPGRAM_API_KEY: "dg-test" })],
+        ];
+        for (const [name, e] of cases) {
+          assert.equal((await run(upgrade("203.0.113.7"), e)).urls.length, 1, `listen: ${name}`);
+          assert.equal((await run(speakRequest("203.0.113.7"), e)).result.status, 200, `speak: ${name}`);
+        }
+        const limited = env({ ASK_LIMITER: binding, DEEPGRAM_API_KEY: "dg-test" });
+        assert.equal((await run(upgrade(undefined), limited)).urls.length, 1, "listen: no CF-Connecting-IP");
+        assert.equal((await run(speakRequest(undefined), limited)).result.status, 200, "speak: no CF-Connecting-IP");
+        assert.equal((await run(upgrade("127.0.0.1", "http://localhost:8787/api/voice/listen"), limited)).urls.length, 1, "listen: wrangler dev");
+        assert.equal((await run(speakRequest("127.0.0.1", "http://localhost:8787/api/voice/speak"), limited)).result.status, 200, "speak: wrangler dev");
+        assert.deepEqual(keys, []);
+      });
+
+      test("with no Deepgram key both are still 503, and the limiter is not asked", async () => {
+        const { binding, keys } = limiter(false);
+        const e = env({ ASK_LIMITER: binding });
+        assert.equal((await run(upgrade("203.0.113.7"), e)).result.status, 503);
+        assert.equal((await run(speakRequest("203.0.113.7"), e)).result.status, 503);
+        assert.deepEqual(keys, []);
+      });
+    });
+
     test("Telegram over the limit sends the busy line to the chat and runs nothing", async () => {
       const { binding, keys } = limiter(false);
       const sent: any[] = [];
@@ -543,6 +650,56 @@ describe("surfaces", () => {
       const warned = (console.warn as unknown as { mock: { calls: { arguments: unknown[] }[] } }).mock.calls.map((c) => c.arguments.join(" ")).join("\n");
       assert.match(warned, /telegram/i);
       assert.doesNotMatch(warned, /tok-secret/, "the bot token is never logged");
+    });
+
+    describe("every Telegram reply is sent without letting a failed send become an error", () => {
+      const warnings = () => (console.warn as unknown as { mock: { calls: { arguments: unknown[] }[] } }).mock.calls.map((c) => c.arguments.join(" ")).join("\n");
+      const hook = (update: unknown, e: Env, handler: (url: string, init?: RequestInit) => Response | Promise<Response>) =>
+        withFetch(handler, () => worker.fetch(new Request("https://politik.test/telegram", { method: "POST", headers: { "CF-Connecting-IP": "91.108.4.1" }, body: JSON.stringify(update) }), e));
+      const down = (): Response => {
+        throw new TypeError("Network connection lost.");
+      };
+
+      test("the reply to a /command: when it cannot be sent the answer is still 200 ok, and the failure is logged", async () => {
+        let sends = 0;
+        const { result } = await hook({ message: { chat: { id: 3 }, text: "/start" } }, env({ TELEGRAM_BOT_TOKEN: "tok-secret" }), () => (sends++, down()));
+        assert.equal(result.status, 200);
+        assert.equal(await result.text(), "ok");
+        assert.equal(sends, 1);
+        assert.match(warnings(), /telegram/i);
+        assert.doesNotMatch(warnings(), /tok-secret/, "the bot token is never logged");
+      });
+
+      test("an answer that cannot be sent, and then the apology that cannot be sent either: still 200 ok", async () => {
+        let sends = 0;
+        const { result } = await hook({ message: { chat: { id: 3 }, text: "What is going on?" } }, env({ TELEGRAM_BOT_TOKEN: "tok-secret" }), () => (sends++, down()));
+        assert.equal(result.status, 200);
+        assert.equal(await result.text(), "ok");
+        assert.equal(sends, 2, "the answer, then the apology");
+        assert.doesNotMatch(warnings(), /tok-secret/);
+      });
+
+      test("an answer that cannot be sent still gets the apology, as before", async () => {
+        const sent: any[] = [];
+        let first = true;
+        const { result } = await hook({ message: { chat: { id: 3 }, text: "What is going on?" } }, env({ TELEGRAM_BOT_TOKEN: "tok" }), (_url, init) => {
+          if (first) {
+            first = false;
+            return down();
+          }
+          sent.push(JSON.parse(String(init?.body)));
+          return new Response("{}");
+        });
+        assert.equal(await result.text(), "ok");
+        assert.deepEqual(sent, [{ chat_id: 3, text: "I could not check that just now." }]);
+      });
+
+      test("a /command reply that can be sent is unchanged", async () => {
+        const sent: any[] = [];
+        const { result } = await hook({ message: { chat: { id: 3 }, text: "/start" } }, env({ TELEGRAM_BOT_TOKEN: "tok" }), (_url, init) => (sent.push(JSON.parse(String(init?.body))), new Response("{}")));
+        assert.equal(await result.text(), "ok");
+        assert.deepEqual(sent, [{ chat_id: 3, text: "Ask what is going on." }]);
+      });
     });
 
     test("Telegram: two chats that reach us from the same Telegram address do not share a limit", async () => {
@@ -813,6 +970,86 @@ describe("surfaces", () => {
       for (const raw of [JSON.stringify({ type: "KeepAlive" }), JSON.stringify({ type: "InjectUserMessage", content: "hi" }), "not json", JSON.stringify([1, 2])]) {
         assert.equal(tuneSettings(raw, ORIGIN), null, raw);
       }
+    });
+
+    test("a list with entries that are not objects cannot hide an endpoint: the entries that are objects are pinned, the rest dropped", () => {
+      const { msg, text } = tune(settings(["not an object", [{ prompt: "n", endpoint: { url: EVIL } }], { prompt: "a", endpoint: { url: EVIL } }, null]));
+      assert.equal(msg.agent.think.length, 1);
+      assert.deepEqual(msg.agent.think[0].endpoint, { url: OWN, headers: {} });
+      assert.doesNotMatch(text, /evil/);
+    });
+  });
+
+  describe("the agent's speak endpoint is never the page's", () => {
+    const ORIGIN = "https://politik.test";
+    const EVIL = "https://evil.example/s";
+    const think = { provider: { type: "open_ai", model: "gpt-4o-mini" }, prompt: "You are Politik." };
+    const speak = { provider: { type: "deepgram", model: "aura-2-thalia-en" } };
+    const tune = (msg: unknown, origin = ORIGIN) => {
+      const tuned = tuneSettings(JSON.stringify(msg), origin);
+      assert.ok(tuned, "the message is rewritten");
+      return { ...tuned, msg: JSON.parse(tuned.text) };
+    };
+    const settings = (speakSection: unknown) => ({ type: "Settings", audio: {}, agent: { language: "en", think, speak: speakSection } });
+
+    test("a settings message with speak.endpoint https://evil.example/s has it dropped, and the rest of the speak settings are the page's", () => {
+      const { msg, text } = tune(settings({ ...speak, endpoint: { url: EVIL, headers: { authorization: "Bearer stolen" } } }));
+      assert.equal("endpoint" in msg.agent.speak, false);
+      assert.deepEqual(msg.agent.speak.provider, speak.provider);
+      assert.doesNotMatch(text, /evil|stolen/);
+    });
+
+    test("however the page spells the speak endpoint (a bare string, no url, null, an http or wss URL) it is dropped", () => {
+      for (const endpoint of [EVIL, { url: "http://evil.example/s" }, { url: "wss://evil.example/s" }, {}, null, { url: 5 }]) {
+        const { msg, text } = tune(settings({ ...speak, endpoint }));
+        assert.equal("endpoint" in msg.agent.speak, false, JSON.stringify(endpoint));
+        assert.doesNotMatch(text, /evil/);
+      }
+    });
+
+    test("a speak section given as a list is pinned entry by entry, and entries that are not objects are dropped", () => {
+      const { msg, text } = tune(settings([{ ...speak, endpoint: { url: EVIL } }, { provider: { type: "eleven_labs" }, endpoint: { url: EVIL } }, "x", [{ endpoint: { url: EVIL } }]]));
+      assert.equal(msg.agent.speak.length, 2);
+      assert.ok(msg.agent.speak.every((entry: object) => !("endpoint" in entry)));
+      assert.deepEqual(msg.agent.speak[1].provider, { type: "eleven_labs" });
+      assert.doesNotMatch(text, /evil/);
+    });
+
+    test("UpdateSpeak, which replaces the speak section in the middle of a session, is pinned the same way (object and list)", () => {
+      const object = tune({ type: "UpdateSpeak", speak: { ...speak, endpoint: { url: EVIL } } });
+      assert.equal(object.msg.type, "UpdateSpeak");
+      assert.equal("endpoint" in object.msg.speak, false);
+      assert.deepEqual(object.msg.speak.provider, speak.provider);
+      assert.doesNotMatch(object.text, /evil/);
+      const list = tune({ type: "UpdateSpeak", speak: [{ ...speak, endpoint: { url: EVIL } }] });
+      assert.equal("endpoint" in list.msg.speak[0], false);
+      assert.doesNotMatch(list.text, /evil/);
+    });
+
+    test("a settings message that has a speak section but no think section is still rewritten", () => {
+      const { msg, text } = tune({ type: "Settings", agent: { language: "en", speak: { ...speak, endpoint: { url: EVIL } } } });
+      assert.equal("endpoint" in msg.agent.speak, false);
+      assert.equal(msg.agent.think, undefined, "no think section is made up");
+      assert.doesNotMatch(text, /evil/);
+    });
+
+    test("the think and speak endpoints are both pinned in one message, and the session notes are still read", () => {
+      const prompt = `You are Politik.\nSession notes:\n${JSON.stringify([{ title: "A post" }])}`;
+      const { msg, text, knowledge } = tune({ type: "Settings", agent: { think: { prompt, endpoint: { url: EVIL } }, speak: { ...speak, endpoint: { url: EVIL } } } });
+      assert.deepEqual(msg.agent.think.endpoint, { url: "https://politik.test/api/voice/think", headers: {} });
+      assert.equal("endpoint" in msg.agent.speak, false);
+      assert.deepEqual(knowledge, [{ title: "A post" }]);
+      assert.doesNotMatch(text, /evil/);
+    });
+
+    test("the shipped page's settings (a deepgram voice, no endpoint) keep their speak section as it is", () => {
+      const { msg } = tune(settings(speak));
+      assert.deepEqual(msg.agent.speak, speak);
+    });
+
+    test("a message with neither a think nor a speak section to pin is not touched", () => {
+      assert.equal(tuneSettings(JSON.stringify({ type: "Settings", agent: { language: "en" } }), ORIGIN), null);
+      assert.equal(tuneSettings(JSON.stringify({ type: "UpdateSpeak" }), ORIGIN), null);
     });
   });
 });

@@ -1,6 +1,6 @@
 // The chat screen. index.html loads this as an ES module so it can import the pure helpers in format.js. Whatever the
 // model wrote reaches the page through createElement and textContent, never through innerHTML.
-import { MAX_HISTORY_TURNS, formatAsOf, formatDay, historyTurn, parseAnswer, spokenReply, tapVoiceAnswers, voiceBusyLine } from "/format.js";
+import { MAX_HISTORY_TURNS, busyLineOf, formatAsOf, formatDay, historyTurn, parseAnswer, spokenReply, tapVoiceAnswers, voiceBusyLine } from "/format.js";
 
 const GREETING = "Hi — ask me what's going on in California or Singapore tech policy.";
 const GENERAL_LABEL = "Not from Politik's sources — unverified";
@@ -415,9 +415,10 @@ async function showVoiceAnswer(question, data) {
 }
 
 // ---- a voice session the Worker will not open -----------------------------------------------------------------
-// Each voice session spends the owner's Deepgram key, so the Worker counts it against the same limit as a question and
-// refuses one that is over it with an HTTP 429 before the socket upgrade. A browser does not tell the page why a
-// socket failed, so tapVoiceAnswers reports an agent socket that never opened and voiceBusyLine asks that address again.
+// Each voice session, listen socket and spoken reply spends the owner's Deepgram key, so the Worker counts it against the
+// same limit as a question and refuses one that is over it with an HTTP 429. A spoken reply sees the 429 as it is. A
+// browser does not tell the page why a socket failed, so tapVoiceAnswers reports an agent socket that never opened (and
+// the plain Talk button checks its own listen socket), and voiceBusyLine asks that address again.
 
 let voiceRefusal = null; // the check on the last agent socket that failed to open: resolves to the busy line, or ""
 
@@ -497,14 +498,16 @@ function mountFallbackTalk(host) {
     socket = null;
   }
 
-  function failOnce() {
+  // `line` is the busy line when the Worker refused the listen socket because Politik is busy; else the usual error.
+  function failOnce(line) {
     cleanupMic();
     closeSocket();
     busy = false;
     setLabel("Talk");
     talkBtn.disabled = false;
     showTranscript();
-    appendError();
+    if (line) showVoiceBusy(line);
+    else appendError();
   }
 
   function downsample(buffer, inRate, outRate) {
@@ -535,6 +538,11 @@ function mountFallbackTalk(host) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: spoken }),
     });
+    if (res.status === 429) {
+      // Busy: the answer is already on screen, so it is only the voice that is held back.
+      await showVoiceBusy(await busyLineOf(res));
+      return;
+    }
     if (!res.ok) throw new Error("speak");
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
@@ -597,6 +605,8 @@ function mountFallbackTalk(host) {
     talkBtn.disabled = true;
     heard = "";
     setLabel("Listening");
+    let listenHref = "";
+    let opened = false;
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -607,6 +617,7 @@ function mountFallbackTalk(host) {
       });
       const listenUrl = new URL("/api/voice/listen", window.location.href);
       listenUrl.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      listenHref = listenUrl.href;
       socket = new WebSocket(listenUrl.href);
       socket.binaryType = "arraybuffer";
 
@@ -615,6 +626,7 @@ function mountFallbackTalk(host) {
           reject(new Error("connect"));
         }, 8000);
         socket.onopen = function () {
+          opened = true;
           clearTimeout(timer);
           resolve();
         };
@@ -671,7 +683,17 @@ function mountFallbackTalk(host) {
         if (busy && talkBtn.textContent === "Listening" && !heard) failOnce();
       }, 12000);
     } catch (err) {
-      failOnce();
+      // A listen socket that never opened may have been refused because Politik is busy; a browser cannot say, so ask.
+      // The failed handshake's close event must not report a second failure while that check runs.
+      if (socket) socket.onclose = null;
+      cleanupMic();
+      let line = "";
+      if (listenHref && !opened) {
+        line = await voiceBusyLine(listenHref, function (target, init) {
+          return fetch(target, init);
+        });
+      }
+      failOnce(line);
     }
   });
 }

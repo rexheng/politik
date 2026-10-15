@@ -126,8 +126,26 @@ describe("a voice session the Worker refuses because Politik is busy", () => {
     assert.match(mount, /function swapInFallback\(\) \{[\s\S]*?mountFallbackTalk\(host\);/);
   });
 
+  test("the plain Talk button: a listen socket that never opened is checked for a busy refusal, and the line is shown instead of the error", () => {
+    const talk = /function mountFallbackTalk[\s\S]*?\nfunction mountVoice/.exec(js)![0];
+    assert.match(talk, /function failOnce\(line\)[\s\S]*?if \(line\) showVoiceBusy\(line\);\s*else appendError\(\);/);
+    const click = /talkBtn\.addEventListener\("click"[\s\S]*?\n  \}\);/.exec(talk)![0];
+    assert.match(click, /listenHref = listenUrl\.href/);
+    assert.match(click, /voiceBusyLine\(listenHref,/, "the same plain GET to the socket's address");
+    assert.match(click, /opened = true/, "a socket that opened was not refused");
+    const caught = click.slice(click.lastIndexOf("} catch (err) {"));
+    assert.ok(caught.indexOf("socket.onclose = null") < caught.indexOf("voiceBusyLine("), "the failed handshake's close event must not report a second failure while the check runs");
+    assert.match(caught, /failOnce\(line\)/);
+  });
+
+  test("the plain Talk button: a spoken reply refused with a 429 shows the busy line, and the answer already on screen stays", () => {
+    const play = /async function playReply[\s\S]*?\n  }\n/.exec(js)![0];
+    assert.match(play, /res\.status === 429[\s\S]*?showVoiceBusy\(await busyLineOf\(res\)\)/);
+    assert.ok(play.indexOf("res.status === 429") < play.indexOf("if (!res.ok)"), "checked before the generic failure");
+  });
+
   test("the service worker has a new cache name for the changed shell", () => {
-    assert.ok(Number(/politik-shell-v(\d+)/.exec(read("sw.js"))?.[1]) >= 27);
+    assert.ok(Number(/politik-shell-v(\d+)/.exec(read("sw.js"))?.[1]) >= 28);
   });
 });
 

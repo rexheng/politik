@@ -21,6 +21,16 @@ function failResponse(): Response {
   return json(failureResponse());
 }
 
+/**
+ * The 429 for a caller who is over the limit on something that spends the owner's Deepgram key (a voice session, a listen
+ * socket, a spoken reply), or null when the request may go ahead. It is the same limiter, key and skip rules as a question.
+ * Any GET to a socket's address is counted and answered this way, with or without an `Upgrade` header: the page, which
+ * cannot see why a socket was refused, asks that way.
+ */
+async function voiceBusy(request: Request, env: Env): Promise<Response | null> {
+  return (await overLimit(env, limitKey(request))) ? json({ error: BUSY_REPLY }, 429) : null;
+}
+
 async function handleAsk(request: Request, env: Env): Promise<Response> {
   try {
     // Over the limit is an answer, not an error (status 200), so the page shows it like any other reply.
@@ -77,9 +87,9 @@ export default {
       if (url.pathname === "/api/voice/v1/agent/converse" && request.method === "GET") {
         const key = env.DEEPGRAM_API_KEY?.trim();
         if (!key) return json({ error: "Voice is unavailable." }, 503);
-        // Each session the Worker opens spends the owner's Deepgram key, so the upgrade is counted like a question. This
-        // check also answers a plain GET to the same address: the page, which cannot see why a socket was refused, asks that way.
-        if (await overLimit(env, limitKey(request))) return json({ error: BUSY_REPLY }, 429);
+        // Each session the Worker opens spends the owner's Deepgram key, so the upgrade is counted like a question.
+        const busy = await voiceBusy(request, env);
+        if (busy) return busy;
         try {
           return await proxyAgent(request, key, env);
         } catch {
@@ -94,6 +104,8 @@ export default {
       if (url.pathname === "/api/voice/listen" && request.method === "GET") {
         const key = env.DEEPGRAM_API_KEY?.trim();
         if (!key) return json({ error: "Voice is unavailable." }, 503);
+        const busy = await voiceBusy(request, env);
+        if (busy) return busy;
         try {
           return await proxyListen(request, key);
         } catch {
@@ -104,6 +116,8 @@ export default {
       if (url.pathname === "/api/voice/speak" && request.method === "POST") {
         const key = env.DEEPGRAM_API_KEY?.trim();
         if (!key) return json({ error: "Voice is unavailable." }, 503);
+        const busy = await voiceBusy(request, env);
+        if (busy) return busy;
         const body = (await request.json()) as { text?: unknown };
         const text = typeof body.text === "string" ? body.text : "";
         return speak(key, text);
