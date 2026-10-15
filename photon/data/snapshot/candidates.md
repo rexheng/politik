@@ -1,4 +1,4 @@
-# Policy dataset: candidate list (DRAFT, awaiting owner approval)
+# Policy dataset: candidate list - Approved 2026-10-15 (owner delegated approval to the orchestrator; ruling R5)
 
 - **Drafted:** 2026-10-15 by the research step of the curation gate (spec §5.1, `docs/superpowers/specs/2026-10-15-policy-dataset-design.md`).
 - **Scope:** tech only. Topics: ai-governance, data-centres, privacy-data, cybersecurity, online-safety, gov-tech-procurement, digital-infrastructure.

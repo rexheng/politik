@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { main, parseArgs } from "../../photon/scripts/snapshot/seed-d1.ts";
+import { countFromWranglerJson, main, parseArgs } from "../../photon/scripts/snapshot/seed-d1.ts";
 import type { Manifest, Passage, PolicyRecord } from "../../photon/src/data/schema.ts";
 import { snapshotStatements, toSqlFile } from "../../photon/src/data/seed.ts";
 
@@ -30,7 +30,7 @@ function snapshotDir(name: string, files: { policies?: unknown; passages?: unkno
 }
 
 /** Runs the command with the wrangler calls recorded instead of made. `status` is each call's exit code. */
-async function run(argv: string[], status: (call: number) => number = () => 0) {
+async function run(argv: string[], status: (call: number) => number = () => 0, count?: (target: "--local" | "--remote") => number | undefined) {
   const calls: string[][] = [];
   const lines: string[] = [];
   const errors: string[] = [];
@@ -40,6 +40,7 @@ async function run(argv: string[], status: (call: number) => number = () => 0) {
       calls.push(args);
       return status(calls.length);
     },
+    ...(count ? { count } : {}),
     log: (line) => lines.push(line),
     error: (line) => errors.push(line),
   });
@@ -143,5 +144,75 @@ describe("seed:d1", () => {
     assert.equal(r.code, 1);
     assert.deepEqual(r.calls, []);
     assert.match(r.err, /Usage: pnpm seed:d1/);
+  });
+});
+
+describe("seed:d1 warns when the snapshot is much smaller than the database it replaces (I5)", () => {
+  test("fewer than 75% of the records now in the database: a warning, and the seed still runs", async () => {
+    const asked: string[] = [];
+    const r = await run(["--dir", fixtureDir], undefined, (target) => (asked.push(target), 9)); // the fixture has 6 records: 6 < 6.75
+    assert.equal(r.code, 0, r.err);
+    assert.match(r.err, /Warning: this snapshot has 6 records, fewer than 75% of the 9 now in politik \(local\)/);
+    assert.equal(r.calls.length, 2, "the migration and the seed are still run");
+    assert.deepEqual(asked, ["--local"]);
+  });
+
+  test("it asks the database that is being seeded, and says which", async () => {
+    const asked: string[] = [];
+    const r = await run(["--remote", "--dir", fixtureDir], undefined, (target) => (asked.push(target), 200));
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(asked, ["--remote"]);
+    assert.match(r.err, /200 now in politik \(remote\)/);
+  });
+
+  test("exactly 75%, a bigger snapshot, and an empty database give no warning", async () => {
+    for (const before of [8, 6, 3, 0]) {
+      const r = await run(["--dir", fixtureDir], undefined, () => before);
+      assert.equal(r.code, 0, r.err);
+      assert.equal(r.err, "", `a database with ${before} records`);
+    }
+  });
+
+  test("a count that cannot be read, or that throws, is skipped without a warning or a failure", async () => {
+    for (const count of [() => undefined, () => { throw new Error("wrangler is not logged in"); }]) {
+      const r = await run(["--dir", fixtureDir], undefined, count);
+      assert.equal(r.code, 0, r.err);
+      assert.equal(r.err, "");
+      assert.equal(r.calls.length, 2);
+    }
+  });
+
+  test("the count is read before anything is changed", async () => {
+    const order: string[] = [];
+    const calls: string[][] = [];
+    await main(["--dir", fixtureDir], {
+      root,
+      exec: (args) => (calls.push(args), order.push(args[1]!), 0),
+      count: () => (order.push("count"), 100),
+      log: () => undefined,
+      error: () => undefined,
+    });
+    assert.deepEqual(order, ["count", "migrations", "execute"]);
+  });
+
+  test("nothing is read when the wrangler calls are replaced and no count is given", async () => {
+    const r = await run(["--dir", fixtureDir]);
+    assert.equal(r.err, "");
+  });
+});
+
+describe("countFromWranglerJson", () => {
+  test("reads the count from wrangler's JSON answer, with or without text before it", () => {
+    const answer = JSON.stringify([{ results: [{ n: 42 }], success: true, meta: {} }]);
+    assert.equal(countFromWranglerJson(answer), 42);
+    assert.equal(countFromWranglerJson(`⛅️ wrangler 4.0\n${answer}\n`), 42);
+    assert.equal(countFromWranglerJson(`\u001b[33m▲ [WARNING] Proxy environment variables detected.\u001b[0m\n\n${answer}`), 42, "colour codes hold a [");
+    assert.equal(countFromWranglerJson(JSON.stringify([{ results: [{ n: 0 }] }])), 0);
+  });
+
+  test("anything else is undefined", () => {
+    for (const bad of ["", "no json", "[]", "[{}]", JSON.stringify([{ results: [] }]), JSON.stringify([{ results: [{ n: "7" }] }]), JSON.stringify([{ results: [{ n: -1 }] }]), "{ broken ["]) {
+      assert.equal(countFromWranglerJson(bad), undefined, bad);
+    }
   });
 });
