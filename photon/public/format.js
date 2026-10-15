@@ -208,13 +208,29 @@ export function isVoiceSocketUrl(url, base) {
   }
 }
 
+/** What the Worker says when it will not open a voice session (or answer a question) because the caller is over the limit: the same line as photon/src/limit.ts. */
+export const BUSY_LINE = "Politik is busy — please try again in a minute.";
+
+/** True when `url` is the voice agent's socket (the one that opens a Deepgram agent session), not the listen-only socket of the plain Talk button. */
+function isVoiceAgentUrl(url, base) {
+  try {
+    return new URL(String(url), base).pathname.startsWith("/api/voice/v1/agent/");
+  } catch (err) {
+    return false;
+  }
+}
+
 /**
  * Makes every socket that `target` (the window) opens to /api/voice/... also report the answer frames it receives to
  * `onAnswer(question, response)`, by replacing `target.WebSocket` with a subclass. It changes nothing else about a
  * socket, and a handler that throws does not disturb it. It must run before the voice widget connects. Returns false
  * when there is no WebSocket to wrap or it was already wrapped.
+ *
+ * With `onFailed(socketUrl)`, an agent socket that fails without ever opening is reported once, with its address. The
+ * Worker refuses a session over the rate limit with an HTTP 429 before the upgrade, and a browser tells the page nothing
+ * of why a handshake failed, so `voiceBusyLine` asks the address again to find out.
  */
-export function tapVoiceAnswers(target, base, onAnswer) {
+export function tapVoiceAnswers(target, base, onAnswer, onFailed) {
   const Native = target && target.WebSocket;
   if (typeof Native !== "function" || Native.politikTapped) return false;
   class TappedWebSocket extends Native {
@@ -228,9 +244,46 @@ export function tapVoiceAnswers(target, base, onAnswer) {
           onAnswer(answer.question, answer.response);
         } catch (err) {}
       });
+      if (typeof onFailed !== "function" || !isVoiceAgentUrl(url, base)) return;
+      let opened = false;
+      let reported = false;
+      const failed = function () {
+        if (opened || reported) return;
+        reported = true;
+        try {
+          onFailed(new URL(String(url), base).href);
+        } catch (err) {}
+      };
+      this.addEventListener("open", function () {
+        opened = true;
+      });
+      this.addEventListener("error", failed);
+      this.addEventListener("close", failed);
     }
   }
   TappedWebSocket.politikTapped = true;
   target.WebSocket = TappedWebSocket;
   return true;
+}
+
+/**
+ * The line to show when the Worker refused to open the voice session `socketUrl` because Politik is busy, else "". The
+ * Worker answers an over-limit caller with a 429 and a JSON `error` to any request for that address, so a plain GET
+ * (`doFetch`, the page's fetch) finds out what the socket's failed handshake cannot say. Any other answer, or none, is "".
+ */
+export async function voiceBusyLine(socketUrl, doFetch) {
+  try {
+    const url = new URL(String(socketUrl));
+    url.protocol = url.protocol === "wss:" ? "https:" : url.protocol === "ws:" ? "http:" : url.protocol;
+    const res = await doFetch(url.href, { cache: "no-store" });
+    if (!res || res.status !== 429) return "";
+    let line = "";
+    try {
+      const body = await res.json();
+      if (body && typeof body.error === "string") line = body.error.trim();
+    } catch (err) {}
+    return line || BUSY_LINE;
+  } catch (err) {
+    return "";
+  }
 }

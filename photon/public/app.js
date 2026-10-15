@@ -1,6 +1,6 @@
 // The chat screen. index.html loads this as an ES module so it can import the pure helpers in format.js. Whatever the
 // model wrote reaches the page through createElement and textContent, never through innerHTML.
-import { MAX_HISTORY_TURNS, formatAsOf, formatDay, historyTurn, parseAnswer, spokenReply, tapVoiceAnswers } from "/format.js";
+import { MAX_HISTORY_TURNS, formatAsOf, formatDay, historyTurn, parseAnswer, spokenReply, tapVoiceAnswers, voiceBusyLine } from "/format.js";
 
 const GREETING = "Hi — ask me what's going on in California or Singapore tech policy.";
 const GENERAL_LABEL = "Not from Politik's sources — unverified";
@@ -414,6 +414,32 @@ async function showVoiceAnswer(question, data) {
   }
 }
 
+// ---- a voice session the Worker will not open -----------------------------------------------------------------
+// Each voice session spends the owner's Deepgram key, so the Worker counts it against the same limit as a question and
+// refuses one that is over it with an HTTP 429 before the socket upgrade. A browser does not tell the page why a
+// socket failed, so tapVoiceAnswers reports an agent socket that never opened and voiceBusyLine asks that address again.
+
+let voiceRefusal = null; // the check on the last agent socket that failed to open: resolves to the busy line, or ""
+
+function voiceSocketFailed(url) {
+  const check = voiceBusyLine(url, function (target, init) {
+    return fetch(target, init);
+  });
+  voiceRefusal = check;
+  check.then(function (line) {
+    if (line) showVoiceBusy(line);
+  });
+}
+
+async function showVoiceBusy(line) {
+  showTranscript();
+  try {
+    await appendPhoton(readReply({ reply: line, mode: "fallback", citations: [], followUps: [], asOf: "" }));
+  } catch (err) {
+    appendError();
+  }
+}
+
 function mountFallbackTalk(host) {
   host.innerHTML = "";
   const talkBtn = document.createElement("button");
@@ -658,6 +684,24 @@ function mountVoice() {
   function useFallback() {
     if (voiceFailed) return;
     voiceFailed = true;
+    // A session the Worker refused because Politik is busy is not a broken voice: the line is already in the transcript
+    // (voiceSocketFailed), and the orb stays so the person can try again in a minute.
+    const refusal = voiceRefusal;
+    voiceRefusal = null;
+    if (!refusal) {
+      swapInFallback();
+      return;
+    }
+    refusal.then(function (line) {
+      if (line) {
+        voiceFailed = false;
+        return;
+      }
+      swapInFallback();
+    });
+  }
+
+  function swapInFallback() {
     try {
       host.innerHTML = "";
     } catch (err) {}
@@ -751,7 +795,7 @@ function mountVoice() {
 }
 
 // The tap must be in place before the widget opens its socket.
-tapVoiceAnswers(window, window.location.href, showVoiceAnswer);
+tapVoiceAnswers(window, window.location.href, showVoiceAnswer, voiceSocketFailed);
 mountVoice();
 
 form.addEventListener("submit", async function (event) {

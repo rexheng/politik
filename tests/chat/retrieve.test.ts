@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { MAX_PASSAGE_CHARS, MAX_SOURCES, normaliseBill, retrieve } from "../../photon/src/chat/retrieve.ts";
+import { MAX_PASSAGE_CHARS, MAX_SOURCES, normaliseBill, retrieve, windowText } from "../../photon/src/chat/retrieve.ts";
 import type { Route, Source } from "../../photon/src/chat/types.ts";
 import type { SourceItem } from "../../photon/src/contracts.ts";
 import type { D1Like, D1StatementLike } from "../../photon/src/data/d1.ts";
@@ -785,6 +785,46 @@ describe("I5: a search hit shows the part of the passage that matched", () => {
     const { sources } = await retrieve(mk({ intent: "explain", search: "bulk record 1" }), db, deps);
     const hit = sources.find((s) => s.record!.id === "ca-bulk-1")!;
     assert.ok(hit.passage!.text.startsWith("The agency reviews routine"));
+  });
+});
+
+describe("a term at the edge of the first 900 characters is not cut off", () => {
+  /** `n` characters of filler that end in a space, so the next word starts at character `n`. */
+  const lead = (n: number) => {
+    let s = "";
+    while (s.length < n) s += "word ";
+    return `${s.slice(0, n - 1)} `;
+  };
+  /** A 2,600-character passage with `term` starting at character `at`. */
+  const passageWith = (term: string, at: number) => {
+    const head = `${lead(at)}${term} tail`;
+    return `${head}${lead(2600 - head.length - 1)}.`;
+  };
+
+  test("a term that starts at character 893 of a 2,600-character passage appears whole in the window", () => {
+    const text = passageWith("sanctuary", 893);
+    assert.equal(text.length, 2600);
+    assert.equal(text.indexOf("sanctuary"), 893);
+    const shown = windowText(text, ["sanctuary"]);
+    assert.match(shown, /(?<![a-z])sanctuary(?![a-z])/, shown.slice(-80));
+    assert.ok(shown.length <= MAX_PASSAGE_CHARS);
+    assert.ok(shown.startsWith("…"), "the window moved on, so it says it is cut at the start");
+  });
+
+  test("a term that starts anywhere from character 880 to 905 appears whole, whatever its length", () => {
+    for (const term of ["zebra", "registry", "sanctuary", "regulators"]) {
+      for (let at = 880; at <= 905; at++) {
+        const shown = windowText(passageWith(term, at), [term]);
+        assert.match(shown, new RegExp(`(?<![a-z])${term}(?![a-z])`), `${term} at ${at}: ${shown.slice(-60)}`);
+        assert.ok(shown.length <= MAX_PASSAGE_CHARS, `${term} at ${at}`);
+      }
+    }
+  });
+
+  test("a term that sits well inside the first 900 characters still leaves the start of the passage", () => {
+    const shown = windowText(passageWith("sanctuary", 700), ["sanctuary"]);
+    assert.ok(shown.startsWith("word word"), shown.slice(0, 40));
+    assert.ok(shown.includes("sanctuary tail"));
   });
 });
 

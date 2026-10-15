@@ -148,15 +148,17 @@ function snapToWord(text: string, start: number): number {
  */
 export function windowText(text: string, terms: string[], max = MAX_PASSAGE_CHARS): string {
   if (text.length <= max) return text;
-  const found = terms.map((term) => termStarts(text, term));
-  if (found.every((list) => list.length === 0)) return clipText(text, max);
+  const found = terms.map((term) => ({ length: term.length, starts: termStarts(text, term) }));
+  if (found.every((f) => f.starts.length === 0)) return clipText(text, max);
 
   const starts = new Set<number>([0]);
-  for (const list of found) for (const at of list) starts.add(snapToWord(text, Math.max(0, at - WINDOW_LEAD_CHARS)));
+  for (const f of found) for (const at of f.starts) starts.add(snapToWord(text, Math.max(0, at - WINDOW_LEAD_CHARS)));
   let best = { start: 0, covered: -1 };
   for (const start of [...starts].sort((a, b) => a - b)) {
     const room = max - (start > 0 ? 1 : 0) - 1;
-    const covered = found.filter((list) => list.some((at) => at >= start && at < start + room)).length;
+    // A term counts only when all of it fits, with a character to spare: the cut backs off to the last space, so a word that
+    // ends exactly at the edge is dropped with the partial word it would have been.
+    const covered = found.filter((f) => f.starts.some((at) => at >= start && at + f.length < start + room)).length;
     if (covered > best.covered) best = { start, covered };
   }
   if (best.start === 0) return clipText(text, max);

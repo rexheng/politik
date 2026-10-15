@@ -84,7 +84,7 @@ describe("I3: a spoken question runs the pipeline once", () => {
   });
 
   test("the answer frames are read off the voice socket before the widget connects, and shown without asking", () => {
-    const tap = js.indexOf("tapVoiceAnswers(window, window.location.href, showVoiceAnswer);");
+    const tap = js.indexOf("tapVoiceAnswers(window, window.location.href, showVoiceAnswer, voiceSocketFailed);");
     assert.ok(tap > 0);
     assert.ok(tap < js.indexOf("\nmountVoice();"), "the tap is installed before the widget starts");
     const show = /async function showVoiceAnswer[\s\S]*?\n}\n/.exec(js)![0];
@@ -96,6 +96,38 @@ describe("I3: a spoken question runs the pipeline once", () => {
   test("the spoken text of the plain Talk button names the records of a fallback, as the Worker does", () => {
     assert.match(js, /spokenReply\(view\)/);
     assert.doesNotMatch(js, /spokenText/);
+  });
+});
+
+describe("a voice session the Worker refuses because Politik is busy", () => {
+  const js = read("app.js");
+
+  test("the page learns of a socket that never opened, and asks the same address for the reason with its own fetch", () => {
+    assert.match(js, /import\s*\{[^}]*\bvoiceBusyLine\b[^}]*\}\s*from\s*"\/format\.js"/);
+    const failed = /function voiceSocketFailed[\s\S]*?\n}\n/.exec(js)![0];
+    assert.match(failed, /voiceBusyLine\(url,/);
+    assert.match(failed, /fetch\(/);
+    assert.match(failed, /showVoiceBusy\(line\)/, "the line is shown only when there is one");
+  });
+
+  test("the busy line is shown as an ordinary reply in the transcript, and asks for nothing", () => {
+    const show = /async function showVoiceBusy[\s\S]*?\n}\n/.exec(js)![0];
+    assert.match(show, /readReply\(/);
+    assert.match(show, /appendPhoton\(/);
+    assert.doesNotMatch(show, /postAsk|fetch\(|rememberTurn/, "it is not a turn of the conversation");
+  });
+
+  test("the plain Talk button does not replace the orb for a refused session: the person can try again in a minute", () => {
+    const mount = /function mountVoice\(\) \{[\s\S]*?\n}\n/.exec(js)![0];
+    const fallback = /function useFallback\(\) \{[\s\S]*?\n  }\n/.exec(mount)![0];
+    assert.match(fallback, /voiceRefusal/, "it waits for the check on the failed socket");
+    assert.match(fallback, /if \(line\) \{\s*voiceFailed = false;\s*return;\s*\}/, "busy: no fallback, and a later real failure can still use it");
+    assert.ok(fallback.lastIndexOf("swapInFallback()") > fallback.indexOf("if (line)"), "the plain Talk button is mounted after the check, and only when the session was not refused as busy");
+    assert.match(mount, /function swapInFallback\(\) \{[\s\S]*?mountFallbackTalk\(host\);/);
+  });
+
+  test("the service worker has a new cache name for the changed shell", () => {
+    assert.ok(Number(/politik-shell-v(\d+)/.exec(read("sw.js"))?.[1]) >= 27);
   });
 });
 

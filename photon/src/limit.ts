@@ -1,7 +1,7 @@
 // Rate limiting for the public endpoints that run the chat pipeline (/api/ask, /api/voice/think, the voice agent's
 // function call and /telegram). Each run costs Groq tokens, and the free tier allows only 8,000 a minute, so one caller
 // must not be able to use them all. The limit is the Workers Rate Limiting binding `ASK_LIMITER` (wrangler.jsonc),
-// keyed on the caller's IP address as Cloudflare reports it in `CF-Connecting-IP`.
+// keyed on the caller's IP address as Cloudflare reports it in `CF-Connecting-IP` (Telegram updates: on the chat id).
 // With no binding (tests), no IP, or a local run (`wrangler dev` on localhost simulates the binding, so it would stop
 // a developer, or the eval, after ten questions) there is nothing to count, so nothing is limited.
 import type { ChatResponse } from "./chat/types.ts";
@@ -34,8 +34,18 @@ export function limitKey(request: Request): string {
 }
 
 /**
- * True when the caller `key` (an IP address) has used up its allowance. With no limiter or no key it is false, and so is
- * a limiter that fails: a fault in the rate limiter must not turn every question away.
+ * The key to count a Telegram update against: the chat it came from, `telegram:<chat id>`. Telegram sends every user's
+ * updates from its own few addresses, so the address would make all of them share one allowance. With no usable chat id
+ * it is the address, as for any other request; a local request is never limited.
+ */
+export function telegramLimitKey(request: Request, chatId: unknown): string {
+  if (isLocal(request)) return "";
+  return typeof chatId === "number" && Number.isFinite(chatId) ? `telegram:${chatId}` : limitKey(request);
+}
+
+/**
+ * True when the caller `key` (an IP address, or `telegram:<chat id>`) has used up its allowance. With no limiter or no
+ * key it is false, and so is a limiter that fails: a fault in the rate limiter must not turn every question away.
  */
 export async function overLimit(env: { ASK_LIMITER?: RateLimiter }, key: string): Promise<boolean> {
   const limiter = env.ASK_LIMITER;

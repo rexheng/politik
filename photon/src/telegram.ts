@@ -1,7 +1,7 @@
 import { ask, type Env } from "./ask.ts";
 import { GENERAL_LABEL } from "./chat/index.ts";
 import type { ChatResponse } from "./chat/types.ts";
-import { BUSY_REPLY, limitKey, overLimit } from "./limit.ts";
+import { BUSY_REPLY, overLimit, telegramLimitKey } from "./limit.ts";
 
 type TelegramUpdate = {
   message?: {
@@ -55,8 +55,14 @@ export async function handleTelegram(request: Request, env: Env): Promise<Respon
     return new Response("ok");
   }
 
-  if (await overLimit(env, limitKey(request))) {
-    await sendMessage(token, chatId, BUSY_REPLY);
+  if (await overLimit(env, telegramLimitKey(request, chatId))) {
+    try {
+      await sendMessage(token, chatId, BUSY_REPLY);
+    } catch (error) {
+      // Telegram sends an update again when it gets an error back, so a busy reply that cannot be sent is not an error.
+      // Only the error's name is logged: the request URL holds the bot token.
+      console.warn("telegram: could not send the busy reply", error instanceof Error ? error.name : "");
+    }
     return new Response("ok");
   }
 

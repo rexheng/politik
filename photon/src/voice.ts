@@ -48,15 +48,46 @@ const POLITIK_FN = {
   },
 };
 
-function publicHttps(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  const url = (value as { url?: unknown }).url;
-  if (typeof url !== "string") return false;
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * The think endpoint the Worker offers Deepgram: its own /api/voice/think and nothing the page names. It exists only on
+ * an https origin, because Deepgram's servers call it; a local `wrangler dev` (http) has none.
+ */
+function ownThinkEndpoint(origin: string): { url: string; headers: Record<string, string> } | null {
   try {
-    return new URL(url).protocol === "https:";
+    const url = new URL("/api/voice/think", origin);
+    return url.protocol === "https:" ? { url: url.href, headers: {} } : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+const INSTRUCTION =
+  "When the person asks a real question, call politik with that question. Speak the function result as the whole reply. Do not answer a real question from your own knowledge.";
+
+/**
+ * Makes one `think` section safe to hand to the owner's Deepgram agent, whatever the page put in it, and returns the
+ * session notes found in its prompt. The agent only ever calls the Worker:
+ * - A page that asks for a custom think endpoint (any `endpoint`, whatever it names) is given the Worker's own
+ *   /api/voice/think, with no headers of its own, and none of its functions: a function can carry an `endpoint` that
+ *   Deepgram would call.
+ * - Otherwise (the page asks for none, or the origin is not reachable from Deepgram) the agent gets the `politik` function,
+ *   which it calls on this socket, and the prompt tells it to use it.
+ */
+function pinThink(section: Record<string, unknown>, origin: string): unknown {
+  const prompt = typeof section.prompt === "string" ? section.prompt : "";
+  const knowledge = knowledgeFromPrompt(prompt);
+  const own = "endpoint" in section ? ownThinkEndpoint(origin) : null;
+  if (own) {
+    section.endpoint = own;
+    delete section.functions;
+    return knowledge;
+  }
+  delete section.endpoint;
+  section.functions = [POLITIK_FN];
+  section.prompt = prompt.includes("call politik") ? prompt : `${prompt}\n${INSTRUCTION}`.trim();
+  return knowledge;
 }
 
 function knowledgeFromPrompt(prompt: string): unknown {
@@ -71,30 +102,28 @@ function knowledgeFromPrompt(prompt: string): unknown {
   return undefined;
 }
 
-function tuneSettings(raw: string): { text: string; knowledge: unknown } | null {
+/**
+ * The page's message that sets the agent's think section, rewritten so that the agent only ever calls the Worker (see
+ * `pinThink`), with the session notes from its prompt. That is `Settings` and also `UpdateThink`, which replaces the whole
+ * think section (model, prompt, endpoint, functions) in the middle of a session and would otherwise undo the pin. Null for
+ * any other message, which goes on unchanged. `origin` is the Worker's own origin, taken from the request that opened the socket.
+ */
+export function tuneSettings(raw: string, origin: string): { text: string; knowledge: unknown } | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
     return null;
   }
-  if (!parsed || typeof parsed !== "object") return null;
-  const msg = parsed as { type?: unknown; agent?: unknown };
-  if (msg.type !== "Settings" || !msg.agent || typeof msg.agent !== "object" || Array.isArray(msg.agent)) {
-    return null;
-  }
-  const think = (msg.agent as { think?: unknown }).think;
-  if (!think || typeof think !== "object" || Array.isArray(think)) return null;
-  const record = think as { endpoint?: unknown; functions?: unknown; prompt?: unknown };
-  const prompt = typeof record.prompt === "string" ? record.prompt : "";
-  const knowledge = knowledgeFromPrompt(prompt);
-  if (publicHttps(record.endpoint)) return { text: raw, knowledge };
-  delete record.endpoint;
-  record.functions = [POLITIK_FN];
-  const instruction =
-    "When the person asks a real question, call politik with that question. Speak the function result as the whole reply. Do not answer a real question from your own knowledge.";
-  record.prompt = prompt.includes("call politik") ? prompt : `${prompt}\n${instruction}`.trim();
-  return { text: JSON.stringify(msg), knowledge };
+  if (!isRecord(parsed)) return null;
+  let holder: Record<string, unknown> | null = null;
+  if (parsed.type === "Settings") holder = isRecord(parsed.agent) ? parsed.agent : null;
+  else if (parsed.type === "UpdateThink") holder = parsed;
+  if (!holder) return null;
+  const sections = Array.isArray(holder.think) ? holder.think : [holder.think];
+  if (sections.length === 0 || !sections.every(isRecord)) return null;
+  const notes = sections.map((section) => pinThink(section, origin)); // every section is pinned, not just the first
+  return { text: JSON.stringify(parsed), knowledge: notes.find((found) => found !== undefined) };
 }
 
 function questionFromArguments(raw: unknown): string {
@@ -247,13 +276,14 @@ async function proxySocket(
     });
   };
 
+  const origin = new URL(request.url).origin;
   let sessionKnowledge: unknown;
   const session: FunctionCallSession = { client: server, ip: limitKey(request), history: [] };
   server.addEventListener("message", (event) => {
     try {
       if (typeof event.data === "string") {
         if (env) {
-          const tuned = tuneSettings(event.data);
+          const tuned = tuneSettings(event.data, origin);
           if (tuned) {
             sessionKnowledge = tuned.knowledge;
             remote.send(tuned.text);

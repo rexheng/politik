@@ -3,7 +3,7 @@ import { failureResponse, normalizeChatRequest } from "./chat/index.ts";
 import { loadMap } from "./map.ts";
 import { BLUESKY_URL, GROUP_URL, buildSaying } from "./saying.ts";
 import { loadCatalog } from "./catalog.ts";
-import { busyResponse, limitKey, overLimit } from "./limit.ts";
+import { BUSY_REPLY, busyResponse, limitKey, overLimit } from "./limit.ts";
 import { proxyAgent, proxyListen, speak, think } from "./voice.ts";
 
 export type { Env };
@@ -77,6 +77,9 @@ export default {
       if (url.pathname === "/api/voice/v1/agent/converse" && request.method === "GET") {
         const key = env.DEEPGRAM_API_KEY?.trim();
         if (!key) return json({ error: "Voice is unavailable." }, 503);
+        // Each session the Worker opens spends the owner's Deepgram key, so the upgrade is counted like a question. This
+        // check also answers a plain GET to the same address: the page, which cannot see why a socket was refused, asks that way.
+        if (await overLimit(env, limitKey(request))) return json({ error: BUSY_REPLY }, 429);
         try {
           return await proxyAgent(request, key, env);
         } catch {

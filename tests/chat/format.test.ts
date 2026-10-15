@@ -4,6 +4,7 @@ import { describe, test } from "node:test";
 import { FALLBACK_REPLY } from "../../photon/src/chat/index.ts";
 import { toSpokenResponse } from "../../photon/src/chat/spoken.ts";
 import type { Citation } from "../../photon/src/chat/types.ts";
+import { BUSY_REPLY } from "../../photon/src/limit.ts";
 import { VOICE_ANSWER_TYPE as SERVER_VOICE_ANSWER_TYPE } from "../../photon/src/voice.ts";
 
 // photon/public/format.js is a browser ES module with no DOM in it, so Node can import it as it is. It has no type
@@ -19,10 +20,12 @@ type Format = {
   spokenReply(view: { reply: string; mode?: string; citations?: { title?: string; shortTitle?: string }[] }, max?: number): string;
   voiceAnswerOf(data: unknown): { question: string; response: Record<string, unknown> } | null;
   isVoiceSocketUrl(url: string, base?: string): boolean;
-  tapVoiceAnswers(target: { WebSocket?: unknown }, base: string, onAnswer: (question: string, response: Record<string, unknown>) => void): boolean;
+  tapVoiceAnswers(target: { WebSocket?: unknown }, base: string, onAnswer: (question: string, response: Record<string, unknown>) => void, onFailed?: (socketUrl: string) => void): boolean;
+  voiceBusyLine(socketUrl: string, doFetch: (url: string, init?: object) => Promise<{ status: number; json(): Promise<unknown> }>): Promise<string>;
+  BUSY_LINE: string;
   VOICE_ANSWER_TYPE: string;
 };
-const { parseAnswer, formatAsOf, historyTurn, spokenText, formatDay, spokenReply, voiceAnswerOf, isVoiceSocketUrl, tapVoiceAnswers, VOICE_ANSWER_TYPE } = (await import(new URL("../../photon/public/format.js", import.meta.url).href)) as Format;
+const { parseAnswer, formatAsOf, historyTurn, spokenText, formatDay, spokenReply, voiceAnswerOf, isVoiceSocketUrl, tapVoiceAnswers, voiceBusyLine, BUSY_LINE, VOICE_ANSWER_TYPE } = (await import(new URL("../../photon/public/format.js", import.meta.url).href)) as Format;
 
 const text = (t: string): Inline => ({ type: "text", text: t });
 const bold = (t: string): Inline => ({ type: "bold", text: t });
@@ -258,6 +261,7 @@ describe("tapVoiceAnswers", () => {
     static CLOSING = 2;
     static instances: FakeSocket[] = [];
     listeners: ((event: { data: unknown }) => void)[] = [];
+    events: Record<string, ((event: { data: unknown }) => void)[]> = {};
     sent: unknown[] = [];
     constructor(
       public url: string,
@@ -267,6 +271,10 @@ describe("tapVoiceAnswers", () => {
     }
     addEventListener(type: string, listener: (event: { data: unknown }) => void) {
       if (type === "message") this.listeners.push(listener);
+      else (this.events[type] ??= []).push(listener);
+    }
+    fire(type: string) {
+      for (const listener of this.events[type] ?? []) listener({ data: undefined });
     }
     send(data: unknown) {
       this.sent.push(data);
@@ -335,10 +343,105 @@ describe("tapVoiceAnswers", () => {
     assert.equal(later, 1);
   });
 
+  describe("a voice session the Worker refused to open", () => {
+    const agent = "wss://politik.example/api/voice/v1/agent/converse";
+    function watch() {
+      FakeSocket.instances = [];
+      const target: { WebSocket: unknown } = { WebSocket: FakeSocket };
+      const failed: string[] = [];
+      tapVoiceAnswers(target, base, () => {}, (url) => void failed.push(url));
+      return { failed, Tapped: target.WebSocket as typeof FakeSocket };
+    }
+
+    test("an agent socket that errors and closes without ever opening is reported once, with its address", () => {
+      const { failed, Tapped } = watch();
+      const socket = new Tapped(agent, ["bearer", "proxy"]);
+      socket.fire("error");
+      socket.fire("close");
+      assert.deepEqual(failed, [agent]);
+    });
+
+    test("the address is made absolute against the page, for a socket opened with a relative one", () => {
+      const { failed, Tapped } = watch();
+      new Tapped("/api/voice/v1/agent/converse").fire("close");
+      assert.deepEqual(failed, ["https://politik.example/api/voice/v1/agent/converse"], "the browser turns https into wss; asking https is the same address");
+    });
+
+    test("a socket that opened and later closed is a finished session, not a refusal", () => {
+      const { failed, Tapped } = watch();
+      const socket = new Tapped(agent);
+      socket.fire("open");
+      socket.fire("error");
+      socket.fire("close");
+      assert.deepEqual(failed, []);
+    });
+
+    test("only the agent's socket is reported: not the listen-only socket of the plain Talk button, and not another address", () => {
+      const { failed, Tapped } = watch();
+      new Tapped("wss://politik.example/api/voice/listen").fire("close");
+      new Tapped("wss://elsewhere.example/stream").fire("close");
+      assert.deepEqual(failed, []);
+    });
+
+    test("without a handler nothing is listened for, and one that throws does not disturb the socket", () => {
+      FakeSocket.instances = [];
+      const plain: { WebSocket: unknown } = { WebSocket: FakeSocket };
+      tapVoiceAnswers(plain, base, () => {});
+      assert.deepEqual(new (plain.WebSocket as typeof FakeSocket)(agent).events, {});
+
+      const target: { WebSocket: unknown } = { WebSocket: FakeSocket };
+      tapVoiceAnswers(target, base, () => {}, () => {
+        throw new Error("boom");
+      });
+      const socket = new (target.WebSocket as typeof FakeSocket)(agent);
+      let later = 0;
+      socket.addEventListener("close", () => void later++);
+      assert.doesNotThrow(() => socket.fire("close"));
+      assert.equal(later, 1);
+    });
+  });
+
   test("it is installed once, and does nothing without a WebSocket", () => {
     const { target } = install();
     assert.equal(tapVoiceAnswers(target, base, () => {}), false, "already wrapped");
     assert.equal(tapVoiceAnswers({}, base, () => {}), false);
     assert.equal(tapVoiceAnswers(undefined as unknown as { WebSocket?: unknown }, base, () => {}), false);
+  });
+});
+
+describe("voiceBusyLine: was the voice session refused because Politik is busy?", () => {
+  const agent = "wss://politik.example/api/voice/v1/agent/converse";
+  const reply = (status: number, body?: unknown) => ({ status, json: async () => (body === undefined ? Promise.reject(new SyntaxError("no body")) : body) });
+
+  test("the page's line is the Worker's busy line, word for word", () => {
+    assert.equal(BUSY_LINE, BUSY_REPLY);
+  });
+
+  test("a 429 gives the line the Worker sent, read from a plain GET to the https address of the socket", async () => {
+    const asked: [string, object | undefined][] = [];
+    const line = await voiceBusyLine(agent, async (url, init) => (asked.push([url, init]), reply(429, { error: "Politik is busy — try later." })));
+    assert.equal(line, "Politik is busy — try later.");
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0]![0], "https://politik.example/api/voice/v1/agent/converse");
+    assert.deepEqual(asked[0]![1], { cache: "no-store" });
+  });
+
+  test("ws:// is asked as http://", async () => {
+    let asked = "";
+    await voiceBusyLine("ws://localhost:8787/api/voice/v1/agent/converse", async (url) => (asked = url, reply(426)));
+    assert.equal(asked, "http://localhost:8787/api/voice/v1/agent/converse");
+  });
+
+  test("a 429 whose body cannot be read, or says nothing, still gives the busy line", async () => {
+    assert.equal(await voiceBusyLine(agent, async () => reply(429)), BUSY_LINE);
+    assert.equal(await voiceBusyLine(agent, async () => reply(429, { error: "  " })), BUSY_LINE);
+    assert.equal(await voiceBusyLine(agent, async () => reply(429, { error: 5 })), BUSY_LINE);
+    assert.equal(await voiceBusyLine(agent, async () => reply(429, null)), BUSY_LINE);
+  });
+
+  test("any other answer, or no answer at all, is not busy: the plain Talk button takes over as before", async () => {
+    for (const status of [426, 503, 502, 200, 500]) assert.equal(await voiceBusyLine(agent, async () => reply(status, { error: "x" })), "", String(status));
+    assert.equal(await voiceBusyLine(agent, async () => Promise.reject(new TypeError("offline"))), "");
+    assert.equal(await voiceBusyLine("not a url", async () => reply(429)), "", "an address that cannot be read");
   });
 });

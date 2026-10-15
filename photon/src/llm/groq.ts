@@ -50,6 +50,15 @@ export function resolveChatModels(env: Record<string, string | undefined>): { co
   };
 }
 
+/**
+ * True when `model` is one Groq lists as a reasoning model, the only kind that takes `reasoning_effort`: `openai/gpt-oss-*`
+ * and the `qwen/qwen3*` family. GROQ_CHAT_MODEL and GROQ_ROUTER_MODEL can name any model, and a model without the setting
+ * may answer a request that has it with a 400, so the field is sent only when this is true.
+ */
+export function supportsReasoningEffort(model: string): boolean {
+  return /^(openai\/gpt-oss-|qwen\/qwen3)/.test(model.trim().toLowerCase());
+}
+
 /** Models the docs list under "Models with Strict Mode" (constrained decoding). */
 const STRICT_MODELS = new Set(["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"]);
 
@@ -99,7 +108,8 @@ export type GroqOptions = {
   /**
    * How hard the model thinks before it answers, sent as `reasoning_effort` (Groq's gpt-oss models take low, medium or
    * high and default to medium). Less thinking is fewer tokens and a faster answer, which matters on a small
-   * tokens-per-minute plan. Left out when unset, so a model that has no such setting is never sent one.
+   * tokens-per-minute plan. Left out when unset, and left out for any model that is not a reasoning model
+   * (`supportsReasoningEffort`), so a model that has no such setting is never sent one.
    */
   reasoningEffort?: "low" | "medium" | "high";
   /** For tests: replaces the real wait. */
@@ -148,7 +158,7 @@ export function groqLlm(opts: GroqOptions): Llm {
   const maxRetries = opts.maxRetries ?? 4;
   const baseDelay = opts.baseDelayMs ?? 2000;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const effort = opts.reasoningEffort ? { reasoning_effort: opts.reasoningEffort } : {};
+  const effort = opts.reasoningEffort && supportsReasoningEffort(model) ? { reasoning_effort: opts.reasoningEffort } : {};
   if (!(timeoutMs > 0) || !Number.isFinite(timeoutMs)) throw new RangeError(`timeoutMs must be a positive number, got ${timeoutMs}`);
   const doFetch: typeof fetch = opts.fetchImpl ?? ((input, init) => fetch(input, init));
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));

@@ -4,7 +4,7 @@ import { test } from "node:test";
 
 import { z } from "zod/v4";
 
-import { DEFAULT_CHAT_MODELS, DEFAULT_MODELS, groqLlm, LlmError, resolveChatModels, resolveModels } from "../../photon/src/llm/groq.ts";
+import { DEFAULT_CHAT_MODELS, DEFAULT_MODELS, groqLlm, LlmError, resolveChatModels, resolveModels, supportsReasoningEffort } from "../../photon/src/llm/groq.ts";
 
 const URL_CHAT = "https://api.groq.com/openai/v1/chat/completions";
 
@@ -96,12 +96,42 @@ test("I1: reasoningEffort is sent as reasoning_effort on every request, and left
 
 test("I1: reasoning_effort also rides on the json_object fallback and the repair call", async () => {
   const fake = fakeFetch(error(400, "response_format json_schema is not supported by this model"), ok({ answer: 1 }), ok(goodReply));
-  assert.deepEqual(await client(fake, { model: "llama-3.3-70b-versatile", reasoningEffort: "low" }).ask(), goodReply);
+  assert.deepEqual(await client(fake, { model: "qwen/qwen3-32b", reasoningEffort: "low" }).ask(), goodReply);
   assert.equal(fake.calls.length, 3, "json_schema refused, json_object bad, then the repair");
   assert.deepEqual(
     fake.calls.map((c) => c.body.reasoning_effort),
     ["low", "low", "low"],
   );
+});
+
+test("supportsReasoningEffort: the gpt-oss models and the qwen3 family, and no other", () => {
+  for (const model of ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "openai/gpt-oss-safeguard-20b", "qwen/qwen3-32b", "qwen/qwen3.8-27b"]) {
+    assert.equal(supportsReasoningEffort(model), true, model);
+  }
+  for (const model of ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "meta-llama/llama-4-scout-17b-16e-instruct", "qwen/qwen2.5-32b", "openai/whisper-large-v3", "gpt-oss-120b", "", "  "]) {
+    assert.equal(supportsReasoningEffort(model), false, JSON.stringify(model));
+  }
+  assert.equal(supportsReasoningEffort(" openai/gpt-oss-120b "), true, "a stray space in GROQ_CHAT_MODEL does not matter");
+});
+
+test("reasoning_effort is sent to a gpt-oss or qwen3 model and never to another, so a non-reasoning model is not sent a field it may reject with a 400", async () => {
+  for (const model of ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3-32b"]) {
+    const fake = fakeFetch(ok(goodReply));
+    await client(fake, { model, reasoningEffort: "low" }).ask();
+    assert.equal(fake.calls[0]!.body.reasoning_effort, "low", model);
+  }
+  for (const model of ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]) {
+    const fake = fakeFetch(ok(goodReply));
+    await client(fake, { model, reasoningEffort: "low" }).ask();
+    assert.equal("reasoning_effort" in fake.calls[0]!.body, false, model);
+  }
+});
+
+test("a non-reasoning model gets no reasoning_effort on the json_object fallback or the repair call either", async () => {
+  const fake = fakeFetch(error(400, "response_format json_schema is not supported by this model"), ok({ answer: 1 }), ok(goodReply));
+  assert.deepEqual(await client(fake, { model: "llama-3.3-70b-versatile", reasoningEffort: "low" }).ask(), goodReply);
+  assert.equal(fake.calls.length, 3);
+  assert.ok(fake.calls.every((c) => !("reasoning_effort" in c.body)));
 });
 
 test("two 429s then 200 resolves after 3 fetches, backing off 2s then 4s", async () => {
