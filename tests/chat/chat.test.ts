@@ -227,6 +227,27 @@ describe("chat on a seeded database", () => {
       }
     });
 
+    test("a reply with no text outside its markers is a compose failure, though the markers are valid", async () => {
+      for (const answer of ["[1]", " [1] ", "[1][2]", "[1], [2]", "**[1]**", "- [1]\n- [2]"]) {
+        const c = fakeLlm(() => ({ answer, general: "Background.", followUps: ["Why?"] }));
+        const res = await chat(input("What is going on?"), env(), { router: router().llm, composer: c.llm });
+        assertShape(res);
+        assert.equal(res.mode, "fallback", JSON.stringify(answer));
+        assert.equal(res.reply, FALLBACK_REPLY, JSON.stringify(answer));
+        assert.equal(res.citations.length, 3, "the fallback lists the top 3 records");
+        assert.deepEqual(res.followUps, []);
+        assert.ok(!("general" in res));
+      }
+    });
+
+    test("a short reply with text next to its marker is still an answer", async () => {
+      const c = fakeLlm(() => ({ answer: "Yes [1]", general: null, followUps: [] }));
+      const res = await chat(input("What is going on?"), env(), { router: router().llm, composer: c.llm });
+      assert.equal(res.mode, "brief");
+      assert.equal(res.reply, "Yes [1]");
+      assert.equal(res.citations.length, 1);
+    });
+
     test("a compose model that throws is the fallback too", async () => {
       const c = fakeLlm(() => {
         throw new Error("Groq API error 503");
@@ -799,6 +820,14 @@ describe("publicBlueskyItems", () => {
     const search = found("A data center is going up.", "What do people think?");
     assert.deepEqual((await publicBlueskyItems("data centre", search)).map((i) => i.id), ["bsky-0"]);
     assert.deepEqual(await publicBlueskyItems("what people think about", search), []);
+  });
+
+  test("the place names of the two jurisdictions are filler, so a post that only names the place is not kept", async () => {
+    const search = found("Lovely weather in California today, the beaches are full.", "California's AI safety law worries me.", "Singapore is hot and humid this week.");
+    const got = await publicBlueskyItems("What do people think about California's AI safety law?", search);
+    assert.deepEqual(got.map((i) => i.id), ["bsky-1"], "only the post that mentions the law passes");
+    assert.deepEqual(await publicBlueskyItems("What do people think about Singapore's data protection rules?", search), [], "Singapore alone does not match");
+    assert.deepEqual(await publicBlueskyItems("california singapore", search), [], "a question of only place names has no usable word");
   });
 
   test("a question with no usable word gets none", async () => {

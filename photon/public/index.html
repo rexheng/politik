@@ -27,6 +27,15 @@
 
     <div id="voice" class="voice"></div>
 
+    <section id="empty" class="empty" aria-labelledby="empty-lead">
+      <p id="empty-lead" class="empty-lead">Hi — ask me what's going on in California or Singapore tech policy.</p>
+      <div class="chips" role="group" aria-label="Example questions">
+        <button type="button" class="chip" data-ask="What's going on in California AI policy?">What's going on in California AI policy?</button>
+        <button type="button" class="chip" data-ask="Explain Singapore's PDPA">Explain Singapore's PDPA</button>
+        <button type="button" class="chip" data-ask="What does SB 53 mean for a state agency?">What does SB 53 mean for a state agency?</button>
+      </div>
+    </section>
+
     <div id="transcript" class="transcript" aria-live="polite" hidden></div>
 
     <form id="ask-form" class="ask-form" autocomplete="off">
@@ -43,11 +52,8 @@
     </form>
   </main>
 
-  <script>
-    if (!sessionStorage.getItem("politik-who")) location.replace("/onboard");
-  </script>
   <script src="https://cdn.deepgram.com/widgets/latest/widget.umd.js"></script>
-  <script src="/app.js"></script>
+  <script type="module" src="/app.js"></script>
   <script>
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
   </script>

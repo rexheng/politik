@@ -1,9 +1,10 @@
-const CACHE_NAME = "politik-shell-v24";
+const CACHE_NAME = "politik-shell-v25";
 
 const SHELL_ASSETS = [
   "/",
   "/app.css",
   "/app.js",
+  "/format.js",
   "/manifest.webmanifest",
   "/icons/icon-192.png",
   "/icons/icon-512.png",
@@ -13,9 +14,6 @@ const SHELL_ASSETS = [
   "/saying",
   "/saying.css",
   "/saying.js",
-  "/onboard",
-  "/onboard.css",
-  "/onboard.js",
   "/sources",
   "/sources.css",
   "/sources.js",

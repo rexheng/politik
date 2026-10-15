@@ -8,7 +8,7 @@ Live site: https://politik.rexheng-policy.workers.dev
 
 Chat answers only when the user asks a real question. A greeting stays one short line.
 
-A source card shows the URL, fetched time, source, and jurisdiction when the record has them.
+Answers come from the policy dataset and carry numbered markers. Tap a marker to jump to its source card. A card shows the title, jurisdiction, type and status, whether a person has reviewed the record, the date it was fetched when known, a quote and a link. A public post is labelled "Public post · Bluesky". Anything the model adds from its own knowledge sits in a separate box labelled "Not from Politik's sources — unverified". The footer reads "Data as of" and the snapshot date. With no `GROQ_API_KEY`, or if the model fails, chat lists the most relevant records instead of a summary.
 
 ## Sources
 
@@ -17,6 +17,8 @@ The Sources page reads the policy dataset in D1. It shows the "as of" date, the 
 ## Data
 
 The policy dataset covers California and Singapore tech policy. `pnpm snapshot:build` builds it into `photon/data/snapshot/` (needs `GROQ_API_KEY`). `pnpm check:data` validates it. `pnpm seed:d1` loads it into the local D1 database, and `pnpm seed:d1 --remote` loads it into production. Seeding checks the snapshot first, applies the migrations, then wipes and reloads the tables. It warns if the snapshot has fewer than 75% of the records already in that database. Use `--dir <path>` to seed another folder.
+
+Chat uses two Groq models: a strong one that writes the answer and a fast one that routes the question. They default to `openai/gpt-oss-120b` (`GROQ_CHAT_MODEL`) and `openai/gpt-oss-20b` (`GROQ_ROUTER_MODEL`). Set either variable to use another Groq model; a blank value means the default.
 
 Policy data is only as current as the last seed, so any surface that shows it must show the snapshot's "as of" date (the Sources page does). To refresh, build and seed again. Until D1 is seeded, the chat and the Sources page show empty lists, not errors.
 
@@ -62,3 +64,5 @@ Put secrets in `.dev.vars`. Git ignores that file. Key names:
 - OPENAI_API_KEY
 - ELEVENLABS_API_KEY
 - GROQ_API_KEY
+- GROQ_CHAT_MODEL (optional)
+- GROQ_ROUTER_MODEL (optional)

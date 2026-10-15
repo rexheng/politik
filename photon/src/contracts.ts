@@ -3,11 +3,7 @@ export type Category = "bill-stuck" | "local-worry" | "lab-money" | "research" |
 export type SourceName =
   | "browserbase"
   | "bluesky"
-  | "elevenlabs"
-  | "openalex"
   | "pitchbook"
-  | "briefing"
-  | "ca-ag"
   | "site"
   | "policy";
 

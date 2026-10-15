@@ -83,12 +83,83 @@ body {
 }
 
 .reply-block {
-  align-self: flex-start;
-  width: 100%;
-  max-width: 92%;
+  align-self: stretch;
   display: flex;
   flex-direction: column;
-  gap: 0.65rem;
+  gap: 0.75rem;
+}
+
+.bubble--answer {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.bubble--answer > * {
+  margin: 0;
+}
+
+.bubble--answer > * + * {
+  margin-top: 0.7rem;
+}
+
+.answer-heading {
+  font-family: Newsreader, Georgia, serif;
+  font-size: 1.15rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.bubble--answer > .answer-heading {
+  margin-top: 1rem;
+}
+
+.answer-list {
+  padding-left: 1.25rem;
+}
+
+.answer-list li + li {
+  margin-top: 0.4rem;
+}
+
+.nobr {
+  white-space: nowrap;
+}
+
+.cite {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.3em;
+  height: 1.3em;
+  margin: 0 0.1em 0 0.15em;
+  padding: 0 0.3em;
+  border: 0;
+  border-radius: 999px;
+  background: #1c1915;
+  color: #f6f1e7;
+  font: inherit;
+  font-size: 0.66em;
+  font-weight: 600;
+  line-height: 1;
+  vertical-align: 0.55em;
+  cursor: pointer;
+}
+
+/* The button is small, so its tap area reaches past the pill. */
+.cite::before {
+  content: "";
+  position: absolute;
+  inset: -0.6em -0.45em;
+}
+
+.cite:hover {
+  background: #2e2a24;
+}
+
+.cite:focus-visible {
+  outline: 3px solid #1c1915;
+  outline-offset: 2px;
 }
 
 .bubble--pending {
@@ -119,15 +190,16 @@ body {
   animation-delay: 0.32s;
 }
 
-.bubble--in,
-.reply-tail--in {
-  animation: reply-in 0.4s ease both;
+/* Each block of a reply fades in after the one before it (app.js adds rv, then rv--in). */
+.rv {
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.35s ease, transform 0.35s ease;
 }
 
-.reply-tail {
-  display: flex;
-  flex-direction: column;
-  gap: 0.65rem;
+.rv--in {
+  opacity: 1;
+  transform: none;
 }
 
 @keyframes pending-dot {
@@ -144,16 +216,6 @@ body {
   }
 }
 
-@keyframes reply-in {
-  from {
-    opacity: 0;
-  }
-
-  to {
-    opacity: 1;
-  }
-}
-
 .sr-only {
   position: absolute;
   width: 1px;
@@ -166,83 +228,200 @@ body {
   border: 0;
 }
 
-.category {
-  margin: 0;
-  font-size: 0.95rem;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  color: #1c1915;
-  opacity: 0.75;
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  text-align: center;
 }
 
-.items {
+.empty[hidden] {
+  display: none;
+}
+
+.empty-lead {
+  margin: 0;
+  max-width: 26rem;
+  font-size: 1.15rem;
+}
+
+.chips {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  width: 100%;
+}
+
+.chip {
+  padding: 0.75rem 1rem;
+  border: 1.5px solid #1c1915;
+  border-radius: 0.65rem;
+  background: #fffdf8;
+  color: #1c1915;
+  font: inherit;
+  font-size: 1.05rem;
+  line-height: 1.3;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chip:hover {
+  background: #efe6d4;
+}
+
+.chip:focus-visible {
+  outline: 3px solid #1c1915;
+  outline-offset: 2px;
+}
+
+.followups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.followups .chip {
+  padding: 0.5rem 0.9rem;
+  border-radius: 999px;
+  font-size: 1rem;
+}
+
+.general {
+  padding: 0.75rem 0.9rem;
+  border: 1.5px dashed #6b4f1d;
+  border-radius: 0.5rem;
+  background: #f1e6cc;
+}
+
+.general-label {
+  margin: 0 0 0.3rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #6b4f1d;
+}
+
+.general-text {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.sources {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
 }
 
-.item-card {
-  padding: 0.75rem 0.9rem;
+.sources-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  opacity: 0.75;
+}
+
+.src-card {
+  padding: 0.7rem 0.85rem;
   border: 1.5px solid #1c1915;
   border-radius: 0.5rem;
   background: #f6f1e7;
+  transition: background-color 0.3s ease, box-shadow 0.3s ease;
 }
 
-.item-relation {
-  margin: 0 0 0.35rem;
-  font-size: 0.78rem;
+.src-card:focus {
+  outline: none;
+}
+
+.src-card--hit {
+  background: #efe6d4;
+  box-shadow: 0 0 0 3px #c4a15a;
+}
+
+.src-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+}
+
+.src-num {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  margin-top: 0.1rem;
+  border-radius: 50%;
+  background: #1c1915;
+  color: #f6f1e7;
+  font-size: 0.85rem;
   font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: #6b4f1d;
+  line-height: 1;
 }
 
-.item-title {
+.src-title {
   margin: 0;
-  font-size: 1.05rem;
+  font-size: 1.02rem;
   font-weight: 600;
   line-height: 1.3;
-  color: #1c1915;
+  overflow-wrap: anywhere;
 }
 
-.item-title a {
-  color: #1c1915;
-  text-decoration: underline;
-  text-underline-offset: 0.15em;
+.src-short {
+  font-weight: 400;
+  opacity: 0.75;
 }
 
-.item-plain {
-  margin: 0.35rem 0 0;
-  font-size: 1rem;
-  line-height: 1.4;
-  color: #1c1915;
-}
-
-.item-audit {
-  margin-top: 0.55rem;
-  padding: 0.4rem 0.55rem;
-  background: #efe6d4;
-  border-left: 3px solid #c4a15a;
-}
-
-.audit-line {
-  margin: 0.12rem 0;
-  font-size: 0.82rem;
+.src-meta,
+.src-flags {
+  margin: 0.3rem 0 0;
+  font-size: 0.88rem;
   line-height: 1.35;
-  color: #1c1915;
-  word-break: break-word;
 }
 
-.audit-k {
-  font-variant-caps: all-small-caps;
+.src-meta {
+  opacity: 0.8;
+}
+
+.src-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.1rem 0.75rem;
+}
+
+.src-review {
   font-weight: 600;
-  letter-spacing: 0.08em;
-  margin-right: 0.4rem;
 }
 
-.audit-line a {
+.src-review--human {
+  color: #2f5d34;
+}
+
+.src-quote {
+  margin: 0.5rem 0 0;
+  padding: 0.4rem 0.6rem;
+  border-left: 3px solid #c4a15a;
+  background: #efe6d4;
+  font-size: 0.95rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.src-link {
+  display: inline-block;
+  margin-top: 0.5rem;
   color: #1c1915;
-  text-underline-offset: 0.12em;
+  font-size: 0.9rem;
+  text-underline-offset: 0.15em;
+  overflow-wrap: anywhere;
+}
+
+.asof {
+  margin: 0;
+  font-size: 0.85rem;
+  opacity: 0.7;
 }
 
 .ask-form {
@@ -402,12 +581,20 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pending-dots span,
-  .bubble--in,
-  .reply-tail--in {
+  .pending-dots span {
     animation: none;
     opacity: 1;
     transform: none;
+  }
+
+  .rv {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+
+  .src-card {
+    transition: none;
   }
 }
 

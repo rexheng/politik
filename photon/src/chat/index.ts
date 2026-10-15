@@ -126,8 +126,12 @@ export type ChatDeps = {
   composeTimeoutMs?: number;
 };
 
-/** Words that say nothing about what a post is about, beside what full-text search already drops. */
-const FILLER = new Set("about people think thinks thought saying says said public opinion opinions feel feels talk talking tell".split(" "));
+/**
+ * Words that say nothing about what a post is about, beside what full-text search already drops. The two place names
+ * are here because the post search is not tied to a place: "California" in a question must not let any post that merely
+ * mentions California through.
+ */
+const FILLER = new Set("about people think thinks thought saying says said public opinion opinions feel feels talk talking tell california singapore".split(" "));
 
 /** The words of a question worth looking for in a post: four letters or more, no filler, "centre" spelled "center". */
 function queryWords(query: string): string[] {
@@ -201,6 +205,9 @@ function modeOf(route: Route): Mode {
   return shapeOf(route);
 }
 
+/** True when `reply` has a letter or digit outside its [n] markers: a reply that is only markers says nothing. */
+const hasWords = (reply: string): boolean => /[\p{L}\p{N}]/u.test(stripMarkers(reply));
+
 const FALLBACK_RECORDS = 3;
 
 /**
@@ -268,8 +275,8 @@ async function respond(req: ChatInput, db: D1Like, deps: ChatDeps): Promise<Chat
   try {
     const raw = await compose(route, sources, deps.composer, asOf, { timeoutMs: deps.composeTimeoutMs });
     const { reply, citations, valid } = finalize(raw, sources);
-    // No valid marker, or nothing left to say, is a compose failure (spec §3.5).
-    if (valid && reply.trim()) {
+    // No valid marker, or no words outside the markers ("[1]" alone), is a compose failure (spec §3.5).
+    if (valid && hasWords(reply)) {
       return {
         reply,
         mode: modeOf(route),

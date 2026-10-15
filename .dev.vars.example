@@ -6,3 +6,6 @@ TELEGRAM_BOT_TOKEN=
 DEEPGRAM_API_KEY=
 MAPBOX_ACCESS_TOKEN=
 GROQ_API_KEY=
+# Optional: leave blank to use the defaults (openai/gpt-oss-120b writes answers, openai/gpt-oss-20b routes questions).
+GROQ_CHAT_MODEL=
+GROQ_ROUTER_MODEL=
