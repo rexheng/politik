@@ -4,7 +4,7 @@ import { test } from "node:test";
 
 import { z } from "zod/v4";
 
-import { DEFAULT_MODELS, groqLlm, resolveModels } from "../../photon/src/llm/groq.ts";
+import { DEFAULT_MODELS, groqLlm, LlmError, resolveModels } from "../../photon/src/llm/groq.ts";
 
 const URL_CHAT = "https://api.groq.com/openai/v1/chat/completions";
 
@@ -378,6 +378,7 @@ test("when every attempt times out it gives up after maxRetries with a timeout m
     assert.match(e.message, /timed out|timeout/i);
     assert.match(e.message, /10\s?ms/);
     assert.doesNotMatch(e.message, /gsk_test_key/);
+    assert.equal((e as LlmError).kind, "timeout");
     return true;
   });
   assert.equal(calls.length, 3);
@@ -403,4 +404,19 @@ test("a body that stalls after the headers arrive also counts as a timeout, not 
   assert.deepEqual(await llm({ system: "s", user: "u", schema: Answer, name: "answer" }), goodReply);
   assert.equal(attempt, 2);
   assert.deepEqual(sleeps, [2000], "retried after a backoff as a network error, not repaired as an empty reply");
+});
+
+// --- LlmError.kind (R17): how a call failed, without parsing the message ---
+
+test("an LlmError says how the call failed: http (with its status), network, or invalid-output", async () => {
+  await assert.rejects(client(fakeFetch(error(401, "Invalid API Key"))).ask(), (e: LlmError) => e.kind === "http" && e.status === 401);
+  await assert.rejects(client(fakeFetch(error(503, "overloaded")), { maxRetries: 1 }).ask(), (e: LlmError) => e.kind === "http" && e.status === 503);
+  await assert.rejects(
+    client(fakeFetch(new TypeError("fetch failed")), { maxRetries: 0 }).ask(),
+    (e: LlmError) => e.kind === "network" && e.status === undefined,
+  );
+  await assert.rejects(
+    client(fakeFetch(completion("nope"), completion("still nope"))).ask(),
+    (e: LlmError) => e.kind === "invalid-output" && e.status === undefined,
+  );
 });

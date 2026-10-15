@@ -461,24 +461,30 @@ test("an excluded landmark is not in review.md", async () => {
 // ---------------------------------------------------------------------------------------------------------------------
 // R12: errors, today, and the enrich word limit
 
-test("a thrown enrichment error excludes that record with the error message and the build carries on", async () => {
+test("a thrown enrichment error excludes that record with a short, fixed reason and the build carries on", async () => {
   const env = await makeEnv(candidatesMd(row("ca-a-2025"), row("ca-b-2025")));
-  const llms = fakeLlms({ enrichThrows: { "ca-a-2025": new Error("Groq API error 413: Request too large for model") } });
+  const llms = fakeLlms({ enrichThrows: { "ca-a-2025": new LlmError("Groq API error 413: Request too large for model", 413) } });
   const manifest = await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: fakeWeb(siteFor("ca-a-2025", "ca-b-2025")).impl }));
   assert.deepEqual((await env.readJson<PolicyRecord[]>("policies.json")).map((p) => p.id), ["ca-b-2025"]);
   assert.equal(manifest.excluded.length, 1);
   assert.equal(manifest.excluded[0]!.id, "ca-a-2025");
-  assert.match(manifest.excluded[0]!.reason, /Groq API error 413: Request too large for model/);
-  assert.match(manifest.excluded[0]!.reason, /enrich/i, "the reason says which step failed");
+  assert.equal(manifest.excluded[0]!.reason, "enrichment failed: HTTP 413");
 });
 
 test("a thrown verification error excludes that record too", async () => {
   const env = await makeEnv(candidatesMd(row("ca-a-2025"), row("ca-b-2025")));
-  const llms = fakeLlms({ verifyThrows: { "ca-b-2025": new Error("repair failed: the reply was still invalid") } });
+  const bad = new LlmError("Groq output for \"claim_verification\" was still invalid after one repair.");
+  bad.kind = "invalid-output";
+  const llms = fakeLlms({ verifyThrows: { "ca-b-2025": bad } });
   const manifest = await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: fakeWeb(siteFor("ca-a-2025", "ca-b-2025")).impl }));
-  assert.deepEqual(manifest.excluded.map((e) => e.id), ["ca-b-2025"]);
-  assert.match(manifest.excluded[0]!.reason, /repair failed: the reply was still invalid/);
-  assert.match(manifest.excluded[0]!.reason, /verif/i);
+  assert.deepEqual(manifest.excluded.map((e) => [e.id, e.reason]), [["ca-b-2025", "verification failed: invalid model output"]]);
+});
+
+test("a step that throws something other than an LlmError keeps the error's own message", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025"), row("ca-b-2025")));
+  const llms = fakeLlms({ enrichThrows: { "ca-a-2025": new Error("the summary is empty or has no valid citation") } });
+  const manifest = await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: fakeWeb(siteFor("ca-a-2025", "ca-b-2025")).impl }));
+  assert.equal(manifest.excluded[0]!.reason, "enrichment failed: the summary is empty or has no valid citation");
 });
 
 test("a multi-line or very long error message is folded into one short line", async () => {
@@ -724,6 +730,145 @@ test("R14: the command exits non-zero with the reason when the guard trips, and 
 });
 
 // ---------------------------------------------------------------------------------------------------------------------
+// R15: the snapshot date is part of the cache key
+
+test("R15: the same snapshot date re-runs with no LLM calls and byte-identical files", async () => {
+  const env = await makeEnv(three());
+  const web = threeWeb();
+  const llms = fakeLlms();
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl, snapshotDate: "2026-11-20" }));
+  const first = await snapshotOf(env);
+  const calls = llms.total();
+  env.clock.now = new Date("2026-12-01T00:00:00.000Z");
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl, snapshotDate: "2026-11-20" }));
+  assert.equal(llms.total() - calls, 0);
+  assert.deepEqual(await snapshotOf(env), first);
+});
+
+test("R15: a later snapshot date asks enrich and verify again for every record, so a status that has since taken effect is re-judged", async () => {
+  const env = await makeEnv(three());
+  const web = threeWeb();
+  const llms = fakeLlms();
+  // The enricher calls an instrument "enacted" before 2026-11-01 and "in-force" after, as the real prompt asks it to.
+  const byDate: Llm = (async (req: Req) => {
+    const reply: any = await llms.llm.enrich(req);
+    if (req.system.includes("Today is 2026-11-20")) reply.status.value = "in-force";
+    return reply;
+  }) as Llm;
+  const llm = { enrich: byDate, verify: llms.llm.verify };
+
+  await buildSnapshot(env.opts({ llm, fetchImpl: web.impl, snapshotDate: "2026-10-15" }));
+  assert.ok((await env.readJson<PolicyRecord[]>("policies.json")).every((p) => p.status.value === "enacted"));
+  assert.equal(llms.enrichCalls.length, 3);
+  assert.equal(llms.verifyCalls.length, 3);
+
+  const manifest = await buildSnapshot(env.opts({ llm, fetchImpl: web.impl, snapshotDate: "2026-11-20" }));
+  assert.equal(llms.enrichCalls.length, 6, "enrich ran again for all three");
+  assert.equal(llms.verifyCalls.length, 6, "and so did verify");
+  assert.equal(manifest.snapshotDate, "2026-11-20");
+  assert.ok((await env.readJson<PolicyRecord[]>("policies.json")).every((p) => p.status.value === "in-force"));
+  assert.ok(llms.verifyCalls.slice(3).every((c) => c.system.includes("2026-11-20")));
+
+  // Going back to an earlier date is also a new question: the cache holds the answer for the date it was asked on.
+  await buildSnapshot(env.opts({ llm, fetchImpl: web.impl, snapshotDate: "2026-10-15" }));
+  assert.equal(llms.enrichCalls.length, 9);
+});
+
+test("R15: a verdict is not reused for a different date even when the enrichment came out the same", async () => {
+  const env = await makeEnv(candidatesMd(row("ca-a-2025")));
+  const web = fakeWeb(siteFor("ca-a-2025"));
+  const llms = fakeLlms();
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl, snapshotDate: "2026-10-15" }));
+  await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl, snapshotDate: "2026-10-16" }));
+  assert.equal(llms.enrichCalls.length, 2);
+  assert.equal(llms.verifyCalls.length, 2);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// R17: the committed exclusion reasons never carry provider text
+
+const RAW_429 = "Groq API error 429: Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01hxyzsecret` service tier `on_demand`";
+
+test("R17: a 429 LlmError is recorded as exactly 'enrichment failed: HTTP 429', with no provider text in any output", async () => {
+  const env = await makeEnv(three());
+  const llms = fakeLlms({ enrichThrows: { "ca-b-2025": new LlmError(RAW_429, 429) } });
+  const manifest = await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: threeWeb().impl }));
+  assert.deepEqual(manifest.excluded.map((e) => [e.id, e.reason]), [["ca-b-2025", "enrichment failed: HTTP 429"]]);
+  for (const name of OUTPUTS) assert.ok(!(await env.read(name)).includes("org_01hxyzsecret"), name);
+});
+
+test("R17: the reason is one of six fixed phrases, whatever the provider said", async () => {
+  const cases: Array<{ stage: "enrich" | "verify"; error: LlmError; reason: string }> = [];
+  const make = (message: string, status?: number, kind?: LlmError["kind"]) => {
+    const e = new LlmError(message, status);
+    if (kind) e.kind = kind;
+    return e;
+  };
+  cases.push(
+    { stage: "enrich", error: make(RAW_429, 429), reason: "enrichment failed: HTTP 429" },
+    { stage: "verify", error: make("Groq API error 503: org_01hxyzsecret overloaded", 503), reason: "verification failed: HTTP 503" },
+    { stage: "enrich", error: make("Groq request failed: timed out after 60000ms", undefined, "timeout"), reason: "enrichment failed: timed out" },
+    { stage: "verify", error: make("Groq request failed: timed out after 60000ms", undefined, "timeout"), reason: "verification failed: timed out" },
+    { stage: "enrich", error: make("Groq request failed: getaddrinfo ENOTFOUND api.groq.com", undefined, "network"), reason: "enrichment failed: timed out" },
+    { stage: "enrich", error: make('Groq output for "policy_enrichment" was still invalid after one repair. {"x": "org_01hxyzsecret"}', undefined, "invalid-output"), reason: "enrichment failed: invalid model output" },
+    { stage: "verify", error: make("Groq output for \"claim_verification\" was still invalid after one repair.", undefined, "invalid-output"), reason: "verification failed: invalid model output" },
+  );
+  for (const { stage, error, reason } of cases) {
+    const env = await makeEnv(three());
+    const llms = fakeLlms(stage === "enrich" ? { enrichThrows: { "ca-b-2025": error } } : { verifyThrows: { "ca-b-2025": error } });
+    const manifest = await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: threeWeb().impl }));
+    assert.equal(manifest.excluded[0]!.reason, reason);
+    assert.ok(!(await env.read("manifest.json")).includes("org_01hxyzsecret"));
+  }
+});
+
+test("R17: the console log keeps the full raw message", async () => {
+  const env = await makeEnv(three());
+  const llms = fakeLlms({ enrichThrows: { "ca-b-2025": new LlmError(RAW_429, 429) } });
+  const lines: string[] = [];
+  const { manifest } = await runBuild(env.opts({ llm: llms.llm, fetchImpl: threeWeb().impl, log: (line) => void lines.push(line) }));
+  const line = lines.find((l) => l.includes("ca-b-2025"))!;
+  assert.ok(line.includes("enrichment failed: HTTP 429"));
+  assert.ok(line.includes(RAW_429), "the raw provider message is in the console line");
+  assert.ok(!manifest.excluded[0]!.reason.includes("org_01hxyzsecret"));
+});
+
+test("R17: when most records fail with HTTP 413 the guard message says to lower ENRICH_MAX_WORDS", async () => {
+  const env = await makeEnv(three());
+  const tooLarge = () => new LlmError("Groq API error 413: Request too large for model (TPM limit 8000)", 413);
+  const llms = fakeLlms({ enrichThrows: { "ca-a-2025": tooLarge(), "ca-b-2025": tooLarge() } });
+  await assert.rejects(buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: threeWeb().impl })), (e: unknown) => {
+    assert.ok(e instanceof SnapshotGuardError);
+    assert.equal(e.kind, "llm-failures");
+    assert.match(e.message, /lower ENRICH_MAX_WORDS/);
+    return true;
+  });
+});
+
+test("R17: other Groq failures do not get the ENRICH_MAX_WORDS hint", async () => {
+  const env = await makeEnv(three());
+  const llms = fakeLlms({ enrichThrows: { "ca-a-2025": exhausted(), "ca-b-2025": exhausted() } });
+  await assert.rejects(buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: threeWeb().impl })), (e: unknown) => {
+    assert.ok(e instanceof SnapshotGuardError);
+    assert.doesNotMatch(e.message, /ENRICH_MAX_WORDS/);
+    return true;
+  });
+  const ok = await makeEnv(three());
+  const result = await runBuild(ok.opts({ llm: fakeLlms({ enrichThrows: { "ca-a-2025": exhausted() } }).llm, fetchImpl: threeWeb().impl }));
+  assert.doesNotMatch(formatSummary(result), /ENRICH_MAX_WORDS/);
+});
+
+test("R17: the summary says to lower ENRICH_MAX_WORDS when any record failed with HTTP 413", async () => {
+  const env = await makeEnv(three());
+  const llms = fakeLlms({ enrichThrows: { "ca-c-2025": new LlmError("Groq API error 413: Request too large", 413) } });
+  const result = await runBuild(env.opts({ llm: llms.llm, fetchImpl: threeWeb().impl }));
+  assert.equal(result.manifest.excluded[0]!.reason, "enrichment failed: HTTP 413");
+  const text = formatSummary(result);
+  assert.match(text, /lower ENRICH_MAX_WORDS/);
+  assert.match(text, /ca-c-2025 \(US-CA\): enrichment failed: HTTP 413/);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Output order, related records, and unreadable inputs
 
 test("outputs are sorted by id, passages by record then sequence, whatever order the candidates come in", async () => {
@@ -913,10 +1058,15 @@ test("the tender texts are cached in rawDir/gebiz-tenders.json, so a re-run neve
   const options = () => env.opts({ llm: llms.llm, fetchImpl: web.impl, gebiz: true, gebizRule: gebizRule({ max: 2 }) });
   await buildSnapshot(options());
   assert.equal(web.urls.length, 1);
-  const cached = JSON.parse(await readFile(join(env.paths.rawDir, "gebiz-tenders.json"), "utf8")) as { candidate: { id: string }; text: string }[];
-  assert.deepEqual(cached.map((t) => t.candidate.id), [TENDER_IDS[0], TENDER_IDS[1]]);
-  assert.ok(cached.every((t) => t.text.includes("Tender number:")));
+  const cached = JSON.parse(await readFile(join(env.paths.rawDir, "gebiz-tenders.json"), "utf8")) as {
+    fingerprint: string;
+    tenders: { candidate: { id: string }; text: string }[];
+  };
+  assert.match(cached.fingerprint, /^[0-9a-f]{64}$/);
+  assert.deepEqual(cached.tenders.map((t) => t.candidate.id), TENDER_IDS, "the cache holds every matched tender, not just the ones kept");
+  assert.ok(cached.tenders.every((t) => t.text.includes("Tender number:")));
   const first = await snapshotOf(env);
+  assert.equal(JSON.parse(await env.read("manifest.json")).counts.byType.tender, 2);
 
   const calls = llms.total();
   const offline = (async () => { throw new Error("the network is down"); }) as typeof fetch;
@@ -925,6 +1075,68 @@ test("the tender texts are cached in rawDir/gebiz-tenders.json, so a re-run neve
   assert.equal(web.urls.length, 1, "no second request to data.gov.sg");
   assert.equal(llms.total() - calls, 0);
   assert.deepEqual(await snapshotOf(env), first);
+});
+
+test("R16: a changed keyword list fetches the tenders again", async () => {
+  const env = await makeEnv(candidatesMd());
+  const llms = fakeLlms();
+  const web = gebizWeb();
+  const build = (rule: GebizRule) => buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl, gebiz: true, gebizRule: rule }));
+  const first = await build(gebizRule({ keywords: ["analytics"] }));
+  assert.equal(first.counts.total, 1);
+  assert.equal(web.urls.length, 1);
+
+  const second = await build(gebizRule({ keywords: ["analytics", "\\bcloud\\b"] }));
+  assert.equal(web.urls.length, 2, "the cache was for a different rule");
+  assert.equal(second.counts.total, 2);
+
+  await build(gebizRule({ keywords: ["\\bcloud\\b", "analytics"] }));
+  assert.equal(web.urls.length, 2, "the same keywords in another order are the same rule");
+});
+
+test("R16: a changed since, minimum award or dataset id fetches the tenders again, and an empty list is not frozen", async () => {
+  const env = await makeEnv(candidatesMd());
+  const llms = fakeLlms();
+  const web = gebizWeb();
+  const build = (rule: GebizRule) => buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl, gebiz: true, gebizRule: rule }));
+  assert.equal((await build(gebizRule({ minAwardSgd: 1_000_000_000 }))).counts.total, 0);
+  assert.equal(web.urls.length, 1);
+  assert.equal((await build(gebizRule({ minAwardSgd: 1_000_000_000 }))).counts.total, 0);
+  assert.equal(web.urls.length, 1, "the same rule reads its (empty) result from the cache");
+
+  assert.equal((await build(gebizRule({ minAwardSgd: 1_000_000 }))).counts.total, 3);
+  assert.equal(web.urls.length, 2, "a lower minimum award");
+  assert.equal((await build(gebizRule({ since: "2022-01-01" }))).counts.total, 2, "a later since drops the one tender awarded in 2021");
+  assert.equal(web.urls.length, 3);
+  await build(gebizRule({ since: "2022-01-01", datasetId: "d_other_dataset" }));
+  assert.equal(web.urls.length, 4, "another dataset");
+  assert.match(web.urls[3]!, /resource_id=d_other_dataset/);
+});
+
+test("R16: raising or lowering max reads the full cached list without asking data.gov.sg again", async () => {
+  const env = await makeEnv(candidatesMd());
+  const llms = fakeLlms();
+  const web = gebizWeb();
+  const build = (max: number) => buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: web.impl, gebiz: true, gebizRule: gebizRule({ max }) }));
+  assert.deepEqual((await build(1)).counts.total, 1);
+  assert.equal(web.urls.length, 1);
+  assert.deepEqual((await env.readJson<PolicyRecord[]>("policies.json")).map((p) => p.id), [TENDER_IDS[0]]);
+
+  assert.equal((await build(3)).counts.total, 3, "a higher max is honoured from the cache");
+  assert.equal(web.urls.length, 1, "no refetch");
+  assert.equal((await build(2)).counts.total, 2);
+  assert.equal(web.urls.length, 1);
+  assert.deepEqual((await env.readJson<PolicyRecord[]>("policies.json")).map((p) => p.id), [TENDER_IDS[0], TENDER_IDS[1]].sort());
+});
+
+test("R16: a cache in the old format (a bare list) is fetched again", async () => {
+  const env = await makeEnv(candidatesMd());
+  const web = gebizWeb();
+  await mkdir(env.paths.rawDir, { recursive: true });
+  await writeFile(join(env.paths.rawDir, "gebiz-tenders.json"), "[]");
+  const manifest = await buildSnapshot(env.opts({ llm: fakeLlms().llm, fetchImpl: web.impl, gebiz: true, gebizRule: gebizRule() }));
+  assert.equal(web.urls.length, 1);
+  assert.equal(manifest.counts.total, 3);
 });
 
 test("a damaged GeBIZ cache is fetched again instead of trusted", async () => {
@@ -950,11 +1162,11 @@ test("with gebiz off (the default) data.gov.sg is never asked and no tenders are
 
 test("tenders are built alongside the listed candidates, and each tender is excluded individually if it fails", async () => {
   const env = await makeEnv(candidatesMd(row("ca-a-2025")));
-  const llms = fakeLlms({ enrichThrows: { [TENDER_IDS[1]!]: new Error("Groq API error 429") } });
+  const llms = fakeLlms({ enrichThrows: { [TENDER_IDS[1]!]: new LlmError("Groq API error 429", 429) } });
   const manifest = await buildSnapshot(env.opts({ llm: llms.llm, fetchImpl: gebizWeb(siteFor("ca-a-2025")).impl, gebiz: true, gebizRule: gebizRule() }));
   assert.deepEqual((await env.readJson<PolicyRecord[]>("policies.json")).map((p) => p.id), ["ca-a-2025", TENDER_IDS[2], TENDER_IDS[0]].sort());
   assert.deepEqual(manifest.excluded.map((e) => e.id), [TENDER_IDS[1]]);
-  assert.match(manifest.excluded[0]!.reason, /Groq API error 429/);
+  assert.equal(manifest.excluded[0]!.reason, "enrichment failed: HTTP 429");
 });
 
 test("a GeBIZ fetch that fails stops the build with a message that names GeBIZ", async () => {

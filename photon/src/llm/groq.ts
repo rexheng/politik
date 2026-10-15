@@ -53,6 +53,11 @@ export class LlmError extends Error {
   code?: string;
   /** What the model produced before a 400 "failed generation", if Groq says. */
   failedGeneration?: string;
+  /**
+   * How the call failed, so a caller need not parse the message: `http` (Groq answered with `status`), `timeout` (no
+   * answer in time), `network` (the request never completed), or `invalid-output` (the reply was unusable after the repair).
+   */
+  kind?: "http" | "timeout" | "network" | "invalid-output";
   constructor(message: string, status?: number) {
     super(message);
     this.name = "LlmError";
@@ -139,6 +144,7 @@ export function groqLlm(opts: GroqOptions): Llm {
     const error = new LlmError(redact(`Groq API error ${status}: ${detail}${note}`), status);
     error.code = code;
     error.failedGeneration = generation;
+    error.kind = "http";
     return error;
   };
 
@@ -160,7 +166,9 @@ export function groqLlm(opts: GroqOptions): Llm {
       } catch (cause) {
         if (attempt >= maxRetries) {
           const why = signal.aborted ? `timed out after ${timeoutMs}ms` : cause instanceof Error ? cause.message : String(cause);
-          throw new LlmError(redact(`Groq request failed: ${why}`));
+          const failure = new LlmError(redact(`Groq request failed: ${why}`));
+          failure.kind = signal.aborted ? "timeout" : "network";
+          throw failure;
         }
         await sleep(backoff);
         continue;
@@ -218,7 +226,9 @@ export function groqLlm(opts: GroqOptions): Llm {
           throw e;
         }
       }
-      throw new LlmError(`Groq refused every response format for "${schemaName}" on ${model}`, 400);
+      const refused400 = new LlmError(`Groq refused every response format for "${schemaName}" on ${model}`, 400);
+      refused400.kind = "http";
+      throw refused400;
     }
 
     /** The validated value, or what is wrong with the reply. */
@@ -253,6 +263,8 @@ export function groqLlm(opts: GroqOptions): Llm {
     const second = await complete(repair);
     const secondCheck = check(second);
     if ("value" in secondCheck) return secondCheck.value;
-    throw new LlmError(`Groq output for "${schemaName}" was still invalid after one repair. ${secondCheck.problem}`);
+    const invalid = new LlmError(`Groq output for "${schemaName}" was still invalid after one repair. ${secondCheck.problem}`);
+    invalid.kind = "invalid-output";
+    throw invalid;
   };
 }

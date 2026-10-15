@@ -87,6 +87,8 @@ export interface RecordStat {
   reason?: string;
   /** True when a step threw (a model error, say), as opposed to the content failing a check. */
   failed?: boolean;
+  /** The HTTP status Groq answered with, when the step failed on a Groq error. */
+  llmStatus?: number;
 }
 
 export interface RunResult {
@@ -212,20 +214,34 @@ const CandidateSchema = z.object({
 });
 const TendersSchema = z.array(z.object({ candidate: CandidateSchema, text: z.string().min(1) }));
 type Tender = { candidate: Candidate; text: string };
+/** The GeBIZ cache file: every tender the rule matched, and which rule that was. */
+const TenderCacheSchema = z.object({ fingerprint: z.string(), tenders: TendersSchema });
 
 /**
- * The GeBIZ tenders to build, largest award first, at most `rule.max ?? 40`. The tender texts are cached in
- * `${rawDir}/gebiz-tenders.json` on the first fetch and read from there afterwards, so the output stays the same even
- * though the live dataset grows. Delete that file to take a fresh selection.
+ * What decides which tenders match: the dataset, the keywords, the earliest award date and the smallest award.
+ * `max` is not part of it. The cache holds every match, and `max` only says how many to keep.
+ */
+function ruleFingerprint(rule: GebizRule): string {
+  return sha256Hex(
+    JSON.stringify({ datasetId: rule.datasetId, keywords: [...rule.keywords].sort(), since: rule.since, minAwardSgd: rule.minAwardSgd }),
+  );
+}
+
+/**
+ * The GeBIZ tenders to build, largest award first, at most `rule.max ?? 40`. Every tender the rule matches is cached in
+ * `${rawDir}/gebiz-tenders.json` on the first fetch, together with a fingerprint of the rule, and read from there while
+ * the rule is unchanged, so the output stays the same even though the live dataset grows. A changed rule fetches again;
+ * a changed `max` does not, because it only cuts the cached list. Delete the file to take a fresh selection.
  */
 async function loadTenders(opts: BuildOptions): Promise<Tender[]> {
   const rule = opts.gebizRule ?? GEBIZ_RULE;
   const max = rule.max ?? DEFAULT_GEBIZ_MAX;
   if (!Number.isInteger(max) || max < 0) throw new Error(`The GeBIZ rule's max must be a whole number of at least 0, got ${max}`);
   const cachePath = join(opts.rawDir, "gebiz-tenders.json");
+  const fingerprint = ruleFingerprint(rule);
 
-  const cached = TendersSchema.safeParse(await readJsonOrUndefined(cachePath));
-  if (cached.success) return cached.data.slice(0, max);
+  const cached = TenderCacheSchema.safeParse(await readJsonOrUndefined(cachePath));
+  if (cached.success && cached.data.fingerprint === fingerprint) return cached.data.tenders.slice(0, max);
 
   let tenders: Tender[];
   try {
@@ -233,18 +249,20 @@ async function loadTenders(opts: BuildOptions): Promise<Tender[]> {
   } catch (e) {
     throw new Error(`GeBIZ tenders could not be fetched: ${errorMessage(e)}. Run with --no-gebiz to build without them.`);
   }
-  const kept = tenders.slice(0, max);
-  await writeAtomic(cachePath, jsonText(kept));
-  return kept;
+  await writeAtomic(cachePath, jsonText({ fingerprint, tenders }));
+  return tenders.slice(0, max);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The build
 
 const FetchedSchema = z.record(z.string(), z.object({ sha256: z.string(), fetched: z.string() }));
-const EnrichEntrySchema = z.object({ model: z.string(), value: EnrichedSchema });
+// Both prompts are told today's date (it settles "enacted" versus "in-force"), so a cached answer is only good for the
+// snapshot date it was given. An answer for another date is a miss and is replaced.
+const EnrichEntrySchema = z.object({ model: z.string(), snapshotDate: z.string(), value: EnrichedSchema });
 const VerifyEntrySchema = z.object({
   model: z.string(),
+  snapshotDate: z.string(),
   /** Which enriched value this verdict is about. A different enrichment needs a new verdict. */
   enrichedHash: z.string(),
   kept: EnrichedSchema,
@@ -269,9 +287,29 @@ function firstPassages(passages: Passage[], maxWords: number): Passage[] {
 const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
 const clip = (text: string) => (text.length > MAX_REASON ? `${text.slice(0, MAX_REASON - 1).trimEnd()}…` : text);
 
+/** Said when a request was too large (HTTP 413): the fix is a smaller prompt. */
+const TOO_LARGE_HINT = "HTTP 413 means a request was too large for the model: lower ENRICH_MAX_WORDS (the default is 6000) and run again.";
+
+/**
+ * The short, fixed phrase that goes into the committed manifest for a failed model call. Groq's own error text can carry
+ * account details such as the organisation id, so the raw message goes to the console log only.
+ */
+function llmReason(e: LlmError): string {
+  if (e.status !== undefined) return `HTTP ${e.status}`;
+  if (e.kind === "timeout" || e.kind === "network") return "timed out"; // no answer came back at all
+  return "invalid model output";
+}
+
 type Done =
   | { kind: "built"; record: PolicyRecord; passages: Passage[]; stat: RecordStat; reachedEnrichment: true }
-  | { kind: "excluded"; reason: string; stat: RecordStat; reachedEnrichment: boolean; llmError?: LlmError };
+  | {
+      kind: "excluded";
+      reason: string;
+      stat: RecordStat;
+      reachedEnrichment: boolean;
+      /** Set when a Groq call failed. */
+      llmError?: LlmError;
+    };
 
 /**
  * Builds the snapshot and writes policies.json, passages.json, manifest.json and review.md to `outDir`, and returns
@@ -343,7 +381,13 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
     const exclude = (reason: string, failed = false, llmError?: LlmError): Done => ({
       kind: "excluded",
       reason,
-      stat: { ...stat, outcome: "excluded", reason, ...(failed ? { failed: true } : {}) },
+      stat: {
+        ...stat,
+        outcome: "excluded",
+        reason,
+        ...(failed ? { failed: true } : {}),
+        ...(llmError?.status !== undefined ? { llmStatus: llmError.status } : {}),
+      },
       reachedEnrichment,
       ...(llmError ? { llmError } : {}),
     });
@@ -371,7 +415,7 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       const enrichPath = join(enrichDir, `${sha}.json`);
       let enriched: Enriched;
       const cachedEnrich = await readEntry(enrichPath, c.id, EnrichEntrySchema);
-      if (cachedEnrich && cachedEnrich.model === opts.models.enrich) {
+      if (cachedEnrich && cachedEnrich.model === opts.models.enrich && cachedEnrich.snapshotDate === opts.snapshotDate) {
         enriched = cachedEnrich.value;
         stat.enrich = "cache";
       } else {
@@ -379,7 +423,7 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
           otherIds: allIds.filter((id) => id !== c.id),
           today: opts.snapshotDate,
         });
-        await writeEntry(enrichPath, c.id, { model: opts.models.enrich, value: enriched });
+        await writeEntry(enrichPath, c.id, { model: opts.models.enrich, snapshotDate: opts.snapshotDate, value: enriched });
         stat.enrich = "llm";
       }
 
@@ -388,12 +432,17 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       const enrichedHash = sha256Hex(JSON.stringify(enriched));
       let verdict: { kept: Enriched; dropped: string[]; fatal?: string };
       const cachedVerify = await readEntry(verifyPath, c.id, VerifyEntrySchema);
-      if (cachedVerify && cachedVerify.model === opts.models.verify && cachedVerify.enrichedHash === enrichedHash) {
+      if (
+        cachedVerify &&
+        cachedVerify.model === opts.models.verify &&
+        cachedVerify.snapshotDate === opts.snapshotDate &&
+        cachedVerify.enrichedHash === enrichedHash
+      ) {
         verdict = { kept: cachedVerify.kept, dropped: cachedVerify.dropped, ...(cachedVerify.fatal ? { fatal: cachedVerify.fatal } : {}) };
         stat.verify = "cache";
       } else {
         verdict = await verifyRecord(enriched, passages, opts.llm.verify, { today: opts.snapshotDate });
-        await writeEntry(verifyPath, c.id, { model: opts.models.verify, enrichedHash, ...verdict });
+        await writeEntry(verifyPath, c.id, { model: opts.models.verify, snapshotDate: opts.snapshotDate, enrichedHash, ...verdict });
         stat.verify = "llm";
       }
       stat.dropped = verdict.dropped;
@@ -440,8 +489,10 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
     } catch (e) {
       // A thrown error (a model error such as HTTP 413, a failed repair) costs this record, not the build,
       // unless they are so many that the run as a whole is not usable (see the guard below).
-      const llmError = e instanceof LlmError && (stage === "enrichment" || stage === "verification") ? e : undefined;
-      return exclude(clip(`${stage} failed: ${oneLine(errorMessage(e))}`), true, llmError);
+      if (e instanceof LlmError && (stage === "enrichment" || stage === "verification")) {
+        return exclude(`${stage} failed: ${llmReason(e)}`, true, e);
+      }
+      return exclude(clip(`${stage} failed: ${oneLine(errorMessage(e))}`), true);
     }
   }
 
@@ -450,7 +501,9 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
     const result = await buildOne(c);
     done.push(result);
     const s = result.stat;
-    const how = result.kind === "built" ? `built (${s.words} words, ${s.passages} passages; enrich ${s.enrich}, verify ${s.verify})` : `excluded: ${result.reason}`;
+    // The console gets what Groq actually said; the manifest only gets the short reason.
+    const raw = result.kind === "excluded" && result.llmError ? ` [${oneLine(errorMessage(result.llmError))}]` : "";
+    const how = result.kind === "built" ? `built (${s.words} words, ${s.passages} passages; enrich ${s.enrich}, verify ${s.verify})` : `excluded: ${result.reason}${raw}`;
     log(`[${i + 1}/${work.length}] ${c.id}: ${how}`);
 
     // R14 (a): a rejected key fails every remaining record the same way, so stop at once.
@@ -472,6 +525,7 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       "llm-failures",
       `Refusing to write the snapshot: ${lost.length} of the ${reachedCount} records that reached enrichment were lost to Groq errors (more than half), so the run is not usable. ` +
         `First error, on ${lost[0]!.id}: ${clip(oneLine(errorMessage(lost[0]!.error)))}. ` +
+        (lost.some((l) => l.error.status === 413) ? `${TOO_LARGE_HINT} ` : "") +
         "Nothing was written; results already cached are kept, so run again once Groq is reachable.",
     );
   }
@@ -569,6 +623,7 @@ export function formatSummary({ manifest: m, stats }: RunResult): string {
     ...(failed.length > 0
       ? [`${plural(failed.length, "record")} failed in a step rather than on content. Run again to retry them: finished work is cached.`]
       : []),
+    ...(stats.some((s) => s.llmStatus === 413) ? [TOO_LARGE_HINT] : []),
     ...(built.length > 0
       ? [
           "",
