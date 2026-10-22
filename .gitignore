@@ -8,3 +8,6 @@ node_modules/
 .tmp-*
 dist/
 *.log
+
+# Passages of records whose publisher does not allow redistribution (R39): rebuilt by pnpm snapshot:build from a re-fetch, never committed.
+photon/data/snapshot-private/

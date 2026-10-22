@@ -1,0 +1,6 @@
+Tender number: GBZ000123
+Description: Supply of cloud services
+Agency: Ministry of Digital Development and Information
+Supplier: Example Pte Ltd
+Awarded amount: S$1,234,567
+Award date: 2025-03-04

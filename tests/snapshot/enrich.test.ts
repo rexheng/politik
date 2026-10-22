@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { groqLlm, type Llm } from "../../photon/src/llm/groq.ts";
+import { z } from "zod/v4";
 import type { Passage } from "../../photon/src/data/schema.ts";
 import type { Candidate } from "../../photon/scripts/snapshot/candidates.ts";
-import { EnrichedSchema, enrichRecord } from "../../photon/scripts/snapshot/enrich.ts";
+import { EnrichedSchema, enrichRecord, headlineFor, relatedCandidateIds } from "../../photon/scripts/snapshot/enrich.ts";
 
 const candidate: Candidate = {
   include: true,
@@ -293,4 +294,111 @@ test("I3: an Enriched whose published is a bare string no longer parses", () => 
   assert.equal(EnrichedSchema.safeParse({ ...rest, published: "2025-09-29" }).success, false);
   assert.equal(EnrichedSchema.safeParse({ ...rest, published: { value: "2025-09-29", support: [] } }).success, false);
   assert.equal(EnrichedSchema.safeParse(rest).success, true, "published stays optional");
+});
+
+// --- R23: the related list and the fixed size of the prompt ---
+
+const cand = (id: string, topics: Candidate["topics"], over: Partial<Candidate> = {}): Candidate => ({
+  ...candidate,
+  id,
+  jurisdiction: id.startsWith("sg-") ? "SG" : "US-CA",
+  topics,
+  ...over,
+});
+
+test("R23: relatedCandidateIds offers only the other records of the same jurisdiction that share a topic, in the order given, never the record itself", () => {
+  const all = [
+    cand("ca-a", ["ai-governance"]),
+    cand("ca-b", ["ai-governance", "privacy-data"]),
+    cand("ca-c", ["privacy-data"]),
+    cand("ca-d", ["cybersecurity"]),
+    cand("sg-e", ["ai-governance"]),
+    cand("sg-f", ["privacy-data"]),
+  ];
+  assert.deepEqual(relatedCandidateIds(all[0]!, all), ["ca-b"], "same topic and place; ca-c has another topic, sg-e is in another jurisdiction");
+  assert.deepEqual(relatedCandidateIds(all[1]!, all), ["ca-a", "ca-c"], "a record with two topics matches on either");
+  assert.deepEqual(relatedCandidateIds(all[3]!, all), [], "nothing else shares its topic");
+  assert.deepEqual(relatedCandidateIds(all[4]!, all), [], "sg-e shares ai-governance only with California records");
+});
+
+test("R23: the related list in the prompt is the one given, and a model that names an id outside it has that link removed", async () => {
+  const ids = ["ca-sb-1047-2024", "ca-ab-1008-2024"];
+  const { llm, calls } = fakeLlm({ ...goodReply(), related: [{ id: "ca-sb-1047-2024", relation: "amends" }, { id: "sg-pdpa-2012", relation: "related" }] });
+  const out = await enrichRecord(candidate, passages, llm, { otherIds: ids });
+  const user = calls[0]!.user;
+  assert.ok(user.includes("ca-sb-1047-2024, ca-ab-1008-2024"), "ids are listed on one line, separated by commas");
+  assert.ok(!user.includes("sg-pdpa-2012"), "an id that was not offered is not in the prompt");
+  assert.deepEqual(out.related, [{ id: "ca-sb-1047-2024", relation: "amends" }], "and is not accepted from the reply either");
+});
+
+test("R23: the fixed part of the enrich prompt stays small: the system prompt, the wire schema and the user prompt around the ids", async () => {
+  // Before R23: system 3,060 characters, schema 3,011 (every `support` carried the same description), and a user prompt
+  // that listed all 235 other ids (about 6,100 characters).
+  const ids = Array.from({ length: 50 }, (_, i) => `ca-example-bill-${i}-2025`);
+  const { llm, calls } = fakeLlm(goodReply());
+  await enrichRecord(candidate, passages, llm, { otherIds: ids, today: "2026-10-15" });
+  const { system, user, schema } = calls[0]!;
+  const wire = JSON.stringify(z.toJSONSchema(schema));
+  const aroundIds = user.slice(0, user.indexOf("Passages:") + "Passages:".length).replace(ids.join(", "), "");
+  assert.ok(system.length <= 2900, `system prompt: ${system.length} characters`);
+  assert.ok(wire.length <= 2100, `schema: ${wire.length} characters`);
+  assert.ok(aroundIds.length <= 450, `user prompt around the ids: ${aroundIds.length} characters`);
+  assert.ok(!/describe|description/i.test(wire), "the schema carries no description texts: the system prompt says it once");
+});
+
+test("R23: the rules survive the shortening: citations, ids, the topic list, the relation list, dates, today's date, and 'null when not stated'", async () => {
+  const { llm, calls } = fakeLlm(goodReply());
+  await enrichRecord(candidate, passages, llm, { otherIds: ["ca-sb-1047-2024"], today: "2026-10-15" });
+  const { system } = calls[0]!;
+  assert.match(system, /ONLY the passages/);
+  assert.match(system, /never (?:use outside knowledge|cite an id that is not listed)/i);
+  assert.match(system, /untrusted/i);
+  assert.match(system, /at least one id per claim/i);
+  assert.match(system, /cop(?:y|ied) (?:ids )?exactly/i);
+  for (const relation of ["amends", "implements", "replaces", "responds-to", "related"]) assert.ok(system.includes(relation), relation);
+  assert.match(system, /No other topic|no other/i);
+  assert.match(system, /Today is 2026-10-15/);
+  assert.match(system, /or null/i);
+  assert.match(system, /JSON object only/i);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// R25: the optional headline
+
+const summary = { value: "Large AI developers must publish a safety framework and report critical safety incidents to the State.", support: ["ca-sb-53-2025#1", "ca-sb-53-2025#2"] };
+const words = (n: number) => Array.from({ length: n }, (_, i) => `word${i}`).join(" ");
+
+test("headlineFor sends the title and the summary text and no other passage text, and the headline cites the summary's passages", async () => {
+  const { llm, calls } = fakeLlm({ headline: "Big AI companies in California must now publish their safety plans and report serious incidents." });
+  const got = await headlineFor(candidate, summary, llm);
+  assert.deepEqual(got, { value: "Big AI companies in California must now publish their safety plans and report serious incidents.", support: summary.support });
+  assert.equal(calls.length, 1, "one call");
+  const sent = `${calls[0]!.system}\n${calls[0]!.user}`;
+  assert.ok(sent.includes(candidate.title));
+  assert.ok(sent.includes(summary.value));
+  for (const p of passages) assert.ok(!sent.includes(p.text), `passage ${p.id} must not be sent`);
+  assert.ok(!sent.includes(candidate.url) && !sent.includes(candidate.why), "nothing else about the candidate");
+  assert.ok(/30 words/.test(calls[0]!.system), "the prompt names the limit");
+  assert.ok(/no facts|add no|nothing that is not/i.test(calls[0]!.system), "and asks for nothing the summary does not say");
+  assert.equal(calls[0]!.name, "policy_headline");
+  assert.deepEqual(calls[0]!.schema.safeParse({ headline: "x" }).success, true);
+  assert.equal(calls[0]!.schema.safeParse({ headline: 3 }).success, false);
+});
+
+test("headlineFor gives null for an empty reply, one over 30 words, and one with two sentences", async () => {
+  assert.equal(await headlineFor(candidate, summary, fakeLlm({ headline: "" }).llm), null);
+  assert.equal(await headlineFor(candidate, summary, fakeLlm({ headline: "   " }).llm), null);
+  assert.equal(await headlineFor(candidate, summary, fakeLlm({ headline: `${words(35)}.` }).llm), null);
+  assert.equal(await headlineFor(candidate, summary, fakeLlm({ headline: "Developers must publish safety plans. They must also report incidents." }).llm), null);
+  // 30 words exactly, one sentence, is fine; a full stop inside an abbreviation is not a second sentence
+  assert.ok(await headlineFor(candidate, summary, fakeLlm({ headline: `${words(30)}.` }).llm));
+  assert.ok(await headlineFor(candidate, summary, fakeLlm({ headline: "Companies doing business with U.S. agencies must publish safety plans under Sec. 22757.12 of the Code." }).llm));
+  assert.equal((await headlineFor(candidate, summary, fakeLlm({ headline: "  Developers must publish safety plans.  " }).llm))?.value, "Developers must publish safety plans.");
+});
+
+test("headlineFor lets an LLM error through, for the build to log", async () => {
+  const llm = (async () => {
+    throw new Error("Groq API error 503");
+  }) as Llm;
+  await assert.rejects(headlineFor(candidate, summary, llm), /503/);
 });

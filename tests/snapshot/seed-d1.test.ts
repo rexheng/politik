@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { inspectSnapshot } from "../../scripts/check-data.ts";
 import { countFromWranglerJson, main, parseArgs } from "../../photon/scripts/snapshot/seed-d1.ts";
 import type { Manifest, Passage, PolicyRecord } from "../../photon/src/data/schema.ts";
 import { snapshotStatements, toSqlFile } from "../../photon/src/data/seed.ts";
@@ -81,6 +82,62 @@ describe("seed:d1", () => {
   test("the seed file wipes and reloads from the snapshot", async () => {
     await run(["--dir", fixtureDir]);
     assert.equal(readFileSync(sqlPath(), "utf8"), toSqlFile(snapshotStatements(policies, passages, manifest)));
+  });
+
+  describe("R39: the private passages of restricted records", () => {
+    /** The fixture with its first record restricted: its passages are in `<dir>-private/passages.json`, not in the committed file. */
+    function restrictedSnapshot(name: string, opts: { withPrivate: boolean }) {
+      const records: PolicyRecord[] = structuredClone(policies);
+      records[0]!.redistributionOk = false;
+      const cut = (v: string) => (v.length > 281 ? `${v.slice(0, 280)}…` : v); // R42: a restricted record's quotes are short
+      records[0]!.summary.value = cut(records[0]!.summary.value);
+      for (const p of records[0]!.provisions) p.value = cut(p.value);
+      const hidden = passages.filter((p) => p.recordId === records[0]!.id);
+      const open = passages.filter((p) => p.recordId !== records[0]!.id);
+      const dir = snapshotDir(name, { policies: records, passages: open, manifest });
+      if (opts.withPrivate) {
+        mkdirSync(`${dir}-private`, { recursive: true });
+        writeFileSync(join(`${dir}-private`, "passages.json"), JSON.stringify(hidden));
+      }
+      return { dir, records, hidden, open };
+    }
+
+    test("the seed reads the committed and the private passages and loads both", async () => {
+      const { dir, records, hidden, open } = restrictedSnapshot("licence-both", { withPrivate: true });
+      const r = await run(["--dir", dir]);
+      assert.equal(r.code, 0, r.err);
+      assert.equal(r.err, "");
+      assert.match(r.out, new RegExp(`${open.length + hidden.length} passages`));
+      assert.match(r.out, new RegExp(`${hidden.length} private`));
+      const sql = readFileSync(sqlPath(), "utf8");
+      for (const p of hidden) assert.ok(sql.includes(p.text.slice(0, 40).replaceAll("'", "''")), p.id);
+      const all = [...open, ...hidden];
+      assert.equal(sql, toSqlFile(snapshotStatements(records, all, manifest)));
+    });
+
+    test("without the private file the seed still runs, and says which records will have no passage text", async () => {
+      const { dir, records, open } = restrictedSnapshot("licence-missing", { withPrivate: false });
+      const r = await run(["--dir", dir]);
+      assert.equal(r.code, 0, r.err);
+      assert.match(r.err, /private/i);
+      assert.ok(r.err.includes(records[0]!.id));
+      // the same sentence check:data prints
+      const expected = inspectSnapshot({ policies: records, passages: open, manifest, privatePath: join(`${dir}-private`, "passages.json") }).warnings[0]!;
+      assert.ok(r.err.includes(`Warning: ${expected}`), r.err);
+      assert.equal(readFileSync(sqlPath(), "utf8"), toSqlFile(snapshotStatements(records, open, manifest)));
+    });
+
+    test("restricted text in the committed passages.json is refused before anything is sent", async () => {
+      const { dir, records, hidden, open } = restrictedSnapshot("licence-leak", { withPrivate: true });
+      writeFileSync(join(dir, "passages.json"), JSON.stringify([...open, ...hidden]));
+      rmSync(sqlPath(), { force: true });
+      const r = await run(["--dir", dir]);
+      assert.equal(r.code, 1);
+      assert.deepEqual(r.calls, []);
+      assert.match(r.err, /restricted/i);
+      assert.equal(existsSync(sqlPath()), false);
+      assert.ok(records.length > 0);
+    });
   });
 
   test("--remote targets the remote database for both steps", async () => {

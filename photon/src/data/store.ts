@@ -26,7 +26,8 @@ const SUMMARY_COLUMNS = `r.id AS id, r.jurisdiction AS jurisdiction, r.type AS t
   r.short_title AS short_title, r.status AS status, r.status_date AS status_date, r.published AS published,
   r.last_activity AS last_activity, r.landmark AS landmark, r.review_state AS review_state,
   json_extract(r.data_json, '$.summary.value') AS summary, json_extract(r.data_json, '$.url') AS url,
-  json_extract(r.data_json, '$.publisher') AS publisher`;
+  json_extract(r.data_json, '$.publisher') AS publisher, json_extract(r.data_json, '$.attribution') AS attribution,
+  json_extract(r.data_json, '$.redistributionOk') AS redistribution_ok`;
 
 interface SummaryRow {
   id: string;
@@ -43,6 +44,8 @@ interface SummaryRow {
   summary: string;
   url: string;
   publisher: string;
+  attribution: string | null;
+  redistribution_ok: number | null;
 }
 
 function toSummary(row: SummaryRow): RecordSummary {
@@ -59,6 +62,8 @@ function toSummary(row: SummaryRow): RecordSummary {
     summary: row.summary,
     url: row.url,
     publisher: row.publisher,
+    ...(row.attribution !== null && { attribution: row.attribution }),
+    redistributionOk: row.redistribution_ok === 1,
     landmark: row.landmark === 1,
     reviewState: row.review_state,
   };
@@ -179,15 +184,20 @@ async function runSearch(db: D1Like, match: string, filters: Filters, max: numbe
  * The passages with these ids, in the order of `ids`. An unknown id is skipped, a repeated id is returned once (at its
  * first place), and no ids give `[]`. An unmigrated database gives `[]`.
  */
-export async function getPassages(db: D1Like, ids: string[]): Promise<Passage[]> {
+export async function getPassages(db: D1Like, ids: string[], opts: { redistributableOnly?: boolean } = {}): Promise<Passage[]> {
   const wanted = [...new Set(ids)];
   if (wanted.length === 0) return [];
+  // R39: with `redistributableOnly`, the passages of a record whose publisher does not allow redistribution are left out.
+  const from = opts.redistributableOnly
+    ? "FROM passages p JOIN records r ON r.id = p.record_id"
+    : "FROM passages p";
+  const licence = opts.redistributableOnly ? " AND json_extract(r.data_json, '$.redistributionOk') = 1" : "";
   return emptyIfUnmigrated(async () => {
     const byId = new Map<string, Passage>();
     for (let i = 0; i < wanted.length; i += PASSAGE_ID_CHUNK) {
       const chunk = wanted.slice(i, i + PASSAGE_ID_CHUNK);
       const { results } = await db
-        .prepare(`SELECT ${PASSAGE_COLUMNS} FROM passages p WHERE p.id IN (${placeholders(chunk.length)})`)
+        .prepare(`SELECT ${PASSAGE_COLUMNS} ${from} WHERE p.id IN (${placeholders(chunk.length)})${licence}`)
         .bind(...chunk)
         .all<PassageRow>();
       for (const row of results) byId.set(row.p_id, toPassage(row));

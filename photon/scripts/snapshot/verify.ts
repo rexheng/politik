@@ -1,10 +1,12 @@
-// The second pass: asks a (separate) Groq call whether each enriched claim is supported by the passages it cites.
+// The second pass: asks a (separate) Groq call whether each enriched claim is supported by the passages it cites. Since R25 the build
+// uses it only for `--llm-headlines` (`verifyHeadline`); `verifyRecord` is kept, tested, and no longer used by the build.
 // Node-only build code: never import this from photon/src.
 import { z } from "zod/v4";
 
-import { StatusSchema, type Passage } from "../../src/data/schema.ts";
+import { StatusSchema, type Passage, type Supported } from "../../src/data/schema.ts";
 import type { Llm } from "../../src/llm/groq.ts";
 import { STATUS_HELP, type Enriched } from "./enrich.ts";
+import { wordCount } from "./passages.ts";
 
 const Verdicts = z.object({
   results: z.array(
@@ -47,6 +49,16 @@ ${todayRule}
 ${REPLY_RULE}`;
 }
 
+/** The prompt body for some claims: each claim and the passages it cites, then those passages (each shown once). */
+function claimsPrompt(checkable: Claim[], byId: Map<string, Passage>): string {
+  const cited = unique(checkable.flatMap((c) => c.support)).flatMap((id) => (byId.has(id) ? [byId.get(id)!] : []));
+  const claimBlocks = checkable
+    .map((c) => `CLAIM ${c.id}: ${c.text}\nCited passages: ${c.support.filter((id) => byId.has(id)).join(", ")}`)
+    .join("\n\n");
+  const passageBlocks = cited.map((p) => `[${p.id}]${p.heading ? ` ${p.heading}` : ""}\n${p.text}`).join("\n\n");
+  return `Claims to check:\n\n${claimBlocks}\n\nPassages:\n\n${passageBlocks}`;
+}
+
 /** The exclusion reason when the passages are not from the document the candidate list names. */
 export const IDENTITY_FATAL = "source does not match the listed document";
 
@@ -54,12 +66,32 @@ const unique = <T>(items: T[]) => [...new Set(items)];
 
 type Claim = { id: string; text: string; support: string[] };
 
-/** The identity claim is checked against this many of the document's first passages, where its title and number appear. */
-const IDENTITY_PASSAGES = 2;
+/** The identity claim is checked against every passage that holds one of the document's first this-many words... */
+const IDENTITY_WORDS = 600;
+/** ...and against at least this many passages, because a short first passage (a bill's header, say) holds few words. */
+const IDENTITY_MIN_PASSAGES = 3;
+
+/**
+ * The passages the identity claim cites: every passage that starts within the document's first IDENTITY_WORDS words, and
+ * at least the first IDENTITY_MIN_PASSAGES. The document's title, number or subject may first appear a little way in, such
+ * as in the digest after a bill's legislative history, and a checker that is not shown it calls the source the wrong
+ * document (R23: the first two passages missed it for 33 of 63 California bills).
+ */
+function identityPassages(passages: Passage[]): Passage[] {
+  let before = 0;
+  const kept: Passage[] = [];
+  for (const p of passages) {
+    if (kept.length >= IDENTITY_MIN_PASSAGES && before >= IDENTITY_WORDS) break;
+    kept.push(p);
+    before += wordCount(p.text);
+  }
+  return kept;
+}
 
 /**
  * Every statement in the record that carries a citation, with a stable id such as `provisions[2]`.
- * `identity` (only when `title` is given) says the document is the one the title names, and cites the first passages.
+ * `identity` (only when `title` is given) says the document is the one the title names, and cites the passages of its
+ * first 600 words (at least three: see `identityPassages`).
  */
 function claimsOf(e: Enriched, passages: Passage[], title?: string): Claim[] {
   return [
@@ -68,7 +100,7 @@ function claimsOf(e: Enriched, passages: Passage[], title?: string): Claim[] {
           {
             id: "identity",
             text: `These passages are from the document named "${title}" (wording may differ; a later amended version of the same bill/instrument counts).`,
-            support: passages.slice(0, IDENTITY_PASSAGES).map((p) => p.id),
+            support: identityPassages(passages).map((p) => p.id),
           },
         ]
       : []),
@@ -104,14 +136,7 @@ export async function verifyRecord(
 
   const verdict = new Map<string, boolean>(); // claim id -> supported; a second verdict can only lower it
   if (checkable.length > 0) {
-    const cited = unique(checkable.flatMap((c) => c.support)).flatMap((id) => (byId.has(id) ? [byId.get(id)!] : []));
-    const claimBlocks = checkable
-      .map((c) => `CLAIM ${c.id}: ${c.text}\nCited passages: ${c.support.filter((id) => byId.has(id)).join(", ")}`)
-      .join("\n\n");
-    const passageBlocks = cited.map((p) => `[${p.id}]${p.heading ? ` ${p.heading}` : ""}\n${p.text}`).join("\n\n");
-    const user = `Claims to check:\n\n${claimBlocks}\n\nPassages:\n\n${passageBlocks}`;
-
-    const answer = await llm({ system: systemPrompt(ctx?.today), user, schema: Verdicts, name: "claim_verification" });
+    const answer = await llm({ system: systemPrompt(ctx?.today), user: claimsPrompt(checkable, byId), schema: Verdicts, name: "claim_verification" });
     for (const r of answer.results) verdict.set(r.claimId, (verdict.get(r.claimId) ?? true) && r.supported);
   }
   const sent = new Set(checkable.map((c) => c.id));
@@ -139,4 +164,20 @@ export async function verifyRecord(
           ? "status unsupported"
           : undefined;
   return fatal ? { kept, dropped, fatal } : { kept, dropped };
+}
+
+/**
+ * One Groq call that checks a headline (spec 5.4b) against the passages it cites, with the same system prompt and reply schema
+ * as `verifyRecord` and one claim, `headline`. True only if the model says it is supported: a claim it leaves out of its
+ * answer, or a headline that cites no passage in `passages`, is false (and the latter makes no call). `ctx.today` is the
+ * snapshot date. Errors from the call (an LlmError) are the caller's to handle.
+ */
+export async function verifyHeadline(headline: Supported<string>, passages: Passage[], llm: Llm, ctx?: { today?: string }): Promise<boolean> {
+  const byId = new Map(passages.map((p) => [p.id, p]));
+  if (!headline.support.some((id) => byId.has(id))) return false;
+  const claim: Claim = { id: "headline", text: headline.value, support: headline.support };
+  const answer = await llm({ system: systemPrompt(ctx?.today), user: claimsPrompt([claim], byId), schema: Verdicts, name: "claim_verification" });
+  let supported: boolean | undefined;
+  for (const r of answer.results) if (r.claimId === "headline") supported = (supported ?? true) && r.supported;
+  return supported === true;
 }

@@ -22,7 +22,9 @@ export type Llm = <T>(req: LlmRequest<T>) => Promise<T>;
  */
 export const DEFAULT_MODELS: { enrich: string; verify: string } = {
   enrich: "openai/gpt-oss-120b", // the strongest production model with structured output
-  verify: "openai/gpt-oss-20b", // faster and cheaper; a different model from enrich, so the checker does not share its blind spots
+  // gpt-oss-20b would be cheaper and a different model from enrich, but on the first real build (Task 7b) it answered every
+  // verify request with HTTP 400 json_validate_failed and an empty failed_generation, so no record could be checked.
+  verify: "openai/gpt-oss-120b",
 };
 
 /** Applies the GROQ_ENRICH_MODEL / GROQ_VERIFY_MODEL overrides from an environment the caller supplies. Blank values are ignored. */

@@ -48,6 +48,10 @@ export interface Citation {
   status?: Status;
   fetched?: string;
   reviewState?: "auto-checked" | "human-reviewed";
+  /** How to credit the source (a policy citation always has it). */
+  attribution?: string;
+  /** False when the publisher does not allow redistribution (R39): the quote is all of its text the app shows. */
+  redistributionOk?: boolean;
   /** At most 280 characters from the passage or post. */
   quote: string;
 }

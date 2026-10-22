@@ -333,6 +333,10 @@ test("DEFAULT_MODELS names a model for each step, and both support json_schema",
   assert.ok(DEFAULT_MODELS.enrich.length > 0 && DEFAULT_MODELS.verify.length > 0);
 });
 
+test("DEFAULT_MODELS.verify is gpt-oss-120b: gpt-oss-20b answered every verify call with an empty json_validate_failed (R23)", () => {
+  assert.equal(DEFAULT_MODELS.verify, "openai/gpt-oss-120b");
+});
+
 test("resolveModels lets GROQ_ENRICH_MODEL and GROQ_VERIFY_MODEL override the defaults, ignoring blanks", () => {
   assert.deepEqual(resolveModels({}), { enrich: DEFAULT_MODELS.enrich, verify: DEFAULT_MODELS.verify });
   assert.deepEqual(resolveModels({ GROQ_ENRICH_MODEL: "a/b", GROQ_VERIFY_MODEL: "c/d" }), { enrich: "a/b", verify: "c/d" });

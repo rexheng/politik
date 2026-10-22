@@ -1,4 +1,5 @@
-// Renders review.md: the landmark records, laid out for a person to check against their sources (spec 5.5).
+// Renders review.md: the landmark records, laid out for a person to check against their sources (spec 5.5). A record's headline, when
+// it has one, is printed under its summary and marked machine-written.
 // Node-only build code: never import this from photon/src.
 import type { Passage, PolicyRecord } from "../../src/data/schema.ts";
 
@@ -84,6 +85,8 @@ export function renderReview(records: PolicyRecord[], passages: Passage[], const
       "",
       ...list("Status", [claim(`${r.status.value}${r.statusDate ? ` (from ${r.statusDate})` : ""}`, r.status.support)]),
       ...list("Summary", [claim(r.summary.value, r.summary.support)]),
+      // The only model-written field (spec 5.4b): shown under the summary it restates, and labelled as the machine's.
+      ...(r.headline ? list("Headline (machine-written, checked only by a model)", [claim(r.headline.value, r.headline.support)]) : []),
       ...list("Timeline", r.timeline.map((e) => claim(`${e.date}: ${e.event}`, e.support))),
       ...list("Provisions", r.provisions.map((p) => claim(p.value, p.support))),
       ...list("Affected", r.affected.map((a) => claim(a.value, a.support))),

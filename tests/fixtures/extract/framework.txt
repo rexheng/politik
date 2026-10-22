@@ -1,0 +1,35 @@
+Model Framework for Responsible Automated Decision Systems
+Second Edition
+Published 2024 © Example Agency
+All rights reserved. No part of this publication may be reproduced without the prior permission of the copyright owner.
+
+Contents
+Executive summary 3
+1. Introduction 4
+2. Scope of the framework 6
+
+Executive summary
+This framework sets out practical guidance for organisations that deploy automated decision
+systems in the public and private sectors. It explains how organisations can govern the use of
+these systems, manage the risks they create, and communicate clearly with the people they
+affect, in line with existing law.
+
+The framework is voluntary. It does not replace any legal obligation.
+
+1. Introduction
+Automated decision systems are used to approve loans, screen applicants and set prices. This
+section explains why governance matters and who the framework is for.
+
+2. Scope of the framework
+The framework applies to any organisation that uses an automated decision system to make or
+support a decision about an individual. It covers the whole life of a system, from design to
+retirement.
+
+• Organisations should assign clear roles and responsibilities for each automated decision system.
+• Organisations should assess the risk of harm to individuals before deployment.
+• Organisations should keep records of the testing and monitoring of each system.
+• Short bullet
+• Organisations should give individuals a way to ask for human review of a decision.
+
+3. Risk assessment and testing
+Organisations should test each system before and after deployment.

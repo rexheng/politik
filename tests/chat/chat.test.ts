@@ -93,7 +93,7 @@ const markers = (reply: string) => [...reply.matchAll(/\[(\d+)\]/g)].map((m) => 
 
 const MODES: Mode[] = ["greeting", "brief", "detail", "implications", "sentiment", "out-of-scope", "clarify", "fallback"];
 const RESPONSE_KEYS = ["asOf", "citations", "followUps", "general", "mode", "reply"];
-const CITATION_KEYS = ["fetched", "jurisdiction", "kind", "n", "passageId", "quote", "recordId", "reviewState", "shortTitle", "status", "title", "type", "url"];
+const CITATION_KEYS = ["attribution", "fetched", "jurisdiction", "kind", "n", "passageId", "quote", "recordId", "redistributionOk", "reviewState", "shortTitle", "status", "title", "type", "url"];
 
 /** The response is a ChatResponse and nothing more, and it survives a trip through JSON unchanged. */
 function assertShape(res: ChatResponse) {

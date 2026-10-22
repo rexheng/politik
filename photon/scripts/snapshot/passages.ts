@@ -48,10 +48,14 @@ function hardSplit(paragraph: string, target: number): string[] {
   return out;
 }
 
-type Section = { heading?: string; paragraphs: string[] };
+export type Section = { heading?: string; paragraphs: string[] };
 
-/** Groups the text into sections: a new one starts at each `# ` heading line, and paragraphs are separated by blank lines. */
-function toSections(text: string): Section[] {
+/**
+ * Groups the text into sections: a new one starts at each `# ` heading line, and paragraphs are separated by blank lines
+ * (the lines of one paragraph are joined by single spaces). The first section has no heading and may be empty. The
+ * record extractors (extract/) read documents through this, so they see paragraphs exactly as `splitPassages` does.
+ */
+export function toSections(text: string): Section[] {
   const sections: Section[] = [{ paragraphs: [] }];
   let lines: string[] = [];
   const endParagraph = () => {

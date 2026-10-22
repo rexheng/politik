@@ -75,3 +75,10 @@ test("pdfToText returns the fixture's sentence", async () => {
 test("pdfToText rejects bytes that are not a PDF", async () => {
   await assert.rejects(() => pdfToText(new TextEncoder().encode("not a pdf")));
 });
+
+test("htmlToText with bullets starts each list item with a bullet and is otherwise the same", () => {
+  const html = "<p>intro</p><ul><li>a <b>bold</b> item</li><li></li><li>nested<ul><li>inner</li></ul></li></ul><h2>Head</h2><p>after</p>";
+  assert.equal(htmlToText(html, { bullets: true }), "intro\n\n• a bold item\n\n• nested\n\n• inner\n\n# Head\n\nafter");
+  assert.equal(htmlToText(html), "intro\n\na bold item\n\nnested\n\ninner\n\n# Head\n\nafter");
+  assert.equal(htmlToText("<h2>Title <li>x</li></h2>", { bullets: true }), "# Title x");
+});

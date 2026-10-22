@@ -409,6 +409,13 @@ body {
   overflow-wrap: anywhere;
 }
 
+.src-attribution {
+  margin: 0.3rem 0 0;
+  font-size: 0.85rem;
+  line-height: 1.35;
+  opacity: 0.8;
+}
+
 .src-link {
   display: inline-block;
   margin-top: 0.5rem;

@@ -1,0 +1,31 @@
+# Bill: SB 901 (2025-2026) — Artificial intelligence models: safety.
+
+An act to add Chapter 25.5 (commencing with Section 22602) to Division 8 of the Business and Professions Code, relating to artificial intelligence.
+
+# Legislative Counsel's Digest
+
+Artificial intelligence models: safety.
+
+Existing law requires the Department of Technology to conduct an inventory of high-risk automated decision systems used by state agencies.
+
+This bill would require a developer of a covered model to implement a written safety and security protocol before training the model. The bill would require the developer to retain an unredacted copy of the protocol for as long as the model is available, plus 5 years.
+
+# Legislative history
+
+2025-02-07 — Introduced. Read first time. To Com. on RLS. for assignment. To print.
+
+2025-08-28 — Read third time. Passed. (Ayes 41. Noes 9.) Ordered to the Assembly.
+
+2025-09-09 — Enrolled and presented to the Governor at 3:30 p.m.
+
+2025-09-29 — Vetoed by the Governor.
+
+2025-09-29 — In Senate. Consideration of Governor’s veto pending.
+
+# SECTION 1.
+
+Chapter 25.5 (commencing with Section 22602) is added to Division 8 of the Business and Professions Code, to read:
+
+22602.
+
+A developer of a covered model shall implement a written safety and security protocol before training the model, and shall retain an unredacted copy of the protocol while the model is available.

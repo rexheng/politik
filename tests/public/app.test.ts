@@ -198,3 +198,13 @@ describe("model text never reaches HTML", () => {
     assert.doesNotMatch(format, /innerHTML|document\.|window\./);
   });
 });
+
+describe("R39: a source card names whose words the quote is", () => {
+  test("every policy card shows its attribution, and a restricted record is marked as a short excerpt", () => {
+    const js = read("app.js");
+    assert.match(js, /cite\.attribution/);
+    assert.match(js, /cite\.redistributionOk === false/);
+    assert.match(js, /A short excerpt\. The full text is at the publisher\./);
+    assert.match(read("app.css"), /\.src-attribution/);
+  });
+});

@@ -71,6 +71,8 @@ export const PolicyRecordSchema = z.strictObject({
   statusDate: IsoDateSchema.optional(),
   timeline: z.array(z.strictObject({ date: IsoDateSchema, event: NonEmpty, support: z.array(NonEmpty).min(1) })),
   summary: supported(NonEmpty),
+  // The only model-written field: one plain-English sentence, landmarks only, built with --llm-headlines (spec 5.4b).
+  headline: supported(NonEmpty).optional(),
   provisions: z.array(supported(NonEmpty)),
   affected: z.array(supported(NonEmpty)),
   topics: z.array(TopicSchema).min(1),
@@ -150,6 +152,10 @@ export interface RecordSummary {
   summary: string;
   url: string;
   publisher: string;
+  /** How to credit the source (the record's attribution line). Optional so that older callers still type-check; the store always sets it. */
+  attribution?: string;
+  /** False when the publisher does not allow redistribution (R39): the app shows such a record only as a short attributed quote. */
+  redistributionOk?: boolean;
   landmark: boolean;
   reviewState: "auto-checked" | "human-reviewed";
 }

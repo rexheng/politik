@@ -1,4 +1,6 @@
 // Loads a snapshot into the D1 database `politik`. Run it with `pnpm seed:d1 [--remote] [--dir <path>]`.
+// The passages come from `<dir>/passages.json` and, when the machine has it, `<dir>-private/passages.json` (R39: the passages of records
+// that may not be redistributed are not committed).
 //
 // It checks the snapshot first and sends nothing if the check finds a problem. Then it applies the migrations and
 // runs the seed SQL, which wipes the tables and reloads them (the snapshot is the source of truth). It targets the
@@ -6,13 +8,14 @@
 // it says so first (a warning, not a stop: the build's own guard is what keeps a partial snapshot out of git).
 // Node-only build code: never import this from photon/src.
 import { spawnSync } from "node:child_process";
-import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { z } from "zod/v4";
 
-import { checkSnapshot } from "../../../scripts/check-data.ts";
+import { inspectSnapshot } from "../../../scripts/check-data.ts";
+import { privateDirOf } from "../../src/data/redistribution.ts";
 import { snapshotStatements, toSqlFile } from "../../src/data/seed.ts";
 import { ManifestSchema, PassageSchema, PolicyRecordSchema } from "../../src/data/schema.ts";
 
@@ -117,7 +120,16 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
   const policies = readJson(join(dir, "policies.json"), problems);
   const passages = readJson(join(dir, "passages.json"), problems);
   const manifest = readJson(join(dir, "manifest.json"), problems);
-  if (problems.length === 0) problems.push(...checkSnapshot({ policies, passages, manifest }));
+  // The passages of the records that may not be redistributed (R39) are in a git-ignored file beside the snapshot, when this
+  // machine has it. Without it those records are seeded with no passage text, which the warning below says.
+  const privateFile = join(privateDirOf(dir), "passages.json");
+  const privatePassages = existsSync(privateFile) ? readJson(privateFile, problems) : undefined;
+  let warnings: string[] = [];
+  if (problems.length === 0) {
+    const inspected = inspectSnapshot({ policies, passages, manifest, privatePassages, privatePath: privateFile });
+    problems.push(...inspected.errors);
+    warnings = inspected.warnings;
+  }
   if (problems.length > 0) {
     error(`${problems.length} problem${problems.length === 1 ? "" : "s"} in ${dir}:`);
     for (const problem of problems) error(`  - ${problem}`);
@@ -125,7 +137,9 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
   }
 
   const records = z.array(PolicyRecordSchema).parse(policies);
-  const parts = z.array(PassageSchema).parse(passages);
+  const open = z.array(PassageSchema).parse(passages);
+  const hidden = privatePassages === undefined ? [] : z.array(PassageSchema).parse(privatePassages);
+  const parts = [...open, ...hidden];
   const meta = ManifestSchema.parse(manifest);
   if (records.length === 0) {
     return fail(`The snapshot in ${dir} has no records. Seeding it would empty the database, so nothing was sent.`);
@@ -135,9 +149,10 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
   writeFileSync(sqlPath, toSqlFile(snapshotStatements(records, parts, meta)));
 
   const target: "--local" | "--remote" = args.remote ? "--remote" : "--local";
+  for (const warning of warnings) error(`Warning: ${warning}`);
   log(
-    `Seeding ${records.length} records and ${parts.length} passages (snapshot as of ${meta.snapshotDate}) ` +
-      `into ${DB_NAME}, ${args.remote ? "REMOTE" : "local"}.`,
+    `Seeding ${records.length} records and ${parts.length} passages${hidden.length > 0 ? ` (${hidden.length} private)` : ""} ` +
+      `(snapshot as of ${meta.snapshotDate}) into ${DB_NAME}, ${args.remote ? "REMOTE" : "local"}.`,
   );
   // Best effort: a database with no tables yet, or no access, just has nothing to compare with.
   let before: number | undefined;

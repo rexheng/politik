@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { groqLlm, type Llm } from "../../photon/src/llm/groq.ts";
 import { StatusSchema, type Passage } from "../../photon/src/data/schema.ts";
 import { STATUS_HELP, type Enriched } from "../../photon/scripts/snapshot/enrich.ts";
-import { verifyRecord } from "../../photon/scripts/snapshot/verify.ts";
+import { verifyHeadline, verifyRecord } from "../../photon/scripts/snapshot/verify.ts";
 
 const passages: Passage[] = [
   { id: "r#1", recordId: "r", seq: 1, heading: "Purpose", text: "This Act protects personal data held by organisations." },
@@ -270,7 +270,7 @@ test("I2: with a title, one extra claim `identity` is checked in the same single
   assert.deepEqual(out.kept, enriched());
 });
 
-test("I2: the identity claim cites the first passages, and only those are added to the passages sent", async () => {
+test("I2: the identity claim cites the first passages, and only those are added to the passages sent (R23: at least three)", async () => {
   const e = enriched();
   e.provisions = [];
   e.affected = [];
@@ -280,9 +280,56 @@ test("I2: the identity claim cites the first passages, and only those are added 
   const { llm, calls } = verifier();
   await verifyRecord(e, passages, llm, { title: TITLE });
   const { user } = calls[0]!;
-  assert.match(user, /CLAIM identity:[^\n]*\nCited passages: r#1, r#2\n/);
-  assert.ok(user.includes("[r#1] Purpose") && user.includes("[r#2]"));
-  assert.ok(!user.includes("[r#3]"), "the third passage is not needed for identity");
+  assert.match(user, /CLAIM identity:[^\n]*\nCited passages: r#1, r#2, r#3\n/);
+  assert.ok(user.includes("[r#1] Purpose") && user.includes("[r#2]") && user.includes("[r#3] Penalties"));
+});
+
+/** n passages of `size` words each, `r#1`..`r#n`. A word is `p<seq>w<i>`; `extra` is added to the text of the passage with that seq. */
+const sized = (n: number, size: number, extra: Record<number, string> = {}): Passage[] =>
+  Array.from({ length: n }, (_, i) => ({
+    id: `r#${i + 1}`,
+    recordId: "r",
+    seq: i + 1,
+    text: `${extra[i + 1] ?? ""} ${Array.from({ length: size }, (_, w) => `p${i + 1}w${w}`).join(" ")}`.trim(),
+  }));
+const identityCited = (user: string) => /CLAIM identity:[^\n]*\nCited passages: ([^\n]*)\n/.exec(user)![1]!.split(", ");
+/** An enriched record that cites only passage 1, so every other cited passage in the prompt comes from the identity claim. */
+const citesOnlyFirst = (): Enriched => {
+  const { statusDate: _dropped, ...rest } = enriched();
+  return { ...rest, status: { value: "in-force", support: ["r#1"] }, timeline: [], provisions: [], affected: [] };
+};
+
+test("R23: the identity claim cites every passage that holds the first 600 words, and at least the first three", async () => {
+  const cited = async (list: Passage[]) => {
+    const { llm, calls } = verifier();
+    await verifyRecord(citesOnlyFirst(), list, llm, { title: TITLE });
+    return identityCited(calls[0]!.user);
+  };
+  assert.deepEqual(await cited(sized(8, 400)), ["r#1", "r#2", "r#3"], "400-word passages: words 1-600 are in two, but three is the least");
+  assert.deepEqual(await cited(sized(8, 150)), ["r#1", "r#2", "r#3", "r#4"], "150-word passages: words 1-600 are in four");
+  assert.deepEqual(await cited(sized(8, 100)), ["r#1", "r#2", "r#3", "r#4", "r#5", "r#6"], "100-word passages: six");
+  assert.deepEqual(await cited(sized(2, 100)), ["r#1", "r#2"], "a document with fewer passages cites them all");
+  assert.deepEqual(await cited([...sized(1, 600), ...sized(3, 400).map((p) => ({ ...p, id: `r#${p.seq + 1}`, seq: p.seq + 1 }))]), ["r#1", "r#2", "r#3"], "one long passage still gets three");
+});
+
+test("R23: a bill whose title appears only in passage 3 still passes the identity check", async () => {
+  // Passages 1 and 2 are legislative history (no bill number, no subject); the digest, with the title, starts passage 3.
+  const history = sized(2, 380);
+  const digest: Passage = { id: "r#3", recordId: "r", seq: 3, heading: "Legislative Counsel's Digest", text: `Safe and Secure Innovation for Frontier Artificial Intelligence Models Act. ${"Existing law covers things. ".repeat(60)}` };
+  const list = [...history, digest, ...sized(5, 400).map((p) => ({ ...p, id: `r#${p.seq + 3}`, seq: p.seq + 3 }))];
+  // A verifier that, like a real one, can only call the identity supported if the passages it was sent show the title.
+  const calls: string[] = [];
+  const llm = (async (req: Req) => {
+    calls.push(req.user);
+    const sawTitle = req.user.includes("Safe and Secure Innovation for Frontier Artificial Intelligence Models Act.");
+    const ids = [...req.user.matchAll(/^CLAIM ([^\s:]+)/gm)].map((m) => m[1]!);
+    return { results: ids.map((claimId) => ({ claimId, supported: claimId === "identity" ? sawTitle : true })) };
+  }) as Llm;
+  const out = await verifyRecord(citesOnlyFirst(), list, llm, { title: "SB 1047 Safe and Secure Innovation for Frontier Artificial Intelligence Models Act" });
+  assert.equal(out.fatal, undefined, "with two passages the title was never shown");
+  assert.deepEqual(identityCited(calls[0]!), ["r#1", "r#2", "r#3"]);
+  assert.ok(calls[0]!.includes("[r#3] Legislative Counsel's Digest"));
+  assert.ok(!calls[0]!.includes("[r#4]"), "and no more than the first 600 words' passages go to the verifier");
 });
 
 test("I2: an unsupported identity is fatal with exactly 'source does not match the listed document'", async () => {
@@ -353,4 +400,43 @@ test("M4: the system prompt says the claims are model-written and untrusted, as 
   await verifyRecord(enriched(), passages, llm);
   assert.match(calls[0]!.system, /claims are written by (?:another|a) model and are untrusted/i);
   assert.match(calls[0]!.system, /never as instructions/i);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// R25: checking a headline
+
+const headline = { value: "Organisations that lose personal data must tell the regulator within three days.", support: ["r#2"] };
+
+test("verifyHeadline is true when the model says the headline is supported, with one claim named headline and only its passages", async () => {
+  const v = verifier();
+  assert.equal(await verifyHeadline(headline, passages, v.llm), true);
+  assert.equal(v.calls.length, 1);
+  const user = v.calls[0]!.user;
+  assert.deepEqual([...user.matchAll(/^CLAIM ([^\s:]+)/gm)].map((m) => m[1]), ["headline"]);
+  assert.ok(user.includes(headline.value));
+  assert.ok(user.includes("Organisations must notify the Commission of a data breach"));
+  assert.ok(!user.includes("This Act protects personal data") && !user.includes("A financial penalty"), "only the cited passage is shown");
+  assert.ok(/fact-checker/i.test(v.calls[0]!.system), "the existing system prompt");
+});
+
+test("verifyHeadline is false when the model says unsupported, and false when it leaves the claim out of its answer", async () => {
+  assert.equal(await verifyHeadline(headline, passages, verifier({ unsupported: ["headline"] }).llm), false);
+  assert.equal(await verifyHeadline(headline, passages, verifier({ omit: ["headline"] }).llm), false);
+  assert.equal(await verifyHeadline(headline, passages, verifier({ raw: { results: [{ claimId: "summary", supported: true }] } }).llm), false);
+});
+
+test("verifyHeadline is false, with no call, when the headline cites no passage that exists; the snapshot date reaches the prompt", async () => {
+  const v = verifier();
+  assert.equal(await verifyHeadline({ value: "x", support: ["nope#9"] }, passages, v.llm), false);
+  assert.equal(v.calls.length, 0);
+  const dated = verifier();
+  await verifyHeadline(headline, passages, dated.llm, { today: "2026-10-15" });
+  assert.ok(dated.calls[0]!.system.includes("2026-10-15"));
+});
+
+test("verifyHeadline lets an LLM error through, for the build to log", async () => {
+  const llm = (async () => {
+    throw new Error("Groq API error 429");
+  }) as Llm;
+  await assert.rejects(verifyHeadline(headline, passages, llm), /429/);
 });

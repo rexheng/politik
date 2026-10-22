@@ -36,11 +36,18 @@ function decodeEntities(text: string): string {
 
 const collapse = (text: string) => text.replace(/[\s​‌‍﻿]+/g, " ").trim();
 
+/** What `htmlToText({ bullets: true })` puts in front of a list item, so that a list can be told from paragraphs. */
+export const BULLET = "• ";
+
+/** An honorific that ends the text so far: Mr, Mrs, Ms, Mdm, Dr, Prof, Er (with or without a full stop). */
+const AFTER_HONORIFIC = /(?:^|[\s>(])(?:Mr|Mrs|Ms|Mdm|Dr|Prof|Er)\.?\s*$/;
+
 /**
  * Plain text from an HTML page. Drops script, style, nav, header, footer and noscript (and the page title),
  * writes h1-h4 as one-line "# " headings, keeps paragraph breaks as blank lines and collapses other whitespace.
+ * With `bullets`, each list item starts with "• " (the record extractors read provisions from list items).
  */
-export function htmlToText(html: string): string {
+export function htmlToText(html: string, options: { bullets?: boolean } = {}): string {
   const blocks: string[] = [];
   let current = "";
   let headingDepth = 0;
@@ -50,7 +57,7 @@ export function htmlToText(html: string): string {
   const flush = () => {
     const text = collapse(decodeEntities(current));
     current = "";
-    if (!text) return;
+    if (!text || text === BULLET.trim()) return;
     blocks.push(headingDepth > 0 ? `# ${text}` : text);
   };
 
@@ -90,8 +97,11 @@ export function htmlToText(html: string): string {
       continue;
     }
     if (BLOCK.has(name)) {
-      if (headingDepth > 0) current += " ";
+      // A line break right after an honorific is a layout quirk inside one name ("made by Mrs<br>Josephine Teo"), not a new line.
+      if (name === "br" && AFTER_HONORIFIC.test(current)) current += " ";
+      else if (headingDepth > 0) current += " ";
       else flush();
+      if (options.bullets && name === "li" && !closing && headingDepth === 0) current = BULLET;
       continue;
     }
     if (name === "td" || name === "th") current += " ";
@@ -123,15 +133,30 @@ const LINK = new RegExp(`${LINK_TEXT}${LINK_TARGET}`, "g");
 // `[1]: https://example.test "title"` on a line of its own: a reference-style link definition.
 const LINK_DEFINITION = /^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*\S+(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?[ \t]*$/gm;
 
+// Paired emphasis markers: the text inside starts and ends with a character that is not a space or the marker itself, and a
+// `_` pair is not part of a word (so `snake_case_name` stays). A lone `*`, a rule of asterisks and an unpaired marker never match.
+const BOLD_STARS = /\*\*(?=[^\s*])([^\n]*?[^\s*\\])\*\*/g;
+const BOLD_UNDERSCORES = /(?<![\w\\])__(?=[^\s_])([^\n]*?[^\s_\\])__(?!\w)/g;
+const ITALIC_STAR = /(?<![\w*\\])\*(?=[^\s*])([^*\n]*[^\s*\\])\*(?![\w*])/g;
+const ITALIC_UNDERSCORE = /(?<![\w\\])_(?=[^\s_])([^_\n]*[^\s_\\])_(?!\w)/g;
+// A backslash before punctuation is Markdown's escape (`1\.` is "1."), and is dropped; a backslash before a letter is kept.
+const ESCAPE = /\\([\\`*_{}[\]()#+\-.!|<>~])/g;
+
 /**
  * Text from a hand-placed Markdown file (such as a Firecrawl capture), ready for the passage splitter: a leading
- * byte-order mark is removed, `[text](url)` becomes `text`, `![alt](url)` images are dropped, and bare reference-style
- * link definitions (`[1]: url`) are dropped. Headings (`# `) are kept, because the splitter reads them.
+ * byte-order mark is removed, `[text](url)` becomes `text`, `![alt](url)` images are dropped, bare reference-style
+ * link definitions (`[1]: url`) are dropped, paired emphasis markers (`**bold**`, `_italic_`) are removed and backslash
+ * escapes (`1\.`) are undone, so that the text reads as the page does. Headings (`# `) are kept, because the splitter reads them.
  */
 export function markdownToText(markdown: string): string {
   return markdown
     .replace(/^\uFEFF/, "")
     .replace(IMAGE, "")
     .replace(LINK, "$1")
-    .replace(LINK_DEFINITION, "");
+    .replace(LINK_DEFINITION, "")
+    .replace(BOLD_STARS, "$1")
+    .replace(BOLD_UNDERSCORES, "$1")
+    .replace(ITALIC_STAR, "$1")
+    .replace(ITALIC_UNDERSCORE, "$1")
+    .replace(ESCAPE, "$1");
 }

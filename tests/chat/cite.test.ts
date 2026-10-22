@@ -146,6 +146,8 @@ describe("finalize: citations", () => {
         type: "bill",
         status: "in-force",
         reviewState: "human-reviewed",
+        attribution: "Example", // no attribution on the summary: the publisher
+        redistributionOk: false, // no flag on the summary: treated as restricted (R39)
         quote: "Large developers must publish a framework.",
       },
     ]);

@@ -180,6 +180,13 @@ function sourceCard(cite) {
   }
 
   if (cite.quote) card.appendChild(el("blockquote", "src-quote", cite.quote));
+  // Whose words the quote is: shown on every policy card. A record the publisher does not let us redistribute is only ever quoted.
+  if (cite.kind !== "post" && typeof cite.attribution === "string" && cite.attribution.trim()) {
+    card.appendChild(el("p", "src-attribution", "Source: " + cite.attribution.trim()));
+  }
+  if (cite.kind !== "post" && cite.redistributionOk === false) {
+    card.appendChild(el("p", "src-attribution", "A short excerpt. The full text is at the publisher."));
+  }
 
   const url = httpUrl(cite.url);
   if (url) {

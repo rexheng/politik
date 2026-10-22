@@ -1,11 +1,15 @@
-// Validates a policy snapshot (policies.json, passages.json, manifest.json).
+// Validates a policy snapshot (policies.json, passages.json, manifest.json, and the private passages if they are there).
 // Zod checks every shape; the cross-checks below enforce the rules zod cannot express.
+// The passages of a record whose publisher does not allow redistribution (R39) are not committed: they are in
+// `<dir>-private/passages.json` (git-ignored). The two files are checked together; with the private file missing, those records'
+// claims are not checked against their passages, which is a warning, not an error. Restricted text in the committed file is an error.
 // Usage: pnpm check:data [snapshot-dir]   (default: photon/data/snapshot)
-import { readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { z } from "zod/v4";
 
+import { MAX_RESTRICTED_CLAIM_CHARS, privateDirOf, restrictedRecordIds } from "../photon/src/data/redistribution.ts";
 import {
   JurisdictionSchema,
   ManifestSchema,
@@ -65,11 +69,13 @@ function parseAll<S extends z.ZodType>(
   return { valid, ids, allValid: valid.length === items.length };
 }
 
-function checkRecord(r: PolicyRecord, passageIds: Set<string>, recordIds: Set<string>, errors: string[]): void {
+function checkRecord(r: PolicyRecord, passageIds: Set<string>, recordIds: Set<string>, errors: string[], unchecked = false): void {
   const label = `policy ${r.id}`;
 
   const checkSupport = (field: string, support: string[]) => {
     for (const passageId of support) {
+      // The private passages are missing: a restricted record's own passages cannot be looked up.
+      if (unchecked && passageId.startsWith(`${r.id}#`)) continue;
       if (!passageIds.has(passageId)) {
         errors.push(`${label}: ${field} support references unknown passage "${passageId}"`);
       }
@@ -77,6 +83,7 @@ function checkRecord(r: PolicyRecord, passageIds: Set<string>, recordIds: Set<st
   };
   checkSupport("status", r.status.support);
   checkSupport("summary", r.summary.support);
+  if (r.headline) checkSupport("headline", r.headline.support);
   r.provisions.forEach((claim, i) => checkSupport(`provisions[${i}]`, claim.support));
   r.affected.forEach((claim, i) => checkSupport(`affected[${i}]`, claim.support));
   r.timeline.forEach((event, i) => checkSupport(`timeline[${i}]`, event.support));
@@ -130,21 +137,73 @@ function checkCounts(records: PolicyRecord[], manifest: z.infer<typeof ManifestS
   }
 }
 
-/** Returns human-readable errors; an empty array means the snapshot is valid. */
-export function checkSnapshot(input: { policies: unknown; passages: unknown; manifest: unknown }): string[] {
+/** The warning for a snapshot whose private passages are not on this machine, the same for check:data and seed:d1 (both print it). */
+export function missingPrivateWarning(ids: string[], path = "the private passages file (<snapshot dir>-private/passages.json)"): string {
+  const shown = `${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", ..." : ""}`;
+  return (
+    `${path} is missing, so ${ids.length} record${ids.length === 1 ? "" : "s"} that may not be redistributed (${shown}) ` +
+    `${ids.length === 1 ? "has" : "have"} no passages here: their claims were not checked against the text, and seed:d1 loads them with no passage text, so passage search cannot find them. ` +
+    "Run pnpm snapshot:build again to write the file: it fetches the sources again."
+  );
+}
+
+export interface SnapshotInput {
+  policies: unknown;
+  /** The committed passages.json. */
+  passages: unknown;
+  manifest: unknown;
+  /** The private passages (restricted records), or undefined when that file is missing. */
+  privatePassages?: unknown;
+  /** Where that file belongs, for the warning when it is missing. */
+  privatePath?: string;
+}
+
+/** Errors (an empty array means the snapshot is valid) and warnings (things that were not checked). */
+export function inspectSnapshot(input: SnapshotInput): { errors: string[]; warnings: string[] } {
   const errors: string[] = [];
+  const warnings: string[] = [];
 
   const policies = parseAll("policy", "policies", input.policies, PolicyRecordSchema, errors);
   const passages = parseAll("passage", "passages", input.passages, PassageSchema, errors);
+  const privateMissing = input.privatePassages === undefined;
+  const privatePassages = privateMissing
+    ? { valid: [] as Passage[], ids: new Set<string>() }
+    : parseAll("private passage", "private passages", input.privatePassages, PassageSchema, errors);
 
-  for (const record of policies.valid) checkRecord(record, passages.ids, policies.ids, errors);
+  const restricted = restrictedRecordIds(policies.valid);
+  const allIds = new Set([...passages.ids, ...privatePassages.ids]);
+  for (const id of privatePassages.ids) if (passages.ids.has(id)) errors.push(`passage ${id}: duplicate passage id (it is in both passages.json and the private passages)`);
+
+  for (const record of policies.valid) checkRecord(record, allIds, policies.ids, errors, privateMissing && restricted.has(record.id));
+  // R42: the committed summary and provisions of a restricted record are short quotes, not the document.
+  for (const record of policies.valid) {
+    if (!restricted.has(record.id)) continue;
+    const tooLong = (field: string, value: string) => {
+      if (value.length > MAX_RESTRICTED_CLAIM_CHARS) {
+        errors.push(`policy ${record.id}: ${field} is ${value.length} characters, but a record that may not be redistributed is quoted at most ${MAX_RESTRICTED_CLAIM_CHARS} (280 and an ellipsis)`);
+      }
+    };
+    tooLong("summary", record.summary.value);
+    record.provisions.forEach((p, i) => tooLong(`provisions[${i}]`, p.value));
+    record.affected.forEach((a, i) => tooLong(`affected[${i}]`, a.value));
+  }
 
   for (const p of passages.valid) {
     if (!policies.ids.has(p.recordId)) {
       errors.push(`passage ${p.id}: recordId "${p.recordId}" is not a record in policies.json`);
+    } else if (restricted.has(p.recordId)) {
+      errors.push(
+        `passage ${p.id}: record "${p.recordId}" is restricted (its publisher does not allow redistribution), so its passages must not be committed; they belong in the private passages file`,
+      );
     }
   }
-  checkPassageSequences(passages.valid, errors);
+  for (const p of privatePassages.valid) {
+    if (!policies.ids.has(p.recordId)) errors.push(`private passage ${p.id}: recordId "${p.recordId}" is not a record in policies.json`);
+    else if (!restricted.has(p.recordId)) errors.push(`private passage ${p.id}: record "${p.recordId}" may be redistributed, so its passages belong in the committed passages.json, not the private file`);
+  }
+  checkPassageSequences([...passages.valid, ...privatePassages.valid], errors);
+
+  if (privateMissing && restricted.size > 0) warnings.push(missingPrivateWarning([...restricted].sort(), input.privatePath));
 
   const manifest = ManifestSchema.safeParse(input.manifest);
   if (!manifest.success) {
@@ -159,7 +218,12 @@ export function checkSnapshot(input: { policies: unknown; passages: unknown; man
     }
   }
 
-  return errors;
+  return { errors, warnings };
+}
+
+/** Returns human-readable errors; an empty array means the snapshot is valid. */
+export function checkSnapshot(input: SnapshotInput): string[] {
+  return inspectSnapshot(input).errors;
 }
 
 function readJson(path: string, errors: string[]): unknown {
@@ -177,16 +241,26 @@ function main(argv: string[]): number {
   const policies = readJson(resolve(dir, "policies.json"), errors);
   const passages = readJson(resolve(dir, "passages.json"), errors);
   const manifest = readJson(resolve(dir, "manifest.json"), errors);
-  if (errors.length === 0) errors.push(...checkSnapshot({ policies, passages, manifest }));
+  const privateFile = resolve(privateDirOf(dir), "passages.json");
+  const privatePassages = existsSync(privateFile) ? readJson(privateFile, errors) : undefined;
+  let warnings: string[] = [];
+  if (errors.length === 0) {
+    const result = inspectSnapshot({ policies, passages, manifest, privatePassages, privatePath: privateFile });
+    errors.push(...result.errors);
+    warnings = result.warnings;
+  }
 
+  for (const warning of warnings) console.error(`Warning: ${warning}`);
   if (errors.length > 0) {
     console.error(`${errors.length} problem${errors.length === 1 ? "" : "s"} in ${dir}:`);
     for (const error of errors) console.error(`  - ${error}`);
     return 1;
   }
   const m = ManifestSchema.parse(manifest);
+  const committed = (passages as unknown[]).length;
+  const hidden = Array.isArray(privatePassages) ? privatePassages.length : 0;
   console.log(
-    `ok: ${m.counts.total} records, ${(passages as unknown[]).length} passages, snapshot as of ${m.snapshotDate}`,
+    `ok: ${m.counts.total} records, ${committed + hidden} passages (${committed} committed, ${hidden} private), snapshot as of ${m.snapshotDate}`,
   );
   return 0;
 }

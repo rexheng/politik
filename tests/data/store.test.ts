@@ -42,6 +42,8 @@ function summaryOf(r: PolicyRecord): RecordSummary {
     summary: r.summary.value,
     url: r.url,
     publisher: r.publisher,
+    attribution: r.attribution,
+    redistributionOk: r.redistributionOk,
     landmark: r.landmark,
     reviewState: r.review.state,
   };

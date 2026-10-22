@@ -7,10 +7,11 @@
 //   - A citation's `quote` is the stretch of the source's text (at most 280 characters) that shares the most words with
 //     the sentence(s) of the answer that cite it, so a card shows the passage's evidence, not just its first lines.
 import { STOP_WORDS } from "../data/fts.ts";
+import { MAX_RESTRICTED_QUOTE_CHARS } from "../data/redistribution.ts";
 import type { Citation, ComposeOut, Source } from "./types.ts";
 
-/** A citation `quote` is at most this many characters. */
-export const MAX_QUOTE_CHARS = 280;
+/** A citation `quote` is at most this many characters (and so is any run of a restricted record's text in a reply: R39). */
+export const MAX_QUOTE_CHARS = MAX_RESTRICTED_QUOTE_CHARS;
 
 /** How close to the limit a cut must fall to be moved back to a word boundary, in characters. */
 const WORD_SLACK = 60;
@@ -228,6 +229,9 @@ export function citationOf(source: Source, n: number): Citation | undefined {
     type: record.type,
     status: record.status,
     reviewState: record.reviewState,
+    // Whoever the text belongs to is named beside every quote, and a record that may not be redistributed is marked as such.
+    attribution: record.attribution?.trim() || record.publisher,
+    redistributionOk: record.redistributionOk === true,
     quote: clipQuote(passage?.text ?? record.summary),
   };
 }
@@ -235,6 +239,36 @@ export function citationOf(source: Source, n: number): Citation | undefined {
 /** True when the source can be cited: it has a record or a post, with an http(s) link. */
 export function isCitable(source: Source): boolean {
   return citationOf(source, 1) !== undefined;
+}
+
+/** The shortest run of characters whose copying we look for: a 24-character piece that occurs in both texts is a candidate. */
+const SHINGLE = 24;
+const flatten = (text: string) => text.replace(/\s+/g, " ").trim();
+
+/** True when `reply` has more than `max` characters of `text` in a row, word for word. */
+function copiesMoreThan(reply: string, text: string, max: number): boolean {
+  if (reply.length <= max || text.length <= max) return false;
+  const pieces = new Set<string>();
+  for (let i = 0; i + SHINGLE <= reply.length; i++) pieces.add(reply.slice(i, i + SHINGLE));
+  for (let i = 0; i + max + 1 <= text.length; i++) {
+    if (pieces.has(text.slice(i, i + SHINGLE)) && reply.includes(text.slice(i, i + max + 1))) return true;
+  }
+  return false;
+}
+
+/**
+ * True when the model's written output copies more than 280 characters in a row from the passage or summary of a record that
+ * may not be redistributed (R39). The citations are cut to 280 characters, but the model writes the answer, the general-knowledge
+ * text and the follow-up questions, so each of them is checked on its own.
+ */
+export function copiesRestrictedText(texts: string | readonly string[], sources: Source[]): boolean {
+  const replies = (typeof texts === "string" ? [texts] : texts).map((text) => flatten(stripMarkers(text)));
+  return sources.some((source) => {
+    if (source.kind !== "policy" || !source.record || source.record.redistributionOk === true) return false;
+    return [source.passage?.text, source.record.summary].some(
+      (text) => text !== undefined && replies.some((reply) => copiesMoreThan(reply, flatten(text), MAX_QUOTE_CHARS)),
+    );
+  });
 }
 
 /**
@@ -257,5 +291,6 @@ export function finalize(raw: ComposeOut, sources: Source[]): { reply: string; c
     return { ...candidate, n, quote: claim ? bestQuote(textOf(sources[written - 1]!), claim) : candidate.quote };
   });
   const reply = replaceMarkers(raw.answer, (n) => renumbered.get(n)).trim();
-  return { reply, citations, valid: sources.length === 0 || citations.length > 0 };
+  // A reply (the answer, the general text or a follow-up) that copies a restricted record's text at length is not shown: the caller falls back to short attributed quotes.
+  return { reply, citations, valid: (sources.length === 0 || citations.length > 0) && !copiesRestrictedText([raw.answer, raw.general ?? "", ...raw.followUps], sources) };
 }

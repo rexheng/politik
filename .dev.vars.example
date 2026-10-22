@@ -5,6 +5,7 @@ BROWSERBASE_API_KEY=
 TELEGRAM_BOT_TOKEN=
 DEEPGRAM_API_KEY=
 MAPBOX_ACCESS_TOKEN=
+# Needed by chat, and by `pnpm snapshot:build --llm-headlines`. The default snapshot build makes no model call and needs no key.
 GROQ_API_KEY=
 # Optional: leave blank to use the defaults (openai/gpt-oss-120b writes answers, openai/gpt-oss-20b routes questions).
 GROQ_CHAT_MODEL=

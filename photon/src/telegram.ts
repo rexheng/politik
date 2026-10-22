@@ -8,11 +8,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 /** Text for Telegram, which shows plain text: no **bold** stars and no "### " heading marks. */
 const plain = (text: string): string => text.replaceAll("**", "").replace(/^[ \t]*#{1,6}[ \t]+/gm, "");
 
-/** The reply with its markers (but not its markdown), then any general-knowledge text under its label, then one "[n] title — url" line per source. */
+/** The reply with its markers (but not its markdown), then any general-knowledge text under its label, then one "[n] title (attribution) — url" line per source. */
 export function formatTelegramReply(result: ChatResponse): string {
   const parts = [plain(result.reply)];
   if (result.general) parts.push(`${GENERAL_LABEL}:\n${plain(result.general)}`);
-  if (result.citations.length > 0) parts.push(result.citations.map((c) => `[${c.n}] ${c.title} — ${c.url}`).join("\n"));
+  if (result.citations.length > 0) parts.push(result.citations.map((c) => `[${c.n}] ${c.title}${c.attribution ? ` (${c.attribution})` : ""} — ${c.url}`).join("\n"));
   return parts.join("\n\n");
 }
 

@@ -1,0 +1,48 @@
+{
+  "snapshotDate": "2026-10-15",
+  "builtAt": "2026-10-22T23:04:13.878Z",
+  "models": {
+    "enrich": "none",
+    "verify": "none"
+  },
+  "counts": {
+    "total": 233,
+    "byJurisdiction": {
+      "US-CA": 125,
+      "SG": 108
+    },
+    "byType": {
+      "bill": 64,
+      "statute": 12,
+      "regulation": 9,
+      "executive-order": 4,
+      "guidance": 38,
+      "tender": 40,
+      "press-release": 49,
+      "hansard": 17
+    }
+  },
+  "excluded": [
+    {
+      "id": "ca-cec-iepr-dc-forecast-2025",
+      "jurisdiction": "US-CA",
+      "url": "https://www.energy.ca.gov/sites/default/files/2025-11/2025_IEPR_Preliminary_Data_Center_Forecast_ada.pdf",
+      "title": "2025 IEPR preliminary data center forecast (CEC)",
+      "reason": "no official summary found"
+    },
+    {
+      "id": "sg-hansard-pq-dc-number-capacity-2026",
+      "jurisdiction": "SG",
+      "url": "https://www.mddi.gov.sg/newsroom/mddi-s-response-to-pq-on-data-on-total-number-and-load-capacity-of-data-centres-in-singapore/",
+      "title": "PQ: total number and load capacity of data centres",
+      "reason": "too little text"
+    },
+    {
+      "id": "sg-project-moonshot-2024",
+      "jurisdiction": "SG",
+      "url": "https://aiverifyfoundation.sg/tools/moonshot/",
+      "title": "Project Moonshot LLM evaluation toolkit (AI Verify Foundation)",
+      "reason": "too little text"
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+# Bill: SB 900 (2025-2026) — Automated decision systems: transparency.
+
+An act to add Chapter 24.7 (commencing with Section 22760) to Division 8 of the Business and Professions Code, relating to artificial intelligence.
+
+# Legislative Counsel's Digest
+
+Automated decision systems: transparency.
+
+(1) Existing law regulates the use of personal information by businesses, including by requiring a business that collects personal information to inform consumers of the categories of personal information collected and the purposes for which it is used. Existing law does not require a business to disclose when an automated decision system is used to make a decision that affects a consumer.
+
+This bill would require a developer of an automated decision system to publish on its internet website a summary of the system’s intended uses and known limitations. This bill would also require a deployer, as defined, to notify a consumer, before an automated decision system is used to make a consequential decision about the consumer, as specified. The bill would define consequential decision for these purposes, citing Sec. 1798.140 of the Civil Code.
+
+(2) Existing law establishes the Department of Technology within the Government Operations Agency.
+
+This bill would require the department to publish guidance on the notices required by the bill on or before July 1, 2026. This bill would also authorize the Attorney General to enforce the bill by civil action and to seek a civil penalty of up to $2,500 per violation. The bill would become operative on January 1, 2027, for purposes of the penalty provisions.
+
+This bill would provide that no reimbursement is required by this act for a specified reason.
+
+# Legislative history
+
+2025-02-19 — Introduced. Read first time. To Com. on RLS. for assignment. To print.
+
+2025-02-20 — From printer. May be acted upon on or after March 22.
+
+2025-03-05 — Referred to Com. on JUD.
+
+2025-04-10 — From committee: Do pass and re-refer to Com. on APPR. (Ayes 11. Noes 2.) (April 8).
+
+2025-05-28 — Read third time. Passed.  (Ayes 37. Noes 0. Page 1281.) Ordered to the Assembly.
+
+2025-06-05 — In Assembly. Referred to Com. on P. & C.P.
+
+2025-09-12 — Read third time. Passed. (Ayes 59. Noes 7. Page 3432.) Ordered to the Senate.
+
+2025-09-13 — Assembly amendments concurred in. (Ayes 29. Noes 8. Page 3039.) Ordered to engrossing and enrolling.
+
+2025-09-23 — Enrolled and presented to the Governor at 2 p.m.
+
+2025-09-29 — Approved by the Governor.
+
+2025-09-29 — Chaptered by Secretary of State. Chapter 138, Statutes of 2025.
+
+# SECTION 1.
+
+Chapter 24.7 (commencing with Section 22760) is added to Division 8 of the Business and Professions Code, to read:
+
+22760.
+
+(a) A developer of an automated decision system shall publish on its internet website a summary of the system’s intended uses and known limitations.
+
+(b) A deployer shall notify a consumer before an automated decision system is used to make a consequential decision about the consumer.
+
+(c) This chapter does not apply to a system used solely for internal security purposes.
+
+(d) This section shall become operative on January 1, 2028.
+
+# SEC. 2.
+
+The Legislature finds and declares that consumers deserve to know when an automated decision system is used to make a decision that affects them.
+
+# SEC. 3.
+
+No reimbursement is required by this act pursuant to Section 6 of Article XIII B of the California Constitution because the only costs that may be incurred by a local agency or school district will be incurred because this act creates a new crime or infraction.
+
+# SEC. 4.
+
+This act shall become operative on January 1, 2026.

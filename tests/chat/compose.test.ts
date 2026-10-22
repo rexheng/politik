@@ -130,9 +130,10 @@ describe("buildComposePrompt: the answer shape follows the mode", () => {
 describe("buildComposePrompt: the rules", () => {
   const { system } = buildComposePrompt(route(), [policy("sb-53")], ASOF);
 
-  test("rules 1 to 7 are numbered in the system prompt", () => {
-    for (let n = 1; n <= 7; n++) assert.match(system, new RegExp(`^${n}\\. `, "m"), `rule ${n}`);
-    assert.doesNotMatch(system, /^8\. /m);
+  test("rules 1 to 8 are numbered in the system prompt; 8 asks for the answer in the model's own words (R39)", () => {
+    for (let n = 1; n <= 8; n++) assert.match(system, new RegExp(`^${n}\\. `, "m"), `rule ${n}`);
+    assert.doesNotMatch(system, /^9\. /m);
+    assert.match(system, /^8\. .*own words.*never copy more than a sentence/im);
   });
 
   test("1: every factual sentence ends with [n] markers for the sources that support it", () => {

@@ -1,9 +1,17 @@
-// The snapshot build (spec section 5): candidates -> source text -> passages -> enrich -> verify -> the committed JSON files.
-// Run it with `pnpm snapshot:build [--date YYYY-MM-DD] [--no-gebiz] [--refresh | --refresh-all] [--allow-partial]`.
+// The snapshot build (spec section 5): candidates -> source text -> passages -> extract -> check -> the committed JSON files.
+// Run it with `pnpm snapshot:build [--date YYYY-MM-DD] [--no-gebiz] [--refresh | --refresh-all] [--allow-partial] [--llm-headlines]`.
 //
-// Re-runs are cheap and repeatable. Downloads are cached in `rawDir`, and the model answers are cached by the sha256 of
-// the document text in `cacheDir`, so a second run over unchanged sources makes no model calls and writes byte-identical
-// files. Every candidate ends in exactly one place: policies.json, or manifest.excluded with a reason.
+// Since ruling R25 ("extract, don't generate") the build makes no model call and needs no key: each record is filled from the
+// official text by the extractors (extract/), and every claim is checked against the passage it cites by a string comparison
+// (check.ts). Only `--llm-headlines` calls Groq, to add a one-sentence headline to each landmark (spec 5.4b); its answers are
+// cached by the sha256 of the document text in `cacheDir`. Downloads are cached in `rawDir`, so a second run over unchanged
+// sources makes no request and writes byte-identical files. Every candidate ends in exactly one place: policies.json, or
+// manifest.excluded with a reason.
+//
+// The passages of a record whose publisher does not allow redistribution (redistributionOk false) are not committed (R39): they
+// are written to `<outDir>-private/passages.json`, which git ignores, and rebuilt on a fresh machine by running the build again
+// (a re-fetch). The committed passages.json holds the other records' passages only; policies.json keeps every record, with the
+// summary and provisions of a restricted record cut to short quotes of at most 280 characters and an ellipsis (R42).
 // Node-only build code: never import this from photon/src.
 import { readFileSync, realpathSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -14,6 +22,7 @@ import { parse as parseDotenv } from "dotenv";
 import { z } from "zod/v4";
 
 import { checkSnapshot } from "../../../scripts/check-data.ts";
+import { privateDirOf, splitPassagesByLicence } from "../../src/data/redistribution.ts";
 import {
   JurisdictionSchema,
   ManifestSchema,
@@ -27,24 +36,28 @@ import {
   type RecordType,
 } from "../../src/data/schema.ts";
 import { groqLlm, LlmError, resolveModels, type Llm } from "../../src/llm/groq.ts";
+import { checkClaims } from "./check.ts";
 import { parseCandidates, type Candidate } from "./candidates.ts";
-import { enrichRecord, EnrichedSchema, type Enriched } from "./enrich.ts";
+import { headlineFor } from "./enrich.ts";
+import { extractRecord, linkRelated, withoutParts } from "./extract/index.ts";
+import { shortenRestricted } from "./extract/short.ts";
 import { DEFAULT_GEBIZ_MAX, fetchGebizTenders, GEBIZ_RULE, selectTenders, type GebizRule, type GebizTender } from "./gebiz.ts";
-import { loadSource } from "./fetch.ts";
+import { loadSource, type LoadSourceOptions } from "./fetch.ts";
+import { parseLeginfoBillId } from "./leginfo.ts";
 import { sha256Hex, splitPassages, wordCount } from "./passages.ts";
 import { publisherFor } from "./publishers.ts";
 import { renderReview, type ConstructedCheck } from "./review.ts";
-import { verifyRecord } from "./verify.ts";
+import { verifyHeadline } from "./verify.ts";
 
-/** Enrichment is sent the first passages up to this many words. Groq's free tier rejects larger requests (HTTP 413). */
-export const DEFAULT_ENRICH_MAX_WORDS = 6000;
+/** The model names the manifest records when no model was used. */
+const NO_MODELS = { enrich: "none", verify: "none" } as const;
 export { DEFAULT_GEBIZ_MAX };
 /**
- * The version of what the model steps ask and check: the prompts and the set of claims. It is stored with every cached
- * enrich and verify answer, and an answer from another version is a miss. Raise it when a prompt or the claim set changes
- * in a way that makes an old answer wrong or incomplete (2: the identity and published claims, and a cited `published`).
+ * The version of what the headline step asks and checks: its prompts and the claim it verifies. It is stored with every cached
+ * headline answer, and an answer from another version is a miss. Raise it when a prompt changes in a way that makes an old
+ * answer wrong.
  */
-export const PIPELINE_VERSION = 2;
+export const HEADLINE_VERSION = 1;
 /** A built document with fewer words than this (tenders aside) is flagged in the summary: it may be a contents page. */
 const SHORT_WORDS = 300;
 const MAX_REASON = 300;
@@ -56,14 +69,22 @@ const MAX_LOAD_FAILURE_SHARE = 0.25;
 export interface BuildOptions {
   candidatesPath: string;
   outDir: string;
+  /**
+   * Where the passages of the records that may not be redistributed (R39) are written, as `passages.json`. Default: `outDir` with
+   * `-private` added (`photon/data/snapshot-private`), which git ignores. The committed `outDir/passages.json` holds the others only.
+   */
+  privateDir?: string;
   rawDir: string;
   cacheDir: string;
   reviewedPath: string;
-  /** The "as of" date (YYYY-MM-DD). It is also given to both models as today's date. */
+  /** The "as of" date (YYYY-MM-DD). It decides whether a bill or an Act is in force, and is given to the headline checker as today's date. */
   snapshotDate: string;
-  llm: { enrich: Llm; verify: Llm };
-  /** The model names, recorded in the manifest and part of the cache key. */
-  models: { enrich: string; verify: string };
+  /** The models for the optional headlines. Needed (with `models`) only when `headlines` is set; the default build makes no model call. */
+  llm?: { enrich: Llm; verify: Llm };
+  /** The model names, recorded in the manifest and part of the headline cache key. Only used with `headlines`; otherwise the manifest says "none". */
+  models?: { enrich: string; verify: string };
+  /** Adds a one-sentence headline to each landmark (spec 5.4b), written by `llm.enrich` and checked by `llm.verify`. Default false. */
+  headlines?: boolean;
   fetchImpl?: typeof fetch;
   browserbaseKey?: string;
   /**
@@ -77,11 +98,11 @@ export interface BuildOptions {
   gebiz?: boolean;
   /** The GeBIZ selection rule. Default: GEBIZ_RULE. */
   gebizRule?: GebizRule;
-  /** Enrichment sees the first passages totalling at most this many words (the first passage always). Default 6000. */
-  enrichMaxWords?: number;
+  /** Pacing and retry settings for Singapore Statutes Online (see sso.ts), replaced in tests so that they need not wait. `log` is the build's own. */
+  sso?: Omit<NonNullable<LoadSourceOptions["sso"]>, "log">;
   /** The clock, for tests. */
   now?: () => Date;
-  /** Progress lines, one per candidate. */
+  /** Progress lines: one per candidate, and one per part of a Singapore Statutes Online Act as it is fetched. */
   log?: (line: string) => void;
 }
 
@@ -96,15 +117,16 @@ export interface RecordStat {
   passages: number;
   landmark: boolean;
   humanReviewed: boolean;
-  /** Claims the verification step removed, such as `provisions[2]`. */
+  /** Claims the check removed, such as `provisions[2]` (an extractor that passes its tests should never lose one). */
   dropped: string[];
-  enrich?: "cache" | "llm";
-  verify?: "cache" | "llm";
+  /**
+   * With `headlines`, for a landmark: "llm" (written and checked now), "cache", "dropped" (the checker or the format rule
+   * rejected it, now or in the cache) or "failed" (a model call failed). The record is built without a headline in the last two.
+   */
+  headline?: "llm" | "cache" | "dropped" | "failed";
   reason?: string;
-  /** True when a step threw (a model error, say), as opposed to the content failing a check. */
+  /** True when a step threw (a bug in an extractor, say), as opposed to the content failing a check. */
   failed?: boolean;
-  /** The HTTP status Groq answered with, when the step failed on a Groq error. */
-  llmStatus?: number;
   /**
    * Set on a built record whose candidate URL was constructed rather than seen (tenders aside): what its page opens with
    * (its first heading, else its first 80 characters), for a person to compare with the title.
@@ -117,18 +139,18 @@ export interface RecordStat {
 export interface RunResult {
   manifest: Manifest;
   stats: RecordStat[];
+  /** How the passages were split (R39): those in the committed file, those in the private file, and the records that are restricted. */
+  passages?: { committed: number; private: number; restrictedRecords: number };
 }
 
 /**
  * The build refuses to write, because writing would replace a good committed snapshot with a mostly empty one.
- * `auth`: Groq answered HTTP 401 or 403 to some record. `llm-failures`: more than half of the records that reached
- * enrichment were lost to Groq errors (a thrown LlmError: timeout, exhausted rate limit, 5xx, an unusable reply) (R14).
- * `partial`: more than 25% of the listed documents (GeBIZ tenders aside) failed to load, or any landmark did; pass
- * `allowPartial` (`--allow-partial`) to write anyway.
+ * `auth`: Groq answered HTTP 401 or 403 to a headline call. `partial`: more than 25% of the listed documents (GeBIZ tenders
+ * aside) failed to load, or any landmark did; pass `allowPartial` (`--allow-partial`) to write anyway.
  */
 export class SnapshotGuardError extends Error {
   constructor(
-    readonly kind: "auth" | "llm-failures" | "partial",
+    readonly kind: "auth" | "partial",
     message: string,
   ) {
     super(message);
@@ -321,80 +343,56 @@ export async function readInProgressDate(cacheDir: string): Promise<string | und
 // The build
 
 const FetchedSchema = z.record(z.string(), z.object({ sha256: z.string(), fetched: z.string() }));
-// Both prompts are told today's date (it settles "enacted" versus "in-force"), so a cached answer is only good for the
-// snapshot date it was given. An answer for another date is a miss and is replaced.
-const EnrichEntrySchema = z.object({ pipelineVersion: z.number(), model: z.string(), snapshotDate: z.string(), value: EnrichedSchema });
-const VerifyEntrySchema = z.object({
-  pipelineVersion: z.number(),
-  model: z.string(),
-  snapshotDate: z.string(),
-  /** Which enriched value, and which document title (the identity claim names it), this verdict is about. Either changing needs a new verdict. */
-  inputHash: z.string(),
-  kept: EnrichedSchema,
-  dropped: z.array(z.string()),
-  fatal: z.string().optional(),
+/**
+ * A headline answer in the cache `cacheDir/headline/<sha256>.json`, one entry per record id. It is good for the same models
+ * and the same summary (by hash); a rejected headline is cached too ("dropped"), so a re-run does not ask again.
+ */
+const HeadlineEntrySchema = z.object({
+  version: z.number(),
+  enrichModel: z.string(),
+  verifyModel: z.string(),
+  summaryHash: z.string(),
+  outcome: z.enum(["kept", "dropped"]),
+  headline: z.object({ value: z.string().min(1), support: z.array(z.string().min(1)).min(1) }).optional(),
 });
 const BuiltSchema = z.object({ contentHash: z.string(), builtAt: z.string() });
 
-/** The first passages whose words total at most `maxWords`. The first passage is always included. */
-function firstPassages(passages: Passage[], maxWords: number): Passage[] {
-  const out: Passage[] = [];
-  let total = 0;
-  for (const p of passages) {
-    const words = wordCount(p.text);
-    if (out.length > 0 && total + words > maxWords) break;
-    out.push(p);
-    total += words;
-  }
-  return out;
-}
-
 const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
-const clip = (text: string) => (text.length > MAX_REASON ? `${text.slice(0, MAX_REASON - 1).trimEnd()}…` : text);
+const clip = (text: string) => (text.length > MAX_REASON ? `${text.slice(0, MAX_REASON - 1).trimEnd()}\u2026` : text);
 
-/** Said when a request was too large (HTTP 413): the fix is a smaller prompt. */
-const TOO_LARGE_HINT = "HTTP 413 means a request was too large for the model: lower ENRICH_MAX_WORDS (the default is 6000) and run again.";
+/** What goes into the manifest when a step throws. The message itself goes to the console. */
+const FAILED_REASON = { loading: "loading failed", extraction: "extraction failed" } as const;
 
-/**
- * The short, fixed phrase that goes into the committed manifest for a failed model call. Groq's own error text can carry
- * account details such as the organisation id, so the raw message goes to the console log only.
- */
-function llmReason(e: LlmError): string {
-  if (e.status !== undefined) return `HTTP ${e.status}`;
-  if (e.kind === "timeout") return "timed out";
-  if (e.kind === "network") return "unreachable"; // the request never completed: DNS, a refused connection, a proxy
-  return "invalid model output";
-}
-
-/** What goes into the manifest when a step fails for a reason that is not an LlmError. The message itself goes to the console. */
-const NOT_VALID_REASON = { enrichment: "enrichment failed: invalid model output", verification: "verification failed: invalid model output" } as const;
-function failureReason(stage: string): string {
-  if (stage === "loading") return "loading failed";
-  if (stage === "verification") return NOT_VALID_REASON.verification;
-  return NOT_VALID_REASON.enrichment; // enrichment, or assembly of what the model returned
-}
+const hostOf = (url: string): string => {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return url;
+  }
+};
 
 type Done =
-  | { kind: "built"; record: PolicyRecord; passages: Passage[]; stat: RecordStat; reachedEnrichment: true }
+  | { kind: "built"; record: PolicyRecord; passages: Passage[]; text: string; stat: RecordStat }
   | {
       kind: "excluded";
       reason: string;
       stat: RecordStat;
-      reachedEnrichment: boolean;
-      /** Set when a Groq call failed. */
-      llmError?: LlmError;
       /** What really went wrong, for the console log only: the manifest gets the fixed `reason`. */
       detail?: string;
       /** True when the source document could not be loaded (a fetch, extraction or too-little-text failure). */
       loadFailed?: boolean;
     };
 
+/** The Groq answer (HTTP 401 or 403) that stops a build, found while writing a headline. */
+type AuthFailure = { status: number; message: string };
+
 /**
- * Builds the snapshot and writes policies.json, passages.json, manifest.json and review.md to `outDir`, and returns
+ * Builds the snapshot and writes policies.json, passages.json, manifest.json and review.md to `outDir` (and the private passages
+ * of restricted records to `privateDir`), and returns
  * the manifest. Throws, leaving `outDir` untouched, if the inputs are unusable (a bad candidates.md or reviewed.json, a
- * failed GeBIZ fetch), if the result fails `checkSnapshot`, or with a SnapshotGuardError if Groq is failing wholesale
- * (an auth error, or more than half of the records that reached enrichment lost to Groq errors). Work already cached
- * is kept, so a rerun after the cause is fixed resumes where it stopped.
+ * failed GeBIZ fetch), if the result fails `checkSnapshot`, or with a SnapshotGuardError (a rejected Groq key while writing
+ * headlines, or too many documents that failed to load). Work already cached is kept, so a rerun after the cause is fixed
+ * resumes where it stopped.
  */
 export async function buildSnapshot(opts: BuildOptions): Promise<Manifest> {
   return (await runBuild(opts)).manifest;
@@ -404,15 +402,16 @@ export async function buildSnapshot(opts: BuildOptions): Promise<Manifest> {
 export async function runBuild(opts: BuildOptions): Promise<RunResult> {
   const now = opts.now ?? (() => new Date());
   const log = opts.log ?? (() => undefined);
-  const maxWords = opts.enrichMaxWords ?? DEFAULT_ENRICH_MAX_WORDS;
 
   // Fail before the first fetch or model call, not after hours of them, if the manifest could not be written.
   if (!IsoDate.safeParse(opts.snapshotDate).success) throw new Error(`snapshotDate must be a real date written YYYY-MM-DD, got "${opts.snapshotDate}"`);
-  if (!opts.models.enrich.trim() || !opts.models.verify.trim()) throw new Error("Both model names (enrich and verify) are required");
-  if (!Number.isInteger(maxWords) || maxWords < 1) throw new Error(`enrichMaxWords must be a whole number of at least 1, got ${maxWords}`);
+  if (opts.headlines && !(opts.llm && opts.models?.enrich.trim() && opts.models?.verify.trim())) {
+    throw new Error("Headlines need both models (llm.enrich and llm.verify) and their names (models.enrich and models.verify)");
+  }
+  const models = opts.headlines ? { enrich: opts.models!.enrich.trim(), verify: opts.models!.verify.trim() } : NO_MODELS;
 
   const listed = parseCandidates(await readFile(opts.candidatesPath, "utf8")).filter((c) => c.include);
-  // From here on the date is the build's: a rerun after a guard (or a crash) must use the same one to find its cached answers.
+  // From here on the date is the build's: a rerun after a guard (or a crash) must use the same one.
   await writeAtomic(join(opts.cacheDir, IN_PROGRESS), jsonText({ snapshotDate: opts.snapshotDate }));
   const again = `run again with --date ${opts.snapshotDate}`;
   const tenders = opts.gebiz ? await loadTenders(opts) : [];
@@ -421,11 +420,11 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
   for (let i = 1; i < work.length; i++) {
     if (work[i]!.id === work[i - 1]!.id) throw new Error(`Duplicate candidate id "${work[i]!.id}" (a GeBIZ tender has the id of a listed candidate)`);
   }
-  const allIds = work.map((c) => c.id);
+  // The California bills (read from the Legislature's bulk download), so that their histories are read together, once.
+  const leginfoBills = [...new Set(work.flatMap((c) => parseLeginfoBillId(c.url)?.billId ?? []))].sort();
   const reviewed = await readReviewed(opts.reviewedPath);
 
-  const enrichDir = join(opts.cacheDir, "enrich");
-  const verifyDir = join(opts.cacheDir, "verify");
+  const headlineDir = join(opts.cacheDir, "headline");
   const fetchedPath = join(opts.cacheDir, "fetched.json");
   const fetchedParsed = FetchedSchema.safeParse(await readJsonOrUndefined(fetchedPath));
   const fetchedAt = fetchedParsed.success ? fetchedParsed.data : {};
@@ -446,7 +445,49 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       .filter((r) => r.id === id && r.sha256.toLowerCase() === sha)
       .sort((a, b) => (a.reviewedAt < b.reviewedAt ? 1 : a.reviewedAt > b.reviewedAt ? -1 : 0))[0];
 
-  async function buildOne(c: Candidate): Promise<Done> {
+  /**
+   * The headline of a landmark (spec 5.4b): written by one call from its summary, checked by another against the passages the
+   * summary cites, and cached by the document's hash under the models and the summary. A headline the checker rejects (or that
+   * breaks the format rules) leaves the record without one, and so does a failed call; a rejected one is remembered, a failed
+   * one is tried again on the next run. A rejected key (HTTP 401 or 403) is reported to the caller, which stops the build.
+   */
+  async function headlineOf(
+    c: Candidate,
+    summary: PolicyRecord["summary"],
+    passages: Passage[],
+    sha: string,
+    stat: RecordStat,
+  ): Promise<{ headline?: PolicyRecord["summary"]; auth?: AuthFailure }> {
+    const llm = opts.llm!;
+    const file = join(headlineDir, `${sha}.json`);
+    const summaryHash = sha256Hex(summary.value);
+    const cached = await readEntry(file, c.id, HeadlineEntrySchema);
+    if (cached && cached.version === HEADLINE_VERSION && cached.enrichModel === models.enrich && cached.verifyModel === models.verify && cached.summaryHash === summaryHash) {
+      stat.headline = cached.outcome === "kept" && cached.headline ? "cache" : "dropped";
+      return cached.outcome === "kept" && cached.headline ? { headline: cached.headline } : {};
+    }
+    try {
+      const written = await headlineFor(c, summary, llm.enrich);
+      const accepted = written !== null && (await verifyHeadline(written, passages, llm.verify, { today: opts.snapshotDate }));
+      await writeEntry(file, c.id, {
+        version: HEADLINE_VERSION,
+        enrichModel: models.enrich,
+        verifyModel: models.verify,
+        summaryHash,
+        outcome: accepted ? "kept" : "dropped",
+        ...(accepted ? { headline: written } : {}),
+      });
+      stat.headline = accepted ? "llm" : "dropped";
+      return accepted ? { headline: written } : {};
+    } catch (e) {
+      stat.headline = "failed";
+      log(`${c.id}: no headline (${oneLine(errorMessage(e))})`);
+      if (e instanceof LlmError && (e.status === 401 || e.status === 403)) return { auth: { status: e.status, message: errorMessage(e) } };
+      return {};
+    }
+  }
+
+  async function buildOne(c: Candidate): Promise<{ done: Done; auth?: AuthFailure }> {
     const stat: RecordStat = {
       id: c.id,
       jurisdiction: c.jurisdiction,
@@ -458,31 +499,32 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       humanReviewed: false,
       dropped: [],
     };
-    let reachedEnrichment = false;
-    const exclude = (reason: string, o: { failed?: boolean; llmError?: LlmError; detail?: string; load?: boolean } = {}): Done => ({
-      kind: "excluded",
-      reason,
-      stat: {
-        ...stat,
-        outcome: "excluded",
+    const exclude = (reason: string, o: { failed?: boolean; detail?: string; load?: boolean } = {}): { done: Done } => ({
+      done: {
+        kind: "excluded",
         reason,
-        ...(o.failed ? { failed: true } : {}),
-        ...(o.llmError?.status !== undefined ? { llmStatus: o.llmError.status } : {}),
+        stat: { ...stat, outcome: "excluded", reason, ...(o.failed ? { failed: true } : {}) },
+        ...(o.detail ? { detail: o.detail } : {}),
+        ...(o.load ? { loadFailed: true } : {}),
       },
-      reachedEnrichment,
-      ...(o.llmError ? { llmError: o.llmError } : {}),
-      ...(o.detail ? { detail: o.detail } : {}),
-      ...(o.load ? { loadFailed: true } : {}),
     });
 
-    let stage = "loading";
+    let stage: keyof typeof FAILED_REASON = "loading";
     try {
       // A tender's text is a short structured description from the data.gov.sg API, so it skips the 150-word gate.
       const tenderText = textFor.get(c.id);
       const loaded =
         tenderText !== undefined
-          ? ({ ok: true, text: tenderText } as const)
-          : await loadSource(c, { rawDir: opts.rawDir, fetchImpl: opts.fetchImpl, browserbaseKey: opts.browserbaseKey, refresh: opts.refresh, now });
+          ? ({ ok: true, text: tenderText, format: "text" } as const)
+          : await loadSource(c, {
+              rawDir: opts.rawDir,
+              fetchImpl: opts.fetchImpl,
+              browserbaseKey: opts.browserbaseKey,
+              refresh: opts.refresh,
+              now,
+              leginfoBills,
+              sso: { ...opts.sso, log },
+            });
       if (!loaded.ok) return exclude(loaded.reason, { detail: loaded.detail, load: true });
 
       const text = loaded.text;
@@ -493,143 +535,96 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
       if (passages.length === 0) return exclude("too little text", { detail: "no text to split into passages", load: true });
       const fetched = await fetchedFor(c.id, sha);
 
-      stage = "enrichment";
-      reachedEnrichment = true;
-      const enrichPath = join(enrichDir, `${sha}.json`);
-      let enriched: Enriched;
-      const cachedEnrich = await readEntry(enrichPath, c.id, EnrichEntrySchema);
-      if (
-        cachedEnrich &&
-        cachedEnrich.pipelineVersion === PIPELINE_VERSION &&
-        cachedEnrich.model === opts.models.enrich &&
-        cachedEnrich.snapshotDate === opts.snapshotDate
-      ) {
-        enriched = cachedEnrich.value;
-        stat.enrich = "cache";
-      } else {
-        enriched = await enrichRecord(c, firstPassages(passages, maxWords), opts.llm.enrich, {
-          otherIds: allIds.filter((id) => id !== c.id),
-          today: opts.snapshotDate,
-        });
-        await writeEntry(enrichPath, c.id, { pipelineVersion: PIPELINE_VERSION, model: opts.models.enrich, snapshotDate: opts.snapshotDate, value: enriched });
-        stat.enrich = "llm";
-      }
+      stage = "extraction";
+      const extracted = extractRecord(c, text, passages, {
+        snapshotDate: opts.snapshotDate,
+        format: loaded.format,
+        ...("html" in loaded && loaded.html !== undefined ? { html: loaded.html } : {}),
+      });
+      // No official summary, or no official status: the document does not hold what a record needs. A content exclusion, not a failure.
+      if (!extracted.ok) return exclude(extracted.reason);
+      // R42: the public snapshot quotes a record that may not be redistributed in short pieces only (280 characters and an ellipsis).
+      const where = publisherFor(c.url, hostOf(c.url));
+      const checked = checkClaims(where.redistributionOk ? extracted.fields : shortenRestricted(extracted.fields, passages), passages, { restricted: !where.redistributionOk });
+      stat.dropped = checked.dropped;
+      if (checked.fatal) return exclude(checked.fatal);
 
-      stage = "verification";
-      const verifyPath = join(verifyDir, `${sha}.json`);
-      // A tender's text is the row its title was made from, so there is no document to mistake it for.
-      const identityTitle = tenderText === undefined ? c.title : undefined;
-      const inputHash = sha256Hex(JSON.stringify([enriched, identityTitle ?? null]));
-      let verdict: { kept: Enriched; dropped: string[]; fatal?: string };
-      const cachedVerify = await readEntry(verifyPath, c.id, VerifyEntrySchema);
-      if (
-        cachedVerify &&
-        cachedVerify.pipelineVersion === PIPELINE_VERSION &&
-        cachedVerify.model === opts.models.verify &&
-        cachedVerify.snapshotDate === opts.snapshotDate &&
-        cachedVerify.inputHash === inputHash
-      ) {
-        verdict = { kept: cachedVerify.kept, dropped: cachedVerify.dropped, ...(cachedVerify.fatal ? { fatal: cachedVerify.fatal } : {}) };
-        stat.verify = "cache";
-      } else {
-        verdict = await verifyRecord(enriched, passages, opts.llm.verify, {
-          today: opts.snapshotDate,
-          ...(identityTitle !== undefined ? { title: identityTitle } : {}),
-        });
-        await writeEntry(verifyPath, c.id, { pipelineVersion: PIPELINE_VERSION, model: opts.models.verify, snapshotDate: opts.snapshotDate, inputHash, ...verdict });
-        stat.verify = "llm";
-      }
-      stat.dropped = verdict.dropped;
-      // A verdict that excludes the record is cached like any other, so a re-run does not ask the model again.
-      if (verdict.fatal) return exclude(verdict.fatal);
-
-      stage = "assembly";
-      const { kept } = verdict;
-      const where = publisherFor(c.url, kept.issuer);
+      const f = withoutParts(checked.fields);
       const review = reviewFor(c.id, sha);
       stat.humanReviewed = review !== undefined;
-      const checked = PolicyRecordSchema.safeParse({
+      const base = {
         id: c.id,
         jurisdiction: c.jurisdiction,
         type: c.type,
         title: c.title,
-        ...(kept.shortTitle ? { shortTitle: kept.shortTitle } : {}),
-        issuer: kept.issuer,
-        status: kept.status,
-        ...(kept.statusDate ? { statusDate: kept.statusDate } : {}),
-        timeline: kept.timeline,
-        summary: kept.summary,
-        provisions: kept.provisions,
-        affected: kept.affected,
-        topics: kept.topics,
-        related: kept.related,
+        ...(f.shortTitle ? { shortTitle: f.shortTitle } : {}),
+        issuer: where.publisher,
+        status: f.status,
+        ...(f.statusDate ? { statusDate: f.statusDate } : {}),
+        timeline: f.timeline,
+        summary: f.summary,
+        provisions: f.provisions,
+        affected: f.affected,
+        topics: c.topics,
+        related: [], // linked once every record is built (below)
         url: c.url,
         publisher: where.publisher,
-        ...(kept.published ? { published: kept.published.value } : {}),
+        ...(f.published ? { published: f.published } : {}),
         fetched,
         sha256: sha,
         attribution: where.attribution,
         redistributionOk: where.redistributionOk,
         landmark: c.landmark,
         review: review
-          ? { state: "human-reviewed", reviewedAt: review.reviewedAt.slice(0, 10), reviewer: review.reviewer }
-          : { state: "auto-checked" },
-      });
-      if (!checked.success) {
-        const why = checked.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
-        return exclude(NOT_VALID_REASON.enrichment, { failed: true, detail: clip(`the assembled record is not valid: ${why}`) });
+          ? { state: "human-reviewed" as const, reviewedAt: review.reviewedAt.slice(0, 10), reviewer: review.reviewer }
+          : { state: "auto-checked" as const },
+      };
+      let valid = PolicyRecordSchema.safeParse(base);
+      if (!valid.success) {
+        const why = valid.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
+        return exclude(FAILED_REASON.extraction, { failed: true, detail: clip(`the assembled record is not valid: ${why}`) });
       }
+
+      // The optional headline, for a landmark only. It never causes an exclusion.
+      let auth: AuthFailure | undefined;
+      if (opts.headlines && c.landmark) {
+        const got = await headlineOf(c, valid.data.summary, passages, sha, stat);
+        auth = got.auth;
+        if (got.headline) valid = PolicyRecordSchema.safeParse({ ...base, headline: got.headline });
+        if (!valid.success) return exclude(FAILED_REASON.extraction, { failed: true, detail: "the assembled record with its headline is not valid" });
+      }
+
       // A constructed URL has never been opened by a person: show what the page begins with, to compare with the title.
       if (c.urlConfidence === "constructed" && tenderText === undefined) {
         stat.title = c.title;
         stat.opens = passages[0]!.heading ?? oneLine(passages[0]!.text).slice(0, OPENS_CHARS);
       }
-      return { kind: "built", record: checked.data, passages, stat: { ...stat, outcome: "built" }, reachedEnrichment: true };
+      return { done: { kind: "built", record: valid.data, passages, text, stat: { ...stat, outcome: "built" } }, ...(auth ? { auth } : {}) };
     } catch (e) {
-      // A thrown error (a model error such as HTTP 413, a failed repair) costs this record, not the build,
-      // unless they are so many that the run as a whole is not usable (see the guard below).
-      if (e instanceof LlmError && (stage === "enrichment" || stage === "verification")) {
-        return exclude(`${stage} failed: ${llmReason(e)}`, { failed: true, llmError: e });
-      }
-      // Anything else is a bad answer from the model or a bug. The manifest gets a fixed phrase; the console gets the message.
-      return exclude(failureReason(stage), { failed: true, detail: clip(`${stage} failed: ${oneLine(errorMessage(e))}`), load: stage === "loading" });
+      // A thrown error (a bug in an extractor, say) costs this record, not the build.
+      return exclude(FAILED_REASON[stage], { failed: true, detail: clip(`${stage} failed: ${oneLine(errorMessage(e))}`), load: stage === "loading" });
     }
   }
 
   const done: Done[] = [];
   for (const [i, c] of work.entries()) {
-    const result = await buildOne(c);
+    const { done: result, auth } = await buildOne(c);
     done.push(result);
     const s = result.stat;
-    // The console gets what Groq actually said; the manifest only gets the short reason.
-    const raw =
-      result.kind === "excluded" && (result.llmError || result.detail) ? ` [${oneLine(result.llmError ? errorMessage(result.llmError) : result.detail!)}]` : "";
-    const how = result.kind === "built" ? `built (${s.words} words, ${s.passages} passages; enrich ${s.enrich}, verify ${s.verify})` : `excluded: ${result.reason}${raw}`;
+    // The console gets what really went wrong; the manifest only gets the short reason.
+    const raw = result.kind === "excluded" && result.detail ? ` [${oneLine(result.detail)}]` : "";
+    const headline = s.headline ? `, headline ${s.headline}` : "";
+    const how = result.kind === "built" ? `built (${s.words} words, ${s.passages} passages${headline})` : `excluded: ${result.reason}${raw}`;
     log(`[${i + 1}/${work.length}] ${c.id}: ${how}`);
 
-    // R14 (a): a rejected key fails every remaining record the same way, so stop at once.
-    if (result.kind === "excluded" && (result.llmError?.status === 401 || result.llmError?.status === 403)) {
+    // R14 (a): a rejected key fails every remaining headline the same way, so stop at once.
+    if (auth) {
       throw new SnapshotGuardError(
         "auth",
-        `Refusing to write the snapshot: Groq rejected the request with HTTP ${result.llmError.status} on ${c.id}, after ${i + 1} of ${work.length} records (${clip(oneLine(errorMessage(result.llmError)))}). ` +
+        `Refusing to write the snapshot: Groq rejected the request with HTTP ${auth.status} on ${c.id}, after ${i + 1} of ${work.length} records (${clip(oneLine(auth.message))}). ` +
           `Check GROQ_API_KEY and the key's access to the models. Nothing was written; results already cached are kept, so ${again} once it is fixed.`,
       );
     }
-  }
-
-  // R14 (b): too many records lost to Groq errors means the run says nothing about the documents. Fetch failures,
-  // too little text and verification fatals are about the documents, so they are not counted.
-  const reachedCount = done.filter((d) => d.reachedEnrichment).length;
-  const lost = done.flatMap((d, i) => (d.kind === "excluded" && d.llmError ? [{ id: work[i]!.id, error: d.llmError }] : []));
-  if (lost.length * 2 > reachedCount) {
-    throw new SnapshotGuardError(
-      "llm-failures",
-      `Refusing to write the snapshot: ${lost.length} of the ${reachedCount} records that reached enrichment were lost to Groq errors (more than half), so the run is not usable. ` +
-        `First error, on ${lost[0]!.id}: ${clip(oneLine(errorMessage(lost[0]!.error)))}. ` +
-        (lost.some((l) => l.error.status === 413) ? `${TOO_LARGE_HINT} ` : "") +
-        (lost.every((l) => l.error.kind === "network") ? `${NETWORK_HINT} ` : "") +
-        `Nothing was written; results already cached are kept, so ${again} once Groq is reachable.`,
-    );
   }
 
   // I5: documents that could not be loaded are missing from the snapshot. A few are normal (a site that is down today);
@@ -653,20 +648,24 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
     }
   }
 
-  // A related link may only point at a record that made it into the snapshot.
-  const builtIds = new Set(done.flatMap((d) => (d.kind === "built" ? [d.record.id] : [])));
-  const records = done
-    .flatMap((d) => (d.kind === "built" ? [d.record] : []))
-    .map((r) => ({ ...r, related: r.related.filter((link) => link.id !== r.id && builtIds.has(link.id)) }))
-    .sort(byId);
-  const passages = done
-    .flatMap((d) => (d.kind === "built" ? d.passages : []))
+  // A related link may only point at a record that made it into the snapshot: they are linked from the built records alone.
+  const builtDone = done.flatMap((d) => (d.kind === "built" ? [d] : []));
+  const links = linkRelated(
+    builtDone.map((d) => ({
+      id: d.record.id,
+      jurisdiction: d.record.jurisdiction,
+      title: d.record.title,
+      ...(d.record.shortTitle ? { shortTitle: d.record.shortTitle } : {}),
+      text: d.text,
+    })),
+  );
+  const records = builtDone.map((d) => ({ ...d.record, related: links.get(d.record.id) ?? [] })).sort(byId);
+  const passages = builtDone
+    .flatMap((d) => d.passages)
     .sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : a.seq - b.seq));
   const excluded = work.flatMap((c, i) => {
     const d = done[i]!;
-    return d.kind === "excluded"
-      ? [{ id: c.id, jurisdiction: c.jurisdiction, url: c.url, title: c.title, reason: d.reason }]
-      : [];
+    return d.kind === "excluded" ? [{ id: c.id, jurisdiction: c.jurisdiction, url: c.url, title: c.title, reason: d.reason }] : [];
   });
 
   const constructedChecks: ConstructedCheck[] = done.flatMap((d) =>
@@ -680,51 +679,63 @@ export async function runBuild(opts: BuildOptions): Promise<RunResult> {
   };
 
   // builtAt moves only when something else in the output does, so an unchanged re-run is byte-identical.
-  const body = { snapshotDate: opts.snapshotDate, models: opts.models, counts, excluded };
+  const body = { snapshotDate: opts.snapshotDate, models, counts, excluded };
   const contentHash = sha256Hex(JSON.stringify([records, passages, body]));
   const builtPath = join(opts.cacheDir, "built.json");
   const prior = BuiltSchema.safeParse(await readJsonOrUndefined(builtPath));
   const builtAt = prior.success && prior.data.contentHash === contentHash ? prior.data.builtAt : now().toISOString();
   const manifest = ManifestSchema.parse({ ...body, builtAt });
 
+  // R39: the passages of a record whose publisher does not allow redistribution are the full text of someone else's document.
+  // They go to a git-ignored file; the committed passages.json holds the others. The policies keep their short attributed quotes.
+  const split = splitPassagesByLicence(records, passages);
   const files = {
     "policies.json": jsonText(records),
-    "passages.json": jsonText(passages),
+    "passages.json": jsonText(split.open),
     "manifest.json": jsonText(manifest),
     "review.md": renderReview(records, passages, constructedChecks),
   };
+  const privateFile = jsonText(split.restricted);
   // Check exactly what would be written, before writing it: a bad build must not replace a good committed snapshot.
   const problems = checkSnapshot({
     policies: JSON.parse(files["policies.json"]),
     passages: JSON.parse(files["passages.json"]),
+    privatePassages: JSON.parse(privateFile),
     manifest: JSON.parse(files["manifest.json"]),
   });
   if (problems.length > 0) throw new Error(`The snapshot failed its own checks (nothing was written):\n${problems.map((p) => `  - ${p}`).join("\n")}`);
 
   for (const [name, content] of Object.entries(files)) await writeAtomic(join(opts.outDir, name), content);
+  await writeAtomic(join(opts.privateDir ?? privateDirOf(opts.outDir), "passages.json"), privateFile);
   await writeAtomic(builtPath, jsonText({ contentHash, builtAt }));
   await rm(join(opts.cacheDir, IN_PROGRESS), { force: true }); // the build is finished: the next one may use a new date
 
-  return { manifest, stats: done.map((d) => d.stat) };
+  return {
+    manifest,
+    stats: done.map((d) => d.stat),
+    passages: { committed: split.open.length, private: split.restricted.length, restrictedRecords: records.filter((r) => !r.redistributionOk).length },
+  };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The command
 
-const USAGE = "Usage: pnpm snapshot:build [--date YYYY-MM-DD] [--no-gebiz] [--refresh | --refresh-all] [--allow-partial]";
+const USAGE = "Usage: pnpm snapshot:build [--date YYYY-MM-DD] [--no-gebiz] [--refresh | --refresh-all] [--allow-partial] [--llm-headlines]\n  The build needs no key. --llm-headlines adds a one-sentence headline to each landmark and needs GROQ_API_KEY.";
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
-export function parseArgs(argv: string[]): { date?: string; gebiz: boolean; refresh?: "downloads" | "all"; allowPartial?: boolean } {
+export function parseArgs(argv: string[]): { date?: string; gebiz: boolean; refresh?: "downloads" | "all"; allowPartial?: boolean; headlines?: boolean } {
   let date: string | undefined;
   let gebiz = true;
   let refresh: "downloads" | "all" | undefined;
   let allowPartial = false;
+  let headlines = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === "--no-gebiz") gebiz = false;
     else if (arg === "--refresh") refresh ??= "downloads";
     else if (arg === "--refresh-all") refresh = "all";
     else if (arg === "--allow-partial") allowPartial = true;
+    else if (arg === "--llm-headlines") headlines = true;
     else if (arg === "--date" || arg.startsWith("--date=")) {
       const value = arg === "--date" ? argv[++i] : arg.slice("--date=".length);
       if (value === undefined) throw new Error("--date needs a value such as --date 2026-10-15");
@@ -734,31 +745,38 @@ export function parseArgs(argv: string[]): { date?: string; gebiz: boolean; refr
       date = value;
     } else throw new Error(`Unknown argument "${arg}"`);
   }
-  return { ...(date ? { date } : {}), gebiz, ...(refresh ? { refresh } : {}), ...(allowPartial ? { allowPartial } : {}) };
+  return { ...(date ? { date } : {}), gebiz, ...(refresh ? { refresh } : {}), ...(allowPartial ? { allowPartial } : {}), ...(headlines ? { headlines } : {}) };
 }
 
 const localDate = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const plural = (n: number, noun: string) => `${n.toLocaleString("en-US")} ${noun}${n === 1 ? "" : "s"}`;
 
 /** The text the command prints: counts, every excluded row with its reason, and the word count of every record. */
-export function formatSummary({ manifest: m, stats }: RunResult): string {
+export function formatSummary({ manifest: m, stats, passages }: RunResult): string {
   const built = stats.filter((s) => s.outcome === "built");
   const landmarks = built.filter((s) => s.landmark);
   const failed = stats.filter((s) => s.failed);
   const listedExcluded = stats.filter((s) => s.outcome === "excluded" && s.type !== "tender");
   const constructed = built.filter((s) => s.opens !== undefined);
   const byType = Object.entries(m.counts.byType).filter(([, n]) => n > 0).map(([type, n]) => `${type} ${n}`);
+  const withHeadlines = m.models.enrich !== NO_MODELS.enrich || m.models.verify !== NO_MODELS.verify;
+  const headlines = (kind: NonNullable<RecordStat["headline"]>[]) => landmarks.filter((s) => s.headline && kind.includes(s.headline)).length;
   const lines = [
     `Snapshot as of ${m.snapshotDate} (built ${m.builtAt}).`,
     `Models: enrich ${m.models.enrich}, verify ${m.models.verify}.`,
+    ...(withHeadlines
+      ? [`Headlines: ${headlines(["llm", "cache"])} of ${landmarks.length} landmarks (${headlines(["dropped"])} dropped, ${headlines(["failed"])} failed).`]
+      : []),
     `Records: ${m.counts.total} (${JurisdictionSchema.options.map((j) => `${j} ${m.counts.byJurisdiction[j]}`).join(", ")}). By type: ${byType.join(", ") || "none"}.`,
+    ...(passages
+      ? [`Passages: ${passages.committed + passages.private} (${passages.committed} committed, ${passages.private} private for ${plural(passages.restrictedRecords, "record")} that may not be redistributed).`]
+      : []),
     `Landmarks: ${landmarks.length} (${landmarks.filter((s) => s.humanReviewed).length} human-reviewed).`,
     `Excluded: ${m.excluded.length}`,
     ...m.excluded.map((e) => `  ${e.id} (${e.jurisdiction}): ${e.reason}`),
     ...(failed.length > 0
-      ? [`${plural(failed.length, "record")} failed in a step rather than on content. Run again with --date ${m.snapshotDate} to retry them: finished work is cached.`]
+      ? [`${plural(failed.length, "record")} failed in a step rather than on content. Run again with --date ${m.snapshotDate} after fixing the cause.`]
       : []),
-    ...(stats.some((s) => s.llmStatus === 413) ? [TOO_LARGE_HINT] : []),
     ...(listedExcluded.length > 0 && listedExcluded.every((s) => s.reason === "unreachable") ? [NETWORK_HINT] : []),
     ...(constructed.length > 0
       ? [
@@ -772,7 +790,7 @@ export function formatSummary({ manifest: m, stats }: RunResult): string {
           "",
           "Words extracted per record (a record with few words may be a contents page or a stub):",
           ...built.map((s) => {
-            const dropped = s.dropped.length > 0 ? `, ${plural(s.dropped.length, "claim")} dropped` : "";
+            const dropped = s.dropped.length > 0 ? `, ${plural(s.dropped.length, "claim")} dropped (${s.dropped.join(", ")})` : "";
             const short = s.type !== "tender" && s.words < SHORT_WORDS ? " (short: check the capture)" : "";
             return `  ${s.id}: ${plural(s.words, "word")}, ${plural(s.passages, "passage")}${dropped}${short}`;
           }),
@@ -797,7 +815,7 @@ function readDevVars(root: string): Record<string, string> {
   try {
     return parseDotenv(readFileSync(join(root, ".dev.vars")));
   } catch {
-    return {}; // no .dev.vars: the key must then come from the environment
+    return {}; // no .dev.vars: a key must then come from the environment
   }
 }
 
@@ -823,22 +841,23 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
   const fromEnv = Object.fromEntries(Object.entries(deps.env ?? process.env).filter(([, v]) => v !== undefined && v.trim() !== ""));
   const env: Record<string, string | undefined> = { ...readDevVars(root), ...fromEnv };
 
-  const apiKey = env.GROQ_API_KEY?.trim();
-  if (!apiKey) return fail("GROQ_API_KEY is not set. Add GROQ_API_KEY=... to .dev.vars in the repository root (or export it), then run again.");
-
-  let enrichMaxWords: number | undefined;
-  if (env.ENRICH_MAX_WORDS !== undefined) {
-    enrichMaxWords = Number(env.ENRICH_MAX_WORDS.trim());
-    if (!Number.isInteger(enrichMaxWords) || enrichMaxWords < 1) {
-      return fail(`ENRICH_MAX_WORDS must be a whole number of at least 1, got "${env.ENRICH_MAX_WORDS}".`);
-    }
+  // Only the headlines use a model, so only they need a key.
+  let headlineOptions: Pick<BuildOptions, "headlines" | "llm" | "models"> = {};
+  if (args.headlines) {
+    const apiKey = env.GROQ_API_KEY?.trim();
+    if (!apiKey) return fail("GROQ_API_KEY is not set. Add GROQ_API_KEY=... to .dev.vars in the repository root (or export it), then run again.");
+    const models = resolveModels(env);
+    headlineOptions = {
+      headlines: true,
+      models,
+      llm: { enrich: groqLlm({ apiKey, model: models.enrich }), verify: groqLlm({ apiKey, model: models.verify }) },
+    };
   }
 
-  const models = resolveModels(env);
   const dataDir = join(root, "photon/data/snapshot");
   const cacheDir = join(root, ".tmp-snapshot/cache");
 
-  // Without --date, an unfinished build keeps its date, so a rerun after a guard finds the answers it already paid for.
+  // Without --date, an unfinished build keeps its date, so a rerun after a guard produces the same snapshot.
   const resumed = args.date ? undefined : await readInProgressDate(cacheDir);
   if (resumed) {
     log(`Resuming the unfinished build dated ${resumed} (saved in ${join(cacheDir, IN_PROGRESS)}). Pass --date to start one with another date.`);
@@ -851,13 +870,11 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     rawDir: join(root, ".tmp-snapshot/raw"),
     cacheDir,
     snapshotDate: args.date ?? resumed ?? localDate(new Date()),
-    llm: { enrich: groqLlm({ apiKey, model: models.enrich }), verify: groqLlm({ apiKey, model: models.verify }) },
-    models,
+    ...headlineOptions,
     browserbaseKey: env.BROWSERBASE_API_KEY?.trim() || undefined,
     gebiz: args.gebiz,
     ...(args.refresh ? { refresh: args.refresh } : {}),
     ...(args.allowPartial ? { allowPartial: true } : {}),
-    ...(enrichMaxWords !== undefined ? { enrichMaxWords } : {}),
     log,
   };
 
