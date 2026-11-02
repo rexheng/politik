@@ -68,6 +68,11 @@ export function countFromWranglerJson(output: string): number | undefined {
   }
 }
 
+/** Wrangler's own script, run by node: `pnpm` is a .cmd on Windows, which spawnSync cannot start without a shell. */
+export function wranglerCommand(root: string, args: string[]): [string, string[]] {
+  return [process.execPath, [join(root, "node_modules", "wrangler", "bin", "wrangler.js"), ...args]];
+}
+
 function readJson(path: string, errors: string[]): unknown {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
@@ -85,7 +90,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
   const exec =
     deps.exec ??
     ((args: string[]) => {
-      const result = spawnSync("pnpm", ["exec", "wrangler", ...args], { cwd: root, stdio: "inherit" });
+      const result = spawnSync(...wranglerCommand(root, args), { cwd: root, stdio: "inherit" });
       if (result.error) error(`could not run wrangler: ${result.error.message}`);
       return result.status ?? 1;
     });
@@ -95,8 +100,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
       ? () => undefined
       : (target: "--local" | "--remote") => {
           const result = spawnSync(
-            "pnpm",
-            ["exec", "wrangler", "d1", "execute", DB_NAME, "--command", "SELECT COUNT(*) AS n FROM records", "--json", target],
+            ...wranglerCommand(root, ["d1", "execute", DB_NAME, "--command", "SELECT COUNT(*) AS n FROM records", "--json", target]),
             { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
           );
           return result.status === 0 ? countFromWranglerJson(result.stdout) : undefined;

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +7,7 @@ import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { inspectSnapshot } from "../../scripts/check-data.ts";
-import { countFromWranglerJson, main, parseArgs } from "../../photon/scripts/snapshot/seed-d1.ts";
+import { countFromWranglerJson, main, parseArgs, wranglerCommand } from "../../photon/scripts/snapshot/seed-d1.ts";
 import type { Manifest, Passage, PolicyRecord } from "../../photon/src/data/schema.ts";
 import { snapshotStatements, toSqlFile } from "../../photon/src/data/seed.ts";
 
@@ -49,6 +50,15 @@ async function run(argv: string[], status: (call: number) => number = () => 0, c
 }
 
 const sqlPath = () => join(root, ".tmp-seed.sql");
+
+test("wranglerCommand starts wrangler with no shell, on Windows too", () => {
+  const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+  const [command, args] = wranglerCommand(repoRoot, ["--version"]);
+  const result = spawnSync(command, args, { encoding: "utf8" });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /\d+\.\d+\.\d+/);
+});
 
 describe("parseArgs", () => {
   test("defaults to local with no directory", () => {
