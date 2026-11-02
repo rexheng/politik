@@ -74,7 +74,7 @@ function checkRecord(r: PolicyRecord, passageIds: Set<string>, recordIds: Set<st
 
   const checkSupport = (field: string, support: string[]) => {
     for (const passageId of support) {
-      // The private passages are missing: a restricted record's own passages cannot be looked up.
+      // The private passages do not hold this restricted record: its own passages cannot be looked up.
       if (unchecked && passageId.startsWith(`${r.id}#`)) continue;
       if (!passageIds.has(passageId)) {
         errors.push(`${label}: ${field} support references unknown passage "${passageId}"`);
@@ -138,11 +138,12 @@ function checkCounts(records: PolicyRecord[], manifest: z.infer<typeof ManifestS
 }
 
 /** The warning for a snapshot whose private passages are not on this machine, the same for check:data and seed:d1 (both print it). */
-export function missingPrivateWarning(ids: string[], path = "the private passages file (<snapshot dir>-private/passages.json)"): string {
+export function missingPrivateWarning(ids: string[], path = "the private passages file (<snapshot dir>-private/passages.json)", fileIsHere = false): string {
   const shown = `${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", ..." : ""}`;
+  const records = `${ids.length} record${ids.length === 1 ? "" : "s"} that may not be redistributed (${shown})`;
+  const lead = fileIsHere ? `${path} has no passages for ${records}` : `${path} is missing, so ${records} ${ids.length === 1 ? "has" : "have"} no passages here`;
   return (
-    `${path} is missing, so ${ids.length} record${ids.length === 1 ? "" : "s"} that may not be redistributed (${shown}) ` +
-    `${ids.length === 1 ? "has" : "have"} no passages here: their claims were not checked against the text, and seed:d1 loads them with no passage text, so passage search cannot find them. ` +
+    `${lead}: their claims were not checked against the text, and seed:d1 loads them with no passage text, so passage search cannot find them. ` +
     "Run pnpm snapshot:build again to write the file: it fetches the sources again."
   );
 }
@@ -174,7 +175,11 @@ export function inspectSnapshot(input: SnapshotInput): { errors: string[]; warni
   const allIds = new Set([...passages.ids, ...privatePassages.ids]);
   for (const id of privatePassages.ids) if (passages.ids.has(id)) errors.push(`passage ${id}: duplicate passage id (it is in both passages.json and the private passages)`);
 
-  for (const record of policies.valid) checkRecord(record, allIds, policies.ids, errors, privateMissing && restricted.has(record.id));
+  // A source that could not be fetched leaves a restricted record out of the private file; that is the same as the file being missing, for that record.
+  const heldPrivately = new Set(privatePassages.valid.map((p) => p.recordId));
+  const withoutText = new Set([...restricted].filter((id) => !heldPrivately.has(id)));
+
+  for (const record of policies.valid) checkRecord(record, allIds, policies.ids, errors, withoutText.has(record.id));
   // R42: the committed summary and provisions of a restricted record are short quotes, not the document.
   for (const record of policies.valid) {
     if (!restricted.has(record.id)) continue;
@@ -203,7 +208,7 @@ export function inspectSnapshot(input: SnapshotInput): { errors: string[]; warni
   }
   checkPassageSequences([...passages.valid, ...privatePassages.valid], errors);
 
-  if (privateMissing && restricted.size > 0) warnings.push(missingPrivateWarning([...restricted].sort(), input.privatePath));
+  if (withoutText.size > 0) warnings.push(missingPrivateWarning([...withoutText].sort(), input.privatePath, !privateMissing));
 
   const manifest = ManifestSchema.safeParse(input.manifest);
   if (!manifest.success) {

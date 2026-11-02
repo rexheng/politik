@@ -241,6 +241,16 @@ test("R39: with no private file the restricted record's passages are not checked
   assert.deepEqual(inspectSnapshot(fixture()).warnings, []);
 });
 
+test("R39: a private file with none of a restricted record's passages: that record is a warning that names it, not an error", () => {
+  const f = restricted();
+  const result = inspectSnapshot({ ...f, privatePassages: [] });
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0]!, /has no passages for 1 record/);
+  assert.doesNotMatch(result.warnings[0]!, /is missing/);
+  assert.ok(result.warnings[0]!.includes(f.policies[0].id));
+});
+
 test("R39: a restricted record's passage in the committed file is an error (the file is public)", () => {
   const f = restricted();
   const leaked = { ...f, passages: [...f.passages, f.privatePassages[0]] };
