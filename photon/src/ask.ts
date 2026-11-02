@@ -13,6 +13,8 @@ export interface Env {
   OPENAI_API_KEY?: string;
   ELEVENLABS_API_KEY?: string;
   TELEGRAM_BOT_TOKEN?: string;
+  /** Unset, /telegram is a stub: it answers "ok" and runs nothing. */
+  TELEGRAM_ENABLED?: string;
   /** When set, /telegram only accepts requests that carry it in X-Telegram-Bot-Api-Secret-Token (set the same value in setWebhook). */
   TELEGRAM_WEBHOOK_SECRET?: string;
   /** The Workers Rate Limiting binding (wrangler.jsonc `ratelimits`): 10 questions a minute for each IP address. */

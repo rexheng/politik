@@ -71,7 +71,7 @@ describe("surfaces", () => {
     mock.restoreAll();
   });
 
-  const env = (over: Partial<Env> = {}) => ({ DB: db, ...over }) as unknown as Env;
+  const env = (over: Partial<Env> = {}) => ({ DB: db, TELEGRAM_ENABLED: "1", ...over }) as unknown as Env;
   const post = (path: string, body: unknown, e: Env = env()) =>
     worker.fetch(new Request(`https://politik.test${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: typeof body === "string" ? body : JSON.stringify(body) }), e);
   const KEYS = ["asOf", "citations", "followUps", "mode", "reply"];
@@ -1249,7 +1249,7 @@ describe("surfaces", () => {
   describe("a Telegram handler that throws is an answer, not an unhandled rejection", () => {
     test("worker.fetch resolves with a response when handleTelegram throws", async () => {
       const exploding = new Proxy(
-        { DB: undefined } as unknown as Env,
+        { DB: undefined, TELEGRAM_ENABLED: "1" } as unknown as Env,
         {
           get(target, key) {
             if (key === "TELEGRAM_WEBHOOK_SECRET") throw new Error("boom");
@@ -1303,6 +1303,25 @@ describe("surfaces", () => {
       const good = await withFetch(() => new Response("audio", { headers: { "content-type": "audio/mpeg" } }), () => worker.fetch(request(), env({ DEEPGRAM_API_KEY: "dg-test" })));
       assert.equal(good.result.status, 200);
       assert.equal(await good.result.text(), "audio");
+    });
+  });
+
+  describe("Telegram is a stub until TELEGRAM_ENABLED is set", () => {
+    test("an update gets 200 ok, and nothing is sent, run or counted", async () => {
+      const keys: string[] = [];
+      const limiter: RateLimiter = { limit: async ({ key }) => (keys.push(key), { success: true }) };
+      const { result, urls } = await withFetch(
+        () => new Response("{}"),
+        () =>
+          worker.fetch(
+            new Request("https://politik.test/telegram", { method: "POST", headers: { "CF-Connecting-IP": "91.108.4.1" }, body: JSON.stringify({ message: { chat: { id: 7 }, text: "hi" } }) }),
+            env({ TELEGRAM_ENABLED: undefined, TELEGRAM_BOT_TOKEN: "tok", ASK_LIMITER: limiter }),
+          ),
+      );
+      assert.equal(result.status, 200);
+      assert.equal(await result.text(), "ok");
+      assert.deepEqual(urls, [], "no Telegram send and no model call");
+      assert.deepEqual(keys, [], "no rate-limit token taken");
     });
   });
 

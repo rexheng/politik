@@ -238,6 +238,8 @@ export default {
       }
 
       if (url.pathname === "/telegram" && request.method === "POST") {
+        // A stub until TELEGRAM_ENABLED is set: the update gets "ok" (Telegram sends it again on an error) and nothing runs.
+        if (!env.TELEGRAM_ENABLED?.trim()) return new Response("ok");
         const { handleTelegram } = await import("./telegram.ts");
         return await handleTelegram(request, env);
       }

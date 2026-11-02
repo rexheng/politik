@@ -12,5 +12,7 @@ GROQ_CHAT_MODEL=
 GROQ_ROUTER_MODEL=
 # Optional: the model that judges faithfulness in `pnpm eval:chat` (default openai/gpt-oss-20b).
 GROQ_JUDGE_MODEL=
+# Optional: unset, /telegram is a stub that answers "ok" and runs nothing.
+TELEGRAM_ENABLED=
 # Optional: when set, /telegram only accepts requests that carry it (register the webhook with the same secret_token).
 TELEGRAM_WEBHOOK_SECRET=

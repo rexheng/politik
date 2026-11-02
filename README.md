@@ -48,7 +48,7 @@ Two Workers Rate Limiting bindings count requests for each IP address (`ratelimi
 
 The address is `CF-Connecting-IP`; an IPv6 address counts as its /64 prefix, because one person holds a whole /64 and can change address within it. A caller over the limit gets a normal answer with `mode: "fallback"`, no citations and the line "Politik is busy — please try again in a minute." (HTTP 200 on `/api/ask`, so the page shows it; the voice route speaks it and Telegram sends it). Every other route answers HTTP 429 with `{"error": "Politik is busy — please try again in a minute."}`, before a socket opens and before Deepgram is contacted; the page reads the 429 of a spoken reply as it is, and, because a browser cannot see why a socket was refused, asks the address of a socket again with a plain GET (which also takes a token from `VOICE_LIMITER`); either way it shows the line in the transcript. Requests to `localhost` (`wrangler dev`) and runs without a binding are never limited. Telegram sends every user's updates from its own few addresses, so when `TELEGRAM_WEBHOOK_SECRET` is set and the update carried it, its updates are counted for each chat (`telegram:<chat id>`) and every chat has its own allowance. **Set `TELEGRAM_WEBHOOK_SECRET` before the bot goes public.** Without it anyone can post updates with made-up chat ids, so updates are counted by the sender's address instead (all of Telegram's users would then share one allowance, and the bot would be open to anyone who finds the URL).
 
-Telegram: set `TELEGRAM_WEBHOOK_SECRET` (a Wrangler secret) and register the webhook with the same value as `secret_token`:
+Telegram is a stub for now. Until `TELEGRAM_ENABLED` is set, `/telegram` answers 200 `ok` to every update, and nothing is sent, run or counted. To turn the bot on, set `TELEGRAM_ENABLED=1` and `TELEGRAM_WEBHOOK_SECRET` (both Wrangler secrets) and register the webhook with the same value as `secret_token`:
 
 ```
 curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
@@ -110,6 +110,7 @@ Put secrets in `.dev.vars`. Git ignores that file. Key names:
 - MAPBOX_ACCESS_TOKEN
 - BROWSERBASE_API_KEY
 - TELEGRAM_BOT_TOKEN
+- TELEGRAM_ENABLED (optional; unset, the Telegram route is a stub)
 - TELEGRAM_WEBHOOK_SECRET (required before the bot goes public; see Limits)
 - OPENAI_API_KEY
 - ELEVENLABS_API_KEY
