@@ -38,13 +38,14 @@ function fakeFetch(...script: Array<Response | Error | ((i: number) => Response)
   return { impl, calls };
 }
 
-function client(fake: ReturnType<typeof fakeFetch>, opts: { model?: string; maxRetries?: number; reasoningEffort?: "low" | "medium" | "high" } = {}) {
+function client(fake: ReturnType<typeof fakeFetch>, opts: { model?: string; maxRetries?: number; maxWaitMs?: number; reasoningEffort?: "low" | "medium" | "high" } = {}) {
   const sleeps: number[] = [];
   const llm = groqLlm({
     apiKey: "gsk_test_key",
     model: opts.model ?? "openai/gpt-oss-120b",
     fetchImpl: fake.impl,
     maxRetries: opts.maxRetries,
+    maxWaitMs: opts.maxWaitMs,
     reasoningEffort: opts.reasoningEffort,
     sleep: async (ms) => void sleeps.push(ms),
   });
@@ -155,6 +156,21 @@ test("a retry-after longer than the cap fails at once instead of sleeping", asyn
   await assert.rejects(ask(), /429/);
   assert.equal(fake.calls.length, 1);
   assert.deepEqual(sleeps, []);
+});
+
+test("maxWaitMs lowers the cap: a 429 that asks for a longer wait fails at once with its status", async () => {
+  const fake = fakeFetch(error(429, "tokens per minute", { "retry-after": "17" }), ok(goodReply));
+  const { ask, sleeps } = client(fake, { maxWaitMs: 3000 });
+  await assert.rejects(ask(), (e: LlmError) => e.status === 429 && e.kind === "http");
+  assert.equal(fake.calls.length, 1);
+  assert.deepEqual(sleeps, []);
+});
+
+test("maxWaitMs still allows a wait inside it", async () => {
+  const fake = fakeFetch(error(429, "tokens per minute", { "retry-after": "2" }), ok(goodReply));
+  const { ask, sleeps } = client(fake, { maxWaitMs: 3000 });
+  assert.deepEqual(await ask(), goodReply);
+  assert.deepEqual(sleeps, [2000]);
 });
 
 test("5xx responses and network errors are retried too", async () => {

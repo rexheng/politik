@@ -10,7 +10,7 @@ import type { Llm } from "../llm/groq.ts";
 import { searchPublicBluesky } from "../sources/bsky-search.ts";
 import type { PublicBskyPost } from "../sources/bsky-search.ts";
 import { citationOf, finalize, stripMarkers } from "./cite.ts";
-import { compose, COMPOSE_TIMEOUT_MS, MAX_COMPOSE_SOURCES, shapeOf } from "./compose.ts";
+import { compose, COMPOSE_MAX_WAIT_MS, COMPOSE_TIMEOUT_MS, MAX_COMPOSE_SOURCES, shapeOf } from "./compose.ts";
 import { rank, typesafeScorer } from "./rank.ts";
 import type { Scorer } from "./rank.ts";
 import { retrieve } from "./retrieve.ts";
@@ -169,7 +169,7 @@ export function chatDepsFromEnv(env: ChatEnv, make: typeof groqLlm = groqLlm): C
   if (groqKey) {
     const models = resolveChatModels({ GROQ_CHAT_MODEL: env.GROQ_CHAT_MODEL, GROQ_ROUTER_MODEL: env.GROQ_ROUTER_MODEL });
     deps.router = make({ apiKey: groqKey, model: models.router, timeoutMs: ROUTER_TIMEOUT_MS, maxRetries: 0, reasoningEffort: "low" });
-    deps.composer = make({ apiKey: groqKey, model: models.compose, timeoutMs: COMPOSE_TIMEOUT_MS, maxRetries: 1, reasoningEffort: "low" });
+    deps.composer = make({ apiKey: groqKey, model: models.compose, timeoutMs: COMPOSE_TIMEOUT_MS, maxRetries: 1, maxWaitMs: COMPOSE_MAX_WAIT_MS, reasoningEffort: "low" });
   }
   const typesafeKey = env.TYPESAFE_API_KEY?.trim();
   if (typesafeKey) deps.scorer = typesafeScorer(typesafeKey);

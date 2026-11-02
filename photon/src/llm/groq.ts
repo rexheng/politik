@@ -108,6 +108,8 @@ export type GroqOptions = {
   baseDelayMs?: number;
   /** How long one HTTP exchange (request sent to body read) may take before it is aborted. A timeout is retried like any network error. Default 60000. */
   timeoutMs?: number;
+  /** The longest wait a 429 or 5xx may ask for; a longer one is reported at once instead of slept through. Default 60000. */
+  maxWaitMs?: number;
   /**
    * How hard the model thinks before it answers, sent as `reasoning_effort` (Groq's gpt-oss models take low, medium or
    * high and default to medium). Less thinking is fewer tokens and a faster answer, which matters on a small
@@ -161,6 +163,7 @@ export function groqLlm(opts: GroqOptions): Llm {
   const maxRetries = opts.maxRetries ?? 4;
   const baseDelay = opts.baseDelayMs ?? 2000;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const maxWaitMs = opts.maxWaitMs ?? MAX_WAIT_MS;
   const effort = opts.reasoningEffort && supportsReasoningEffort(model) ? { reasoning_effort: opts.reasoningEffort } : {};
   if (!(timeoutMs > 0) || !Number.isFinite(timeoutMs)) throw new RangeError(`timeoutMs must be a positive number, got ${timeoutMs}`);
   const doFetch: typeof fetch = opts.fetchImpl ?? ((input, init) => fetch(input, init));
@@ -227,7 +230,7 @@ export function groqLlm(opts: GroqOptions): Llm {
       }
       if ((res.status === 429 || res.status >= 500) && attempt < maxRetries) {
         const wait = retryAfterMs(res.headers.get("retry-after")) ?? backoff;
-        if (wait > MAX_WAIT_MS) throw apiError(res.status, text, ` (retry-after ${Math.ceil(wait / 1000)}s is too long to wait)`);
+        if (wait > maxWaitMs) throw apiError(res.status, text, ` (retry-after ${Math.ceil(wait / 1000)}s is too long to wait)`);
         await sleep(wait);
         continue;
       }

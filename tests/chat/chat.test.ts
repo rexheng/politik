@@ -910,7 +910,7 @@ describe("chatDepsFromEnv", () => {
     const byModel = Object.fromEntries(made.map((m) => [m.model, m]));
     assert.deepEqual(Object.keys(byModel).sort(), ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]);
     assert.deepEqual(byModel["openai/gpt-oss-20b"], { apiKey: "gsk-1", model: "openai/gpt-oss-20b", timeoutMs: 3000, maxRetries: 0, reasoningEffort: "low" }, "router");
-    assert.deepEqual(byModel["openai/gpt-oss-120b"], { apiKey: "gsk-1", model: "openai/gpt-oss-120b", timeoutMs: 8000, maxRetries: 1, reasoningEffort: "low" }, "compose");
+    assert.deepEqual(byModel["openai/gpt-oss-120b"], { apiKey: "gsk-1", model: "openai/gpt-oss-120b", timeoutMs: 8000, maxRetries: 1, maxWaitMs: 3000, reasoningEffort: "low" }, "compose");
   });
 
   test("GROQ_ROUTER_MODEL and GROQ_CHAT_MODEL choose the models", () => {

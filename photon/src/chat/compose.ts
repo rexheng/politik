@@ -10,6 +10,8 @@ import type { ComposeOut, Route, Source } from "./types.ts";
 
 /** The compose model gets this long to answer (the 8,000 ms compose budget); after that `compose` throws and the caller falls back. */
 export const COMPOSE_TIMEOUT_MS = 8000;
+/** A 429 asking for a longer wait than this goes straight to the fallback: the budget would run out before the retry could answer. */
+export const COMPOSE_MAX_WAIT_MS = 3000;
 
 /** The most follow-up questions an answer carries. */
 export const MAX_FOLLOW_UPS = 3;
